@@ -1,0 +1,27 @@
+[package]
+name = "rust-ascend-driver"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Dynamically loaded AscendCL and ACLNN interfaces with native kernel execution"
+
+[features]
+default = []
+common-ir = ["dep:rust-ascend-compiler", "dep:ruda-core"]
+
+[dependencies]
+libloading = "=0.8.9"
+sha2 = "=0.10.9"
+rust-ascend-compiler = { workspace = true, features = ["ascend"], optional = true }
+ruda-core = { workspace = true, optional = true }
+
+[[example]]
+name = "common_ir_validate"
+path = "examples/common_ir_validate.rs"
+required-features = ["common-ir"]
+
+[[example]]
+name = "common_rows_validate"
+path = "examples/common_rows_validate.rs"
+required-features = ["common-ir"]

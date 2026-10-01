@@ -1,0 +1,16 @@
+[package]
+name = "rust-ascend-kernels"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license = "MIT"
+description = "Rust-authored Ascend BF16 device programs and instruction lowering"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rust-ascend-emit"
+path = "src/main.rs"
+
+[dependencies]

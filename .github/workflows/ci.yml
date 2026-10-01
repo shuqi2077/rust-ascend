@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: '2'
+  CARGO_INCREMENTAL: '0'
+  RUST_TEST_THREADS: '2'
+  RUST_MIN_STACK: '16777216'
+
+jobs:
+  python:
+    name: Host tool and reference tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -r tools/ascend/requirements-test.txt
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tools/ascend/tests -q -p no:cacheprovider
+  rust:
+    name: Rust libraries and production CCE generation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup override set 1.97.1
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-
+      - name: Test all crates, examples and shared-IR PTX compatibility
+        run: cargo test --locked --release --workspace --all-features --all-targets
+      - name: Check minimal compiler and driver features
+        run: |
+          cargo check --locked -p rust-ascend-compiler --no-default-features
+          cargo check --locked -p rust-ascend-driver --no-default-features
+      - name: Generate CCE with the production Rust programs
+        run: |
+          cargo run --locked --release -p rust-ascend --example softmax > "$RUNNER_TEMP/softmax.asc"
+          python3 tools/ascend/build_common_ir.py --emit-only --op silu_mul --elements 1025 --out "$RUNNER_TEMP/map"
+          python3 tools/ascend/build_common_ir.py --emit-only --op rms_norm --elements 12288 --row-width 4096 --out "$RUNNER_TEMP/rows"
+          python3 tools/ascend/build_deepgemm.py --emit-only --out "$RUNNER_TEMP/bf16"

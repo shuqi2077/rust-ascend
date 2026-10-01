@@ -1,0 +1,7 @@
+/target/
+__pycache__/
+.pytest_cache/
+*.pyc
+/validation/
+/results/
+*.log

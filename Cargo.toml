@@ -1,0 +1,30 @@
+[workspace]
+members = ["rust-ascend-compiler", "rust-ascend-driver", "rust-ascend-kernels"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/shuqi2077/rust-ascend"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+ruda-core = { version = "=0.1.3", default-features = false, features = ["ir", "compiler-std"] }
+rust-ascend-compiler = { path = "rust-ascend-compiler", version = "0.1.0", default-features = false }
+rust-ascend-driver = { path = "rust-ascend-driver", version = "0.1.0", default-features = false }
+rust-ascend-kernels = { path = "rust-ascend-kernels", version = "0.1.0" }
+
+[package]
+name = "rust-ascend"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Rust Ascend CANN runtime, common-IR compiler and device kernels"
+readme = "README.md"
+
+[dependencies]
+ruda-core.workspace = true
+rust-ascend-compiler = { workspace = true, features = ["ascend"] }
+rust-ascend-driver = { workspace = true, features = ["common-ir"] }
+rust-ascend-kernels.workspace = true
