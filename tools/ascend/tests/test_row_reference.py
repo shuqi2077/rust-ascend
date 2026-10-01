@@ -97,3 +97,27 @@ def test_32_lane_semantics_do_not_cross_rows(width):
     x=np.repeat(np.arange(rows,dtype=np.float32)[:,None],width,axis=1)
     np.testing.assert_array_equal(reduce_row(x)[:,0],np.arange(rows,dtype=np.float32)*width)
     np.testing.assert_array_equal(softmax(x),np.full_like(x,1/width))
+
+
+@pytest.mark.parametrize('rows,width',[(0,32),(1,32),(3,96),(7,256),(3,4096)])
+@pytest.mark.parametrize('constant',[False,True])
+def test_layernorm_affine_and_input_gradient_vs_torch(rows,width,constant):
+    rng=np.random.default_rng(width+3)
+    x=(np.full((rows,width),4.) if constant else rng.normal(size=(rows,width))).astype(np.float32)
+    w=rng.normal(size=width).astype(np.float32)
+    b=rng.normal(size=width).astype(np.float32)
+    dy=rng.normal(size=x.shape).astype(np.float32)
+    mean=reduce_row(x)/np.float32(width)
+    centered=x-mean
+    variance=reduce_row(centered*centered)/np.float32(width)
+    r=np.float32(1)/np.sqrt(variance+np.float32(1e-5))
+    normalized=centered*r
+    y=normalized*w+b
+    g=dy*w
+    dx=r*(g-reduce_row(g)/np.float32(width)-normalized*(reduce_row(g*normalized)/np.float32(width)))
+    t=torch.tensor(x,dtype=torch.float64,requires_grad=True)
+    ref=torch.nn.functional.layer_norm(t,(width,),torch.tensor(w,dtype=torch.float64),torch.tensor(b,dtype=torch.float64),eps=1e-5)
+    (ref*torch.tensor(dy,dtype=torch.float64)).sum().backward()
+    assert mean.shape==r.shape==(rows,1)
+    np.testing.assert_allclose(y,ref.detach().numpy(),rtol=1e-4,atol=2e-6)
+    np.testing.assert_allclose(dx,t.grad.numpy(),rtol=2e-4,atol=2e-4 if constant else 3e-6)

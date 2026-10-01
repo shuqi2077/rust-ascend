@@ -245,7 +245,7 @@ pub(super) fn lower(mut k: KernelDefinition, elements: u64, width: u32) -> Resul
         if b.ty != fp32() || b.has_extended_meta { return Err(unsupported("row bindings must be scalar FP32 without extended metadata")); }
         if b.visibility == Visibility::Read { reads += 1; } else { writes += 1; }
     }
-    if reads > 4 || writes == 0 || writes > 4 { return Err(unsupported("row compiler supports 1..4 outputs and at most 4 inputs")); }
+    if reads > 5 || writes == 0 || writes > 4 { return Err(unsupported("row compiler supports 1..4 outputs and at most 5 inputs, up to 8 bindings total")); }
     let count = k.buffers.len(); let mut l = Lower { name: k.options.kernel_name, args: k.buffers,
         kinds: vec![None; count], nodes: vec![], uniform: vec![], stores: vec![], writes: vec![BTreeSet::new(); count],
         values: HashMap::new(), loads: HashMap::new(), constants: HashMap::new(), width, rows: elements / width as u64 };

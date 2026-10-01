@@ -53,6 +53,22 @@ let dx = x.grad(&gradients).unwrap();
 
 完整进程初始化与调用见 [tensor 示例](examples/tensor.rs)：`cargo run --release --example tensor`。
 
+## 原生 LayerNorm 公共 IR
+
+`RowProgram::LayerNorm` 接收连续 FP32 的 `X[rows,width]`、`weight[width]`、`bias[width]`，输出 `Y[rows,width]`、`mean[rows]` 和 `rstd[rows]`。方差按行宽计算，使用中心化平方和。
+
+`RowProgram::LayerNormInputBackward` 接收 `X`、`dY`、`weight`、保存的 `mean`、`rstd`，返回 `dX`。前向统计量可直接保留在设备端传给反向。两条路径都使用公共 Rust IR、既有 32-lane 行降级和 CCE 向量指令，不调用 ACLNN LayerNorm。宽度为 32～4096 且是 32 的倍数；不包含 weight/bias 梯度，也不会自动注册为 RUDA 张量后端的 LayerNorm 分发。
+
+在配置 CANN 的编译／设备机器上构建三行、宽度 96 的示例，输出目录必须尚不存在：
+
+```bash
+python tools/ascend/build_common_ir.py --toolkit "$ASCEND_HOME_PATH" --op layer_norm --elements 288 --row-width 96 --out ./target/layernorm-forward
+python tools/ascend/build_common_ir.py --toolkit "$ASCEND_HOME_PATH" --op layer_norm_input_backward --elements 288 --row-width 96 --out ./target/layernorm-backward
+cargo run --locked --release --example layer_norm -- ./target/layernorm-forward ./target/layernorm-backward
+```
+
+完整设备前向 → 保存统计量 → 输入反向调用见 [layer_norm 示例](examples/layer_norm.rs)。
+
 ## 生成与执行
 
 ```bash
@@ -81,7 +97,7 @@ python tools/ascend/build_deepgemm.py --emit-only --out ./target/bf16-source
 ## 支持范围
 
 - 公共编译器：连续 FP32 逐元素程序；行宽为 32～4096、且为 32 的倍数。
-- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm，以及 Softmax/LogSoftmax 和 RMSNorm 的输入梯度。
+- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度。
 - BF16 矩阵：direct-store Dense/Batched NN/NT/TN/TT、对齐的 MGrouped NT，BF16/FP32 输出。
 - 设备代码目标为 Ascend950DT / dav-c310；不自动推断或替换目标型号。
 - Rust 程序生成 CCE，再由 Bisheng 编译为设备机器码，不是直接 Rust → 昇腾 ISA。

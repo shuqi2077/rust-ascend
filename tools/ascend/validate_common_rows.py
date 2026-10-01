@@ -20,7 +20,7 @@ def validate_device_log(text: str) -> None:
     cases = [(op, int(r), int(w)) for op, r, w in found]
     if len(cases) != len(EXPECTED) or set(cases) != EXPECTED:
         raise RuntimeError("missing, duplicate or unexpected real-device row cases")
-    if len(re.findall(r"^RUDA_ASCEND_ROWS_DEVICE_OK cases=45 launches=72$", text, re.M)) != 1:
+    if len(re.findall(r"^RUDA_ASCEND_ROWS_DEVICE_OK cases=55 launches=88$", text, re.M)) != 1:
         raise RuntimeError("missing exact native execution marker")
     if re.search(r"\bpassed=false\b|\bSKIPPED\b|\bFAILED\b", text):
         raise RuntimeError("failed or skipped device work")
@@ -58,7 +58,7 @@ def main() -> int:
         text = run([cargo, "run", "--locked", "--release", "-p", "rust-ascend-driver", "--features", "common-ir",
                     "--example", "common_rows_validate", "--", str(root)], out / "device.log")
         validate_device_log(text)
-        state.update(status="passed", device_cases=len(EXPECTED), device_launches=72)
+        state.update(status="passed", device_cases=len(EXPECTED), device_launches=88)
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
         state["error"] = str(error)
     (out / "summary.json").write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n")

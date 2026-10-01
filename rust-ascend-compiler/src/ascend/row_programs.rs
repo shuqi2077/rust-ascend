@@ -12,17 +12,20 @@ use ruda_core::{ir::*, kernel::{KernelArg, KernelDefinition, KernelOptions, Visi
 pub enum RowProgram {
     Sum, Mean, Max, Softmax, LogSoftmax, RmsNorm,
     SoftmaxBackward, LogSoftmaxBackward, RmsNormInputBackward,
+    LayerNorm, LayerNormInputBackward,
 }
 impl RowProgram {
-    pub const ALL: [Self; 9] = [Self::Sum, Self::Mean, Self::Max, Self::Softmax,
+    pub const ALL: [Self; 11] = [Self::Sum, Self::Mean, Self::Max, Self::Softmax,
         Self::LogSoftmax, Self::RmsNorm, Self::SoftmaxBackward,
-        Self::LogSoftmaxBackward, Self::RmsNormInputBackward];
+        Self::LogSoftmaxBackward, Self::RmsNormInputBackward, Self::LayerNorm,
+        Self::LayerNormInputBackward];
     pub fn name(self) -> &'static str { match self {
         Self::Sum => "row_sum", Self::Mean => "row_mean", Self::Max => "row_max",
         Self::Softmax => "softmax", Self::LogSoftmax => "log_softmax",
         Self::RmsNorm => "rms_norm", Self::SoftmaxBackward => "softmax_backward",
         Self::LogSoftmaxBackward => "log_softmax_backward",
         Self::RmsNormInputBackward => "rms_norm_input_backward",
+        Self::LayerNorm => "layer_norm", Self::LayerNormInputBackward => "layer_norm_input_backward",
     }}
     pub fn parse(s: &str) -> Option<Self> { Self::ALL.into_iter().find(|p| p.name() == s) }
 }
@@ -94,16 +97,20 @@ impl Builder {
 /// Fixed FP32 row width: 32..4096 in multiples of 32. Epsilon is a finite,
 /// positive compile-time value for RMSNorm; no runtime scalar or CPU fallback.
 /// RMSNorm emits [Y, rstd]; input backward takes [X, dY, weight, rstd].
+/// LayerNorm takes [X, weight, bias] and emits [Y, mean, rstd]; input backward
+/// takes [X, dY, weight, mean, rstd] and emits dX. Variance uses divisor width.
 /// Affine weight gradient is deliberately not claimed by input-backward.
 pub fn definition(op: RowProgram, width: u32, epsilon: f32) -> Result<KernelDefinition> {
     if !(32..=4096).contains(&width) || width % 32 != 0 { return Err(invalid("row width must be 32..4096 and divisible by 32")); }
     if !epsilon.is_finite() || epsilon <= 0.0 { return Err(invalid("epsilon must be finite and positive")); }
     let mut b = Builder::new(format!("ruda_cann_{}", op.name()), width);
-    let count = match op { RowProgram::RmsNormInputBackward => 4,
+    let count = match op { RowProgram::LayerNormInputBackward => 5,
+        RowProgram::LayerNorm => 3, RowProgram::RmsNormInputBackward => 4,
         RowProgram::RmsNorm | RowProgram::SoftmaxBackward | RowProgram::LogSoftmaxBackward => 2, _ => 1 };
     let input: Vec<_> = (0..count).map(|_| b.array(false)).collect();
     let output = b.array(true);
     let stat = if op == RowProgram::RmsNorm { Some(b.array(true)) } else { None };
+    let layer_stats = if op == RowProgram::LayerNorm { Some((b.array(true), b.array(true))) } else { None };
     let x = b.chunks(input[0], false);
     match op {
         RowProgram::Sum | RowProgram::Mean | RowProgram::Max => {
@@ -139,6 +146,34 @@ pub fn definition(op: RowProgram, width: u32, epsilon: f32) -> Result<KernelDefi
                 if op == RowProgram::SoftmaxBackward { let s = b.sub(g, dot); b.mul(a, s) }
                 else { let s = b.mul(a, dot); b.sub(g, s) }
             }).collect(); b.write_row(output, &dx);
+        }
+        RowProgram::LayerNorm => {
+            let sum = b.reduce(&x, false); let mean = b.div(sum, constant(width as f32));
+            let centered: Vec<_> = x.iter().map(|&v| b.sub(v, mean)).collect();
+            let square: Vec<_> = centered.iter().map(|&v| b.mul(v, v)).collect();
+            let sum = b.reduce(&square, false); let variance = b.div(sum, constant(width as f32));
+            let shifted = b.add(variance, constant(epsilon)); let r = b.unary(Arithmetic::InverseSqrt, shifted);
+            let weight = b.chunks(input[1], true); let bias = b.chunks(input[2], true);
+            let y: Vec<_> = centered.iter().zip(weight).zip(bias).map(|((&v, w), bias)| {
+                let normalized = b.mul(v, r); let affine = b.mul(normalized, w); b.add(affine, bias)
+            }).collect();
+            b.write_row(output, &y);
+            let (mean_out, rstd_out) = layer_stats.unwrap();
+            b.write_scalar(mean_out, mean); b.write_scalar(rstd_out, r);
+        }
+        RowProgram::LayerNormInputBackward => {
+            let dy = b.chunks(input[1], false); let weight = b.chunks(input[2], true);
+            let row = b.row; let mean = b.read(input[3], row); let r = b.read(input[4], row);
+            let normalized: Vec<_> = x.iter().map(|&v| { let c = b.sub(v, mean); b.mul(c, r) }).collect();
+            let g: Vec<_> = dy.iter().zip(weight).map(|(&v, w)| b.mul(v, w)).collect();
+            let sum = b.reduce(&g, false); let mean_g = b.div(sum, constant(width as f32));
+            let gy: Vec<_> = g.iter().zip(&normalized).map(|(&g, &y)| b.mul(g, y)).collect();
+            let sum = b.reduce(&gy, false); let mean_gy = b.div(sum, constant(width as f32));
+            let dx: Vec<_> = g.iter().zip(normalized).map(|(&g, y)| {
+                let correction = b.mul(y, mean_gy); let centered = b.sub(g, mean_g);
+                let v = b.sub(centered, correction); b.mul(v, r)
+            }).collect();
+            b.write_row(output, &dx);
         }
         RowProgram::RmsNormInputBackward => {
             let dy = b.chunks(input[1], false); let w = b.chunks(input[2], true);

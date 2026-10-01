@@ -66,15 +66,15 @@ def test_map_op_does_not_gain_row_semantics():
 
 def complete_log():
     return '\n'.join([f'RUDA_ASCEND_ROW_CASE op={op} rows={r} width={w} passed=true'
-        for op,r,w in sorted(validation.EXPECTED)]+['RUDA_ASCEND_ROWS_DEVICE_OK cases=45 launches=72'])
+        for op,r,w in sorted(validation.EXPECTED)]+['RUDA_ASCEND_ROWS_DEVICE_OK cases=55 launches=88'])
 
 
 def test_strict_device_marker_parsing():validation.validate_device_log(complete_log())
 
 
 @pytest.mark.parametrize("edit",[
-    lambda t:t.replace('cases=45','cases=44'),
-    lambda t:t.replace('launches=72','launches=0'),
+    lambda t:t.replace('cases=55','cases=54'),
+    lambda t:t.replace('launches=88','launches=0'),
     lambda t:'\n'.join(t.splitlines()[1:]),
     lambda t:t+'\n'+t.splitlines()[0],
     lambda t:t+'\nSKIPPED',
@@ -109,3 +109,24 @@ def test_no_tool_replaces_production_rust_emitter():
     assert 'row_width is not None' in text and '"--row-width", str(row_width)' in text
     assert 'missing cargo/rustc' in text
     assert text.index('run(link_cmd') < text.index('(generated / "kernel.ruda").write_text')
+
+
+def test_layernorm_contracts_include_both_row_statistics():
+    base = contract().replace('bindings=4', 'bindings=6').split('binding_0=')[0]
+    forward = base.replace('rms_norm', 'layer_norm') + (
+        'binding_0=0,r,768\nbinding_1=1,r,256\nbinding_2=2,r,256\n'
+        'binding_3=3,w,768\nbinding_4=4,w,12\nbinding_5=5,w,12\n')
+    backward = base.replace('rms_norm', 'layer_norm_input_backward') + (
+        'binding_0=0,r,768\nbinding_1=1,r,768\nbinding_2=2,r,256\n'
+        'binding_3=3,r,12\nbinding_4=4,r,12\nbinding_5=5,w,768\n')
+    assert build.parse_contract(forward)['bindings'] == '6'
+    assert build.parse_contract(backward)['binding_4'] == '4,r,12'
+    with pytest.raises(ValueError):
+        build.parse_contract(backward.replace('binding_4=4,r,12', 'binding_4=4,r,16'))
+
+
+def test_previous_row_suite_does_not_satisfy_extended_device_suite():
+    old = '\n'.join(line for line in complete_log().splitlines() if 'op=layer_norm' not in line)
+    old = old.replace('cases=55 launches=88', 'cases=45 launches=72')
+    with pytest.raises(RuntimeError):
+        validation.validate_device_log(old)

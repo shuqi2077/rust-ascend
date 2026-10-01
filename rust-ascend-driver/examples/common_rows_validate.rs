@@ -9,6 +9,15 @@ fn inputs(op: RowProgram, rows: usize, width: usize) -> Vec<Vec<f32>> {
     let dy: Vec<f32> = (0..rows*width).map(|i| (i%13) as f32/9.0-0.5).collect();
     let weight: Vec<f32> = (0..width).map(|i| 0.7+(i%7) as f32/13.0).collect();
     match op {
+        RowProgram::LayerNorm => vec![x, weight, (0..width).map(|i| (i%5) as f32/11.0-0.2).collect()],
+        RowProgram::LayerNormInputBackward => {
+            let mean: Vec<f32> = x.chunks(width).map(|row| (row.iter().map(|&v| v as f64).sum::<f64>()/width as f64) as f32).collect();
+            let rstd: Vec<f32> = x.chunks(width).map(|row| {
+                let m = row.iter().map(|&v| v as f64).sum::<f64>()/width as f64;
+                (row.iter().map(|&v| (v as f64-m).powi(2)).sum::<f64>()/width as f64+1e-5).sqrt().recip() as f32
+            }).collect();
+            vec![x, dy, weight, mean, rstd]
+        }
         RowProgram::RmsNorm => vec![x, weight],
         RowProgram::RmsNormInputBackward => {
             let r: Vec<f32> = x.chunks(width).map(|row| (row.iter().map(|&v| (v as f64).powi(2)).sum::<f64>()/width as f64+1e-5).sqrt().recip() as f32).collect();
@@ -25,6 +34,7 @@ fn reference(op: RowProgram, rows: usize, width: usize, x: &[Vec<f32>]) -> Vec<V
     let scalar = matches!(op, RowProgram::Sum | RowProgram::Mean | RowProgram::Max);
     let mut out = vec![vec![0.0; if scalar { rows } else { rows*width }]];
     if op == RowProgram::RmsNorm { out.push(vec![0.0; rows]); }
+    if op == RowProgram::LayerNorm { out.push(vec![0.0; rows]); out.push(vec![0.0; rows]); }
     for row in 0..rows {
         let offset = row*width; let a: Vec<f64> = x[0][offset..offset+width].iter().map(|&v| v as f64).collect();
         match op {
@@ -36,6 +46,20 @@ fn reference(op: RowProgram, rows: usize, width: usize, x: &[Vec<f32>]) -> Vec<V
                 let m = a.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 let exp: Vec<f64> = a.iter().map(|v| (v-m).exp()).collect(); let sum: f64 = exp.iter().sum();
                 for j in 0..width { out[0][offset+j] = (if op == RowProgram::Softmax { exp[j]/sum } else { a[j]-m-sum.ln() }) as f32; }
+            }
+            RowProgram::LayerNorm => {
+                let mean = a.iter().sum::<f64>()/width as f64;
+                let variance = a.iter().map(|&v| (v-mean).powi(2)).sum::<f64>()/width as f64;
+                let r = (variance+1e-5).sqrt().recip(); out[1][row] = mean as f32; out[2][row] = r as f32;
+                for j in 0..width { out[0][offset+j] = ((a[j]-mean)*r*x[1][j] as f64+x[2][j] as f64) as f32; }
+            }
+            RowProgram::LayerNormInputBackward => {
+                let mean = x[3][row] as f64; let r = x[4][row] as f64;
+                let normalized: Vec<_> = a.iter().map(|&v| (v-mean)*r).collect();
+                let g: Vec<_> = x[1][offset..offset+width].iter().zip(&x[2]).map(|(&v,&w)| v as f64*w as f64).collect();
+                let mean_g = g.iter().sum::<f64>()/width as f64;
+                let mean_gy = g.iter().zip(&normalized).map(|(g,y)| g*y).sum::<f64>()/width as f64;
+                for j in 0..width { out[0][offset+j] = (r*(g[j]-mean_g-normalized[j]*mean_gy)) as f32; }
             }
             RowProgram::RmsNorm => {
                 let r = (a.iter().map(|v| v*v).sum::<f64>()/width as f64+1e-5).sqrt().recip();
@@ -89,6 +113,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         launches += program.stats().launches; cases += 1;
         println!("RUDA_ASCEND_ROW_CASE op={} rows={rows} width={width} passed=true", op.name());
     }}
-    if cases != 45 || launches != 72 { return Err("incomplete device coverage".into()); }
+    if cases != 55 || launches != 88 { return Err("incomplete device coverage".into()); }
     println!("RUDA_ASCEND_ROWS_DEVICE_OK cases={cases} launches={launches}"); Ok(())
 }

@@ -129,7 +129,8 @@ fn mutated(k: KernelDefinition) -> Result<AscendKernel> {
 #[test] fn exact_same_row_ir_compiles_as_ptx_when_enabled() {
     #[cfg(feature = "ptx")] {
         use crate::ptx::*;
-        for op in [RowProgram::RmsNorm, RowProgram::Softmax, RowProgram::RmsNormInputBackward] {
+        for op in [RowProgram::RmsNorm, RowProgram::Softmax, RowProgram::RmsNormInputBackward,
+            RowProgram::LayerNorm, RowProgram::LayerNormInputBackward] {
             let ir = row_programs::definition(op, 64, 1e-5).unwrap();
             let ptx = PtxCompiler.compile(ir.clone(), &PtxCompilationOptions { target: Some(PtxTarget { version: (8, 0), sm: 75 }) }, ExecutionMode::Checked, UIntKind::U64.into()).unwrap();
             assert!(ptx.source.contains(".entry")); assert!(mutated(ir).is_ok());
@@ -195,4 +196,81 @@ fn eval(op: RowProgram, width: u32, input: &[Vec<f32>]) -> Vec<Vec<f32>> {
 }
 #[test] fn mean_of_large_finite_values_has_no_early_low_precision_rounding() {
     let out = eval(RowProgram::Mean, 4096, &[vec![1000.0; 4096]]); assert_eq!(out, vec![vec![1000.0]]);
+}
+
+#[test] fn layernorm_binding_shapes_and_empty_rows() {
+    for rows in [0, 3] {
+        let n = rows * 64 * 4;
+        let fwd = compile(RowProgram::LayerNorm, rows, 64).unwrap();
+        assert_eq!(fwd.bindings().iter().map(|b| b.bytes).collect::<Vec<_>>(), [n, 256, 256, n, rows*4, rows*4]);
+        let bwd = compile(RowProgram::LayerNormInputBackward, rows, 64).unwrap();
+        assert_eq!(bwd.bindings().iter().map(|b| b.bytes).collect::<Vec<_>>(), [n, n, 256, rows*4, rows*4, n]);
+        assert!(bwd.source().contains("HardEvent::MTE2_S"));
+        if rows == 0 {
+            assert!(fwd.source().contains("if (rows == 0) { return; }"));
+            assert_eq!(eval(RowProgram::LayerNorm, 64, &[vec![], vec![1.; 64], vec![0.; 64]]), vec![vec![], vec![], vec![]]);
+            assert_eq!(eval(RowProgram::LayerNormInputBackward, 64, &[vec![], vec![], vec![1.; 64], vec![], vec![]]), vec![vec![]]);
+        }
+    }
+}
+
+#[test] fn layernorm_centered_variance_and_affine_match_f64_reference() {
+    for width in [32, 96, 256, 4096] {
+        let x: Vec<f32> = (0..3*width).map(|i| 1000.0 + (i%17) as f32 / 8.0).collect();
+        let weight: Vec<f32> = (0..width).map(|i| (i%7) as f32 / 8.0 - 0.25).collect();
+        let bias: Vec<f32> = (0..width).map(|i| (i%5) as f32 / 4.0).collect();
+        let out = eval(RowProgram::LayerNorm, width as u32, &[x.clone(), weight.clone(), bias.clone()]);
+        for row in 0..3 {
+            let values = &x[row*width..(row+1)*width];
+            let mean = values.iter().map(|&v| v as f64).sum::<f64>() / width as f64;
+            let variance = values.iter().map(|&v| (v as f64-mean).powi(2)).sum::<f64>() / width as f64;
+            let rstd = (variance+1e-5).sqrt().recip();
+            assert!((out[1][row] as f64-mean).abs() < 1e-4);
+            assert!((out[2][row] as f64-rstd).abs() < 1e-5);
+            for j in 0..width {
+                let expected = (values[j] as f64-mean)*rstd*weight[j] as f64+bias[j] as f64;
+                assert!((out[0][row*width+j] as f64-expected).abs() < 2e-4);
+            }
+        }
+    }
+}
+
+#[test] fn layernorm_constant_rows_use_epsilon_and_preserve_bias() {
+    let width = 96;
+    let out = eval(RowProgram::LayerNorm, width as u32, &[vec![4.; 2*width], vec![2.; width], vec![0.75; width]]);
+    assert_eq!(out[0], vec![0.75; 2*width]); assert_eq!(out[1], vec![4.; 2]);
+    for r in &out[2] { assert!((*r as f64-1e-5f64.sqrt().recip()).abs() < 1e-4); }
+    let dy: Vec<f32> = (0..2*width).map(|i| (i%7) as f32 / 4.).collect();
+    let dx = eval(RowProgram::LayerNormInputBackward, width as u32,
+        &[vec![4.; 2*width], dy.clone(), vec![2.; width], out[1].clone(), out[2].clone()]);
+    for row in 0..2 {
+        let mean = dy[row*width..(row+1)*width].iter().map(|&v| v as f64).sum::<f64>()/width as f64;
+        for j in 0..width {
+            let expected = 2. * (dy[row*width+j] as f64-mean) / 1e-5f64.sqrt();
+            assert!((dx[0][row*width+j] as f64-expected).abs() < 2e-4);
+        }
+    }
+}
+
+#[test] fn layernorm_input_gradient_matches_finite_difference() {
+    for width in [32, 96] {
+        let x: Vec<f32> = (0..width).map(|i| (i%13) as f32/7. - 0.8).collect();
+        let dy: Vec<f32> = (0..width).map(|i| (i%11) as f32/9. - 0.4).collect();
+        let w: Vec<f32> = (0..width).map(|i| (i%7) as f32/5. - 0.2).collect();
+        let bias = vec![0.3; width];
+        let out = eval(RowProgram::LayerNorm, width as u32, &[x.clone(), w.clone(), bias.clone()]);
+        let dx = eval(RowProgram::LayerNormInputBackward, width as u32,
+            &[x.clone(), dy.clone(), w.clone(), out[1].clone(), out[2].clone()]);
+        let loss = |v: &[f64]| {
+            let mean = v.iter().sum::<f64>()/width as f64;
+            let variance = v.iter().map(|x| (x-mean).powi(2)).sum::<f64>()/width as f64;
+            v.iter().zip(&w).zip(&bias).zip(&dy).map(|(((&x,&w),&b),&g)|
+                ((x-mean)/(variance+1e-5).sqrt()*w as f64+b as f64)*g as f64).sum::<f64>()
+        };
+        for j in 0..width {
+            let mut hi: Vec<f64> = x.iter().map(|&v| v as f64).collect(); let mut lo = hi.clone();
+            hi[j] += 1e-5; lo[j] -= 1e-5;
+            assert!((dx[0][j] as f64-(loss(&hi)-loss(&lo))/2e-5).abs() < 2e-5);
+        }
+    }
 }
