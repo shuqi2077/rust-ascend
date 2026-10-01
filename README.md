@@ -5,7 +5,7 @@ Rust 编写的昇腾 CANN 驱动、公共 IR 编译器和设备内核。
 ## 使用
 
 ```bash
-cargo add rust-ascend --git https://github.com/shuqi2077/rust-ascend.git
+cargo add rust-ascend
 ```
 
 需要 Rust 2024 工具链。编译器与主机测试不需要安装 CANN；生成设备二进制和运行设备算子需要目标机器上的 CANN、Bisheng、驱动及昇腾设备。
