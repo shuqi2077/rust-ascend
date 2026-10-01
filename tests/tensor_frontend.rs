@@ -17,14 +17,14 @@ fn plain_input(
     address: AddressType,
 ) -> <ruda_kernel::library::tensor::layout::linear::LinearView<E> as RudaType>::ExpandType {
     let array: NativeExpand<Array<E>> =
-        builder.input_array(Type::new(FloatKind::F32.into())).into();
+        builder.input_tensor(Type::new(FloatKind::F32.into())).into();
     let len = builder.scalar(address.unsigned_type()).into();
     if address == AddressType::U32 {
         info.scalars.push(65u32);
     } else {
         info.scalars.push(65u64);
     }
-    info.metadata.register_array(65, 65, address);
+    info.metadata.register_tensor(2, 65, 65, vec![5, 13].into(), vec![13, 1].into(), address);
     let layout = PlainLayout::__expand_new(&mut builder.scope, len);
     array.__expand_view_method(&mut builder.scope, layout.into())
 }
@@ -41,8 +41,8 @@ fn actual_ruprim_binary_expansion_compiles_for_both_index_widths_and_inplace() {
             let output: NativeExpand<Array<E>> = if inplace {
                 builder.inplace_output(0)
             } else {
-                info.metadata.register_array(65, 65, address);
-                builder.output_array(Type::new(FloatKind::F32.into()))
+                info.metadata.register_tensor(2, 65, 65, vec![5, 13].into(), vec![13, 1].into(), address);
+                builder.output_tensor(Type::new(FloatKind::F32.into()))
             }
             .into();
             let len = builder.scalar(address.unsigned_type()).into();
