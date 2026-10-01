@@ -208,8 +208,8 @@ fn eval(op: RowProgram, width: u32, input: &[Vec<f32>]) -> Vec<Vec<f32>> {
         assert!(bwd.source().contains("HardEvent::MTE2_S"));
         if rows == 0 {
             assert!(fwd.source().contains("if (rows == 0) { return; }"));
-            assert_eq!(eval(RowProgram::LayerNorm, 64, &[vec![], vec![1.; 64], vec![0.; 64]]), vec![vec![], vec![], vec![]]);
-            assert_eq!(eval(RowProgram::LayerNormInputBackward, 64, &[vec![], vec![], vec![1.; 64], vec![], vec![]]), vec![vec![]]);
+            assert_eq!(eval(RowProgram::LayerNorm, 64, &[vec![], vec![1.; 64], vec![0.; 64]]), vec![Vec::<f32>::new(); 3]);
+            assert_eq!(eval(RowProgram::LayerNormInputBackward, 64, &[vec![], vec![], vec![1.; 64], vec![], vec![]]), vec![Vec::<f32>::new()]);
         }
     }
 }
