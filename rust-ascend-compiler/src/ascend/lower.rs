@@ -91,6 +91,14 @@ impl Lower {
                 let value=match self.resolve(op.input)?{Value::Inside=>Value::Outside,Value::Outside=>Value::Inside,_=>return Err(unsupported("non-domain boolean negation"))};
                 self.assign(out.ok_or_else(||invalid("not output missing"))?,value)
             },
+            Operation::Operator(Operator::And(op))=>{
+                let value=match (self.resolve(op.lhs)?,self.resolve(op.rhs)?){
+                    (Value::Inside,Value::Inside)=>Value::Inside,
+                    (Value::Outside,Value::Outside)=>Value::Outside,
+                    _=>return Err(unsupported("conjunction requires identical domain predicates")),
+                };
+                self.assign(out.ok_or_else(||invalid("and output missing"))?,value)
+            },
             Operation::Operator(Operator::Cast(op))=>{
                 let dst=out.ok_or_else(||invalid("cast output missing"))?;
                 if dst.ty==op.input.ty {let value=if dst.ty==f32_type(){Value::Vector(self.vector(op.input)?)}else{self.resolve(op.input)?};return self.assign(dst,value);}
