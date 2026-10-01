@@ -42,6 +42,7 @@ mod tests {
 impl Index {
     pub fn binary(op: char, a: Rc<Self>, b: Rc<Self>, elements: u64, max: u64) -> Result<Rc<Self>> {
         let result = match (op, a.as_ref(), b.as_ref()) {
+            ('-', x, y) if x == y => Rc::new(Self::Constant(0)),
             ('+' | '-', _, Self::Constant(0)) | ('*' | '/', _, Self::Constant(1)) => a,
             ('+', Self::Constant(0), _) | ('*', Self::Constant(1), _) => b,
             ('*', _, Self::Constant(0)) | ('*', Self::Constant(0), _) => Rc::new(Self::Constant(0)),

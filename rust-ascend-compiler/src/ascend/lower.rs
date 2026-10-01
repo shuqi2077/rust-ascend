@@ -184,6 +184,7 @@ pub(super) fn lower(mut k:KernelDefinition,elements:u64)->Result<Program> {
     let mut ids=HashSet::new();let mut inputs=0;let mut outputs=0;
     for b in &k.buffers {
         if !ids.insert(b.id){return Err(invalid("duplicate kernel buffer id"));}
+        if b.size.is_some_and(|n|n as u64>u32::MAX as u64){return Err(unsupported("buffer length exceeds u32"));}
         if b.ty!=f32_type(){return Err(unsupported("only scalar FP32 buffers; no implicit precision changes"));}
         if b.has_extended_meta|| (b.visibility==Visibility::ReadWrite && b.size.is_some_and(|n|n as u64!=elements)){return Err(unsupported("extended metadata or contiguous output size mismatch"));}
         if b.visibility==Visibility::Read {inputs+=1}else{outputs+=1}

@@ -37,7 +37,7 @@ ACLNN 路径另提供 `cast`、`silu_backward`、`softmax_backward`、`log_softm
 
 ## RUDA 张量与自动求导
 
-`Ascend` 复用 `ruda-tensor-device::DeviceBackend`，`Autodiff<Ascend>` 复用 RUDA 自动求导。当前公共编译路径面向连续 FP32 逐元素运算，创建张量时显式指定 `DType::F32`；整数、布尔和通用低精度运算不由此入口提供。未覆盖的 IR 返回错误，不切换到 CPU 或其他数学后端。
+`Ascend` 复用 `ruda-tensor-device::DeviceBackend`，`Autodiff<Ascend>` 复用 RUDA 自动求导。当前公共编译路径支持 FP32 逐元素运算的连续输入，以及可证明索引范围的广播、转置和带间隔输入；输出要求连续布局，非连续原地写回不在此范围内。连续输入保留整块搬运，非连续输入在设备端按索引搬运后执行向量运算。创建张量时显式指定 `DType::F32`；整数、布尔和通用低精度运算不由此入口提供。未覆盖的 IR 返回错误，不切换到 CPU 或其他数学后端。
 
 ```rust
 use rust_ascend::{Ascend, Autodiff, tensor::{DType, api::Tensor}};
