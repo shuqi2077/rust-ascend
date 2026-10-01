@@ -33,7 +33,25 @@ ACLNN 路径另提供 `cast`、`silu_backward`、`softmax_backward`、`log_softm
 
 `AscendRuntime::initialize_exclusive(RuntimeOptions::new(toolkit))` 初始化进程独占的 950DT 运行时，随后通过 RUDA `ComputeClient` 分配、上传、启动 `RudaTask<AscendCompiler>`、读取及同步。CANN 会话、设备内存和模块固定在设备线程；公共客户端只传递资源句柄。程序由安装的 Bisheng / ld.lld 编译、加载，并在进程内按源码和绑定契约缓存。每次编译或链接默认限时 120 秒，可通过 `compile_timeout` 配置。此入口不可与 `torch_npu` 或其他 ACL 初始化方共用；现有借用会话的 `attach` 接口不变。
 
-运行时示例：`cargo run --release --example runtime`，需要 `ASCEND_HOME_PATH`。示例直接使用 RUDA 计算客户端，不需要预先生成算子目录。运行时沿用公共 IR 编译器的算子和形状范围；尚不支持通用张量内核的打包 metadata/scalar 参数、任意布局或完整模型后端。
+运行时示例：`cargo run --release --example runtime`，需要 `ASCEND_HOME_PATH`。示例直接使用 RUDA 计算客户端，不需要预先生成算子目录。运行时按 RUDA 参数 ABI 解析标量和 metadata，再按本次参数特化公共 IR；FP32 标量保留原始位模式，生成代码参与模块缓存键。支持 u32/u64 逻辑索引和同一绑定上的原地逐元素读写；任意布局与完整模型所需的指令覆盖仍不包含在当前编译范围内。
+
+## RUDA 张量与自动求导
+
+`Ascend` 复用 `ruda-tensor-device::DeviceBackend`，`Autodiff<Ascend>` 复用 RUDA 自动求导。当前公共编译路径面向连续 FP32 逐元素运算，创建张量时显式指定 `DType::F32`；整数、布尔和通用低精度运算不由此入口提供。未覆盖的 IR 返回错误，不切换到 CPU 或其他数学后端。
+
+```rust
+use rust_ascend::{Ascend, Autodiff, tensor::{DType, api::Tensor}};
+
+// device 来自 AscendRuntime::initialize_exclusive。
+let x = Tensor::<Autodiff<Ascend>, 1>::from_data(
+    [1.0f32, 2.0, 3.0, 4.0], (&device, DType::F32),
+).require_grad();
+let y = x.clone() * x.clone();
+let gradients = y.backward();
+let dx = x.grad(&gradients).unwrap();
+```
+
+完整进程初始化与调用见 [tensor 示例](examples/tensor.rs)：`cargo run --release --example tensor`。
 
 ## 生成与执行
 

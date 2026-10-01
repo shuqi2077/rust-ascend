@@ -94,7 +94,11 @@ impl Lower {
             Operation::Operator(Operator::Cast(op))=>{
                 let dst=out.ok_or_else(||invalid("cast output missing"))?;
                 if dst.ty==op.input.ty {let value=if dst.ty==f32_type(){Value::Vector(self.vector(op.input)?)}else{self.resolve(op.input)?};return self.assign(dst,value);}
-                if is_index(dst.ty)&&is_index(op.input.ty){return self.assign(dst,self.resolve(op.input)?);}
+                if is_index(dst.ty)&&is_index(op.input.ty){
+                    let mut value=self.resolve(op.input)?;
+                    if let Value::Index(n)=value {let n=if dst.ty==Type::new(UIntKind::U32.into()){n as u32 as u64}else{n};value=if n==self.elements{Value::Length}else{Value::Index(n)};}
+                    return self.assign(dst,value);
+                }
                 Err(unsupported("non-identity data cast"))
             },
             Operation::Operator(Operator::Reinterpret(op))=>{
@@ -160,6 +164,7 @@ pub(super) fn lower(mut k:KernelDefinition,elements:u64)->Result<Program> {
         if matches!(e,ruda_core::compiler::CompilationError::UnsupportedInstruction{..}){unsupported(text)}else{invalid(text)}
     })?;}
     if l.wrote.len()!=outputs{return Err(invalid("every declared output must be written exactly once"));}
+    if l.loads.len()>4{return Err(unsupported("at most four loaded buffers, including in-place inputs"));}
     if l.p.bindings.iter().enumerate().any(|(i,b)|b.visibility==Visibility::Read&&!l.loads.contains_key(&i)){return Err(unsupported("unused input bindings must be removed before lowering"));}
     Ok(l.p)
 }
