@@ -9,12 +9,16 @@ description = "Dynamically loaded AscendCL and ACLNN interfaces with native kern
 [features]
 default = []
 common-ir = ["dep:rust-ascend-compiler", "dep:ruda-core"]
+runtime = ["common-ir", "dep:ruda-runtime", "dep:tempfile", "dep:wait-timeout"]
 
 [dependencies]
 libloading = "=0.8.9"
 sha2 = "=0.10.9"
 rust-ascend-compiler = { workspace = true, features = ["ascend"], optional = true }
 ruda-core = { workspace = true, optional = true }
+ruda-runtime = { version = "=0.1.0", optional = true }
+tempfile = { version = "3", optional = true }
+wait-timeout = { version = "0.2", optional = true }
 
 [[example]]
 name = "common_ir_validate"

@@ -26,5 +26,5 @@ readme = "README.md"
 [dependencies]
 ruda-core.workspace = true
 rust-ascend-compiler = { workspace = true, features = ["ascend"] }
-rust-ascend-driver = { workspace = true, features = ["common-ir"] }
+rust-ascend-driver = { workspace = true, features = ["runtime"] }
 rust-ascend-kernels.workspace = true

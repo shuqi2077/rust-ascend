@@ -23,12 +23,17 @@ use rust_ascend::{
 | `rust_ascend::driver` | AscendCL/ACLNN 动态加载、设备张量、原生内核执行 |
 | `rust_ascend::kernels` | Rust BF16 矩阵设备程序与 CCE 生成 |
 | `rust_ascend::core` | RUDA 公共 IR 与编译器接口 |
+| `rust_ascend::runtime` | RUDA `Runtime` / `ComputeServer` / `ComputeStorage` 接口、设备工作线程与 CCE 即时编译 |
 
 ACLNN 路径另提供 `cast`、`silu_backward`、`softmax_backward`、`log_softmax_backward` 和 `rms_norm_backward`。反向接口支持 FP32/FP16/BF16；RMSNorm 返回输入梯度及 FP32 权重梯度。调用示例见 [gradients](examples/gradients.rs)。
 
 `CannSession::open_exclusive_libraries` / `attach_libraries` 可显式传入 CANN 9 的 `libnnopbase.so`、`libopapi_math.so`、`libopapi_nn.so` 等拆分库；原有单库接口保留。
 
 公共 IR 依赖 `ruda-core`。可选的 `rust-ascend-compiler/ptx` 使用 RUDA PTX 编译器检查同一 IR 的兼容性，不改变默认昇腾执行路径。
+
+`AscendRuntime::initialize_exclusive(RuntimeOptions::new(toolkit))` 初始化进程独占的 950DT 运行时，随后通过 RUDA `ComputeClient` 分配、上传、启动 `RudaTask<AscendCompiler>`、读取及同步。CANN 会话、设备内存和模块固定在设备线程；公共客户端只传递资源句柄。程序由安装的 Bisheng / ld.lld 编译、加载，并在进程内按源码和绑定契约缓存。每次编译或链接默认限时 120 秒，可通过 `compile_timeout` 配置。此入口不可与 `torch_npu` 或其他 ACL 初始化方共用；现有借用会话的 `attach` 接口不变。
+
+运行时示例：`cargo run --release --example runtime`，需要 `ASCEND_HOME_PATH`。示例直接使用 RUDA 计算客户端，不需要预先生成算子目录。运行时沿用公共 IR 编译器的算子和形状范围；尚不支持通用张量内核的打包 metadata/scalar 参数、任意布局或完整模型后端。
 
 ## 生成与执行
 

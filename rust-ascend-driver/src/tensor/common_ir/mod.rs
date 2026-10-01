@@ -49,6 +49,24 @@ impl CannProgram{
             ranges.push((start,end,b.writable));addresses.push(t.buffer.data.as_ptr());
         }
         validate_ranges(&ranges)?;
+        self.launch_addresses(addresses)
+    }
+    /// Runtime-owned buffers remain allocated on the same worker through completion.
+    #[cfg(feature = "runtime")]
+    pub(super) unsafe fn run_addresses(&self, addresses:Vec<(*mut c_void,usize)>)->Result<(),CannError>{
+        if addresses.len()!=self.compiled.bindings().len(){return Err(invalid("runtime binding count mismatch"));}
+        let mut ranges=Vec::new();
+        for ((p,n),b) in addresses.iter().zip(self.compiled.bindings()){
+            if *n as u64!=b.bytes || (*p as usize)%4!=0{return Err(invalid("runtime FP32 binding size/alignment mismatch"));}
+            let start=*p as usize;
+            ranges.push((start,start.checked_add(*n).ok_or_else(||invalid("runtime address overflow"))?,b.writable));
+        }
+        validate_ranges(&ranges)?;
+        self.launch_addresses(addresses.into_iter().map(|(p,_)|p).collect())
+    }
+    fn launch_addresses(&self,mut addresses:Vec<*mut c_void>)->Result<(),CannError>{
+        if self.poisoned.get(){return Err(invalid("program is poisoned after a launch/completion failure"));}
+        self.kernel.api.session.bind()?;
         if self.compiled.elements()==0{let mut st=self.stats.get();st.empty_calls+=1;self.stats.set(st);return Ok(());}
         // Keep BOTH host arrays stable and alive until this stream completes.
         let mut argv:Vec<*mut c_void>=addresses.iter_mut().map(|p|(p as *mut *mut c_void).cast()).collect();

@@ -2,12 +2,15 @@
 //! Borrowed attach() leaves lifecycle with the caller; open_exclusive() owns it.
 //! Explicit ACLNN tensors and DeepGEMM-Ascend kernels are available in `tensor`.
 //! Feature `common-ir` executes the checked FP32 map subset produced by
-//! rust-ascend-compiler/ascend. This is still not a complete generic Runtime/Backend.
+//! rust-ascend-compiler/ascend. Feature `runtime` connects this compiler to RUDA's
+//! compute client; the compiler's supported IR domain remains unchanged.
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod api;
 pub mod sys;
 pub mod tensor;
+#[cfg(feature = "runtime")]
+pub use tensor::runtime;
 
 pub use api::{CannApi, CannLibrary};
 use std::fmt::{Display, Formatter};

@@ -5,6 +5,8 @@ pub mod deepgemm;
 /// Explicit execution of checked common RUDA IR compiler artifacts.
 #[cfg(feature = "common-ir")]
 pub mod common_ir;
+#[cfg(feature = "runtime")]
+pub mod runtime;
 mod ffi;
 mod layout;
 mod ops;
