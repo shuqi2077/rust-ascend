@@ -2,6 +2,8 @@
 use super::{Result, invalid, unsupported};
 use ruda_core::{ir::*, kernel::{KernelArg, KernelDefinition, Visibility}};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use super::index::Index;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip }
@@ -15,9 +17,10 @@ impl Node { pub fn inputs(&self) -> Vec<usize> { match self {
 pub(super) struct Program {
     pub name: String, pub bindings: Vec<KernelArg>, pub nodes: Vec<Node>,
     pub stores: Vec<(usize, usize)>,
+    pub load_indices: HashMap<usize, Rc<Index>>,
 }
-#[derive(Clone, Copy, Debug)]
-enum Value { Lane, Length, Inside, Outside, Index(u64), Vector(usize) }
+#[derive(Clone, Debug)]
+enum Value { Lane, Length, Inside, Outside, Index(u64), Mapped(Rc<Index>), Vector(usize) }
 fn f32_type() -> Type { Type::scalar(ElemType::Float(FloatKind::F32)) }
 fn is_index(ty: Type) -> bool { ty == Type::scalar(ElemType::UInt(UIntKind::U32)) || ty == Type::scalar(ElemType::UInt(UIntKind::U64)) }
 fn valid_local(v: Variable) -> bool { matches!(v.kind, VariableKind::LocalMut{..} | VariableKind::LocalConst{..} | VariableKind::Versioned{..}) }
@@ -30,7 +33,14 @@ impl Lower {
         if let VariableKind::Constant(ConstantValue::UInt(n))=v.kind {
             if is_index(v.ty) { return Ok(if n==self.elements {Value::Length}else{Value::Index(n)}); }
         }
-        self.values.get(&v).copied().ok_or_else(|| invalid(format!("undefined or unsupported operand {v:?}")))
+        self.values.get(&v).cloned().ok_or_else(|| invalid(format!("undefined or unsupported operand {v:?}")))
+    }
+    fn index(&self, v: Variable) -> Result<Rc<Index>> {
+        Ok(match self.resolve(v)? {
+            Value::Lane => Rc::new(Index::Lane), Value::Length => Rc::new(Index::Constant(self.elements)),
+            Value::Index(n) => Rc::new(Index::Constant(n)), Value::Mapped(index) => index,
+            _ => return Err(unsupported("non-index layout operand")),
+        })
     }
     fn vector(&mut self,v:Variable)->Result<usize> {
         if v.ty != f32_type() { return Err(unsupported(format!("non-FP32 arithmetic operand {v:?}"))); }
@@ -75,7 +85,9 @@ impl Lower {
                 self.assign(dst,value)
             },
             Operation::Metadata(Metadata::Length{var}|Metadata::BufferLength{var})=>{
-                self.length_array(*var)?;self.assign(out.ok_or_else(||invalid("metadata output missing"))?,Value::Length)
+                self.length_array(*var)?;
+                let size=u64::from(self.p.bindings[self.array(*var,false)?].size.unwrap_or(self.elements as u32));
+                self.assign(out.ok_or_else(||invalid("metadata output missing"))?,if size==self.elements{Value::Length}else{Value::Index(size)})
             },
             Operation::Comparison(Comparison::GreaterEqual(op))=>{
                 if matches!((self.resolve(op.lhs)?,self.resolve(op.rhs)?),(Value::Lane,Value::Length)) {
@@ -104,6 +116,7 @@ impl Lower {
                 if dst.ty==op.input.ty {let value=if dst.ty==f32_type(){Value::Vector(self.vector(op.input)?)}else{self.resolve(op.input)?};return self.assign(dst,value);}
                 if is_index(dst.ty)&&is_index(op.input.ty){
                     let mut value=self.resolve(op.input)?;
+                    if let Value::Mapped(index)=&value {if dst.ty==Type::new(UIntKind::U32.into()) && index.bounds(self.elements)?.1>u32::MAX as u64{return Err(unsupported("narrowing layout index may wrap"));}}
                     if let Value::Index(n)=value {let n=if dst.ty==Type::new(UIntKind::U32.into()){n as u32 as u64}else{n};value=if n==self.elements{Value::Length}else{Value::Index(n)};}
                     return self.assign(dst,value);
                 }
@@ -124,8 +137,14 @@ impl Lower {
                 Ok(())
             },
             Operation::Operator(Operator::Index(op)|Operator::UncheckedIndex(op))=>{
-                if op.vector_size!=0 || op.unroll_factor!=1 || !matches!(self.resolve(op.index)?,Value::Lane) { return Err(unsupported("loads must index one scalar at AbsolutePosX")); }
+                if op.vector_size!=0 || op.unroll_factor!=1 { return Err(unsupported("loads must index one scalar")); }
                 let a=self.array(op.list,false)?;
+                let index=self.index(op.index)?;
+                let size=u64::from(self.p.bindings[a].size.unwrap_or(self.elements as u32));
+                if self.elements!=0 && index.bounds(self.elements)?.1>=size{return Err(invalid("layout load may exceed the bound buffer"));}
+                if self.p.bindings[a].visibility==Visibility::ReadWrite && *index!=Index::Lane{return Err(unsupported("mapped in-place reads require scatter dependency analysis"));}
+                if self.p.load_indices.get(&a).is_some_and(|old|old!=&index){return Err(unsupported("multiple distinct layouts for one input binding"));}
+                self.p.load_indices.insert(a,index);
                 if self.wrote.contains(&a){return Err(unsupported("load after store needs explicit ordering lowering"));}
                 let id=if let Some(&n)=self.loads.get(&a){n}else{let n=self.p.nodes.len();self.p.nodes.push(Node::Input(a));self.loads.insert(a,n);n};
                 self.assign(out.ok_or_else(||invalid("load output missing"))?,Value::Vector(id))
@@ -138,6 +157,13 @@ impl Lower {
             },
             Operation::Arithmetic(a)=>{
                 let dst=out.ok_or_else(||invalid("arithmetic output missing"))?;
+                if is_index(dst.ty) {
+                    let (kind,op)=match a{Arithmetic::Add(op)=>('+',op),Arithmetic::Sub(op)=>('-',op),Arithmetic::Mul(op)=>('*',op),Arithmetic::Div(op)=>('/',op),Arithmetic::Modulo(op)=>('%',op),_=>return Err(unsupported("layout index operation"))};
+                    let max=if dst.ty==Type::new(UIntKind::U32.into()){u32::MAX as u64}else{u64::MAX};
+                    let index=Index::binary(kind,self.index(op.lhs)?,self.index(op.rhs)?,self.elements,max)?;
+                    let value=match index.as_ref(){Index::Lane=>Value::Lane,Index::Constant(n) if *n==self.elements=>Value::Length,Index::Constant(n)=>Value::Index(*n),_=>Value::Mapped(index)};
+                    return self.assign(dst,value);
+                }
                 let binary=match a { Arithmetic::Add(op)=>Some((Binary::Add,op)),Arithmetic::Sub(op)=>Some((Binary::Sub,op)),Arithmetic::Mul(op)=>Some((Binary::Mul,op)),Arithmetic::Div(op)=>Some((Binary::Div,op)),_=>None };
                 if let Some((kind,op))=binary {let lhs=self.vector(op.lhs)?;let rhs=self.vector(op.rhs)?;return self.add(dst,Node::Binary(kind,lhs,rhs));}
                 let (kind,op)=match a { Arithmetic::Neg(op)=>(Unary::Neg,op),Arithmetic::Abs(op)=>(Unary::Abs,op),Arithmetic::Exp(op)=>(Unary::Exp,op),Arithmetic::Log(op)=>(Unary::Log,op),Arithmetic::Sqrt(op)=>(Unary::Sqrt,op),Arithmetic::InverseSqrt(op)=>(Unary::Rsqrt,op),Arithmetic::Recip(op)=>(Unary::Recip,op),_=>return Err(unsupported(format!("arithmetic {a:?}"))) };
@@ -159,14 +185,14 @@ pub(super) fn lower(mut k:KernelDefinition,elements:u64)->Result<Program> {
     for b in &k.buffers {
         if !ids.insert(b.id){return Err(invalid("duplicate kernel buffer id"));}
         if b.ty!=f32_type(){return Err(unsupported("only scalar FP32 buffers; no implicit precision changes"));}
-        if b.has_extended_meta||b.size.is_some_and(|n|n as u64!=elements){return Err(unsupported("extended metadata or static size mismatch"));}
+        if b.has_extended_meta|| (b.visibility==Visibility::ReadWrite && b.size.is_some_and(|n|n as u64!=elements)){return Err(unsupported("extended metadata or contiguous output size mismatch"));}
         if b.visibility==Visibility::Read {inputs+=1}else{outputs+=1}
     }
     if inputs>4||outputs==0||outputs>4{return Err(unsupported("at most four inputs/four outputs, and at least one output"));}
     // Read actual scope instructions. Unused local declarations carry no effects;
     // every operation, operand and referenced special storage is checked below.
     if k.body.instructions.len()>4096{return Err(unsupported("instruction limit exceeded"));}
-    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![]},elements,values:HashMap::new(),loads:HashMap::new(),constants:HashMap::new(),wrote:HashSet::new()};
+    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![],load_indices:HashMap::new()},elements,values:HashMap::new(),loads:HashMap::new(),constants:HashMap::new(),wrote:HashSet::new()};
     for (n,i) in k.body.instructions.iter().enumerate(){l.instruction(i).map_err(|e|{
         let text=format!("instruction {n}: {e}");
         if matches!(e,ruda_core::compiler::CompilationError::UnsupportedInstruction{..}){unsupported(text)}else{invalid(text)}

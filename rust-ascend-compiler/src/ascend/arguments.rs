@@ -249,7 +249,10 @@ pub fn specialize(
     prefix.append(&mut kernel.body.instructions);
     kernel.body.instructions = prefix;
     kernel.scalars.clear();
-    for b in &mut kernel.buffers {
+    for (index, b) in kernel.buffers.iter_mut().enumerate() {
+        let bytes = info.sized_meta.as_ref().ok_or_else(|| invalid("missing buffer metadata"))?.offset
+            + info.metadata.buffer_len_index(index as u32) as usize * address.size();
+        b.size = Some(u32::try_from(read(bytes, address)?).map_err(|_| unsupported("buffer length exceeds u32"))?);
         b.has_extended_meta = false;
     }
     Ok(kernel)

@@ -5,6 +5,7 @@
 //! an external library. All formulas remain common Rust IR; Bisheng compiles the
 //! generated CCE intermediate. This is not a direct Rust-to-Ascend-ISA backend.
 mod lower;
+mod index;
 pub mod arguments;
 mod emit;
 mod plan;
@@ -112,7 +113,7 @@ impl fmt::Display for AscendKernel {
 
 #[derive(Clone, Debug, Default)]
 pub struct AscendCompiler;
-impl AscendCompiler { pub const CACHE_VERSION: u32 = 3; }
+impl AscendCompiler { pub const CACHE_VERSION: u32 = 4; }
 impl Compiler for AscendCompiler {
     type Representation = AscendKernel;
     type CompilationOptions = AscendOptions;
@@ -138,7 +139,8 @@ impl Compiler for AscendCompiler {
         let alloc = plan::allocate(&p, o.reuse_temporaries)?;
         let inplace=p.nodes.iter().filter(|n|matches!(n,lower::Node::Input(i) if p.bindings[*i].visibility==Visibility::ReadWrite)).count();
         let vectors = p.bindings.len().checked_add(alloc.slots).and_then(|n|n.checked_add(inplace)).ok_or_else(|| invalid("UB count overflow"))?;
-        let ub = vectors.checked_mul(o.tile_elements as usize).and_then(|n| n.checked_mul(4))
+        let gather = p.load_indices.values().any(|index| **index != index::Index::Lane);
+        let ub = vectors.checked_mul(o.tile_elements as usize).and_then(|n| n.checked_mul(4)).and_then(|n|n.checked_add(if gather {32}else{0}))
             .ok_or_else(|| invalid("UB byte count overflow"))?;
         if ub > o.ub_limit_bytes as usize { return Err(unsupported(format!("kernel requires {ub} UB bytes, limit is {}", o.ub_limit_bytes))); }
         let source = emit::emit(&p, &alloc, o);
@@ -146,7 +148,7 @@ impl Compiler for AscendCompiler {
             block_dim: o.vector_cores, tile_elements: o.tile_elements, ub_bytes: ub as u32,
             temporary_slots: alloc.slots, initialized_outputs:inplace!=0,
             bindings: p.bindings.iter().map(|b| AscendBinding { id: b.id,
-                writable: b.visibility == Visibility::ReadWrite, bytes: o.elements * 4 }).collect() })
+                writable: b.visibility == Visibility::ReadWrite, bytes: u64::from(b.size.unwrap_or(o.elements as u32)) * 4 }).collect() })
     }
     fn elem_size(&self, elem: ElemType) -> usize { elem.size() }
     fn extension(&self) -> &'static str { "asc" }

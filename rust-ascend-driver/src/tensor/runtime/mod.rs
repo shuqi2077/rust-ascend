@@ -369,7 +369,7 @@ impl AscendServer {
         if elements % 4 != 0 {
             return Err(server_error("FP32 kernel domain must have whole elements"));
         }
-        let options = AscendOptions {
+        let mut options = AscendOptions {
             target: Some(AscendTarget::Ascend950DT),
             elements: elements / 4,
             ..Default::default()
@@ -382,6 +382,8 @@ impl AscendServer {
             let dim=definition.ruda_dim;
             rust_ascend_compiler::ascend::arguments::specialize(definition,&arguments.info.data,
                 arguments.info.dynamic_metadata_offset,task.address_type()).and_then(|definition| {
+                options.elements=definition.buffers.iter().filter(|b| b.visibility==ruda_core::kernel::Visibility::ReadWrite)
+                    .filter_map(|b|b.size).map(u64::from).max().unwrap_or(0);
                 AscendCompiler.compile(definition,&options,mode,task.address_type()).map(|repr| {
                     ruda_runtime::runtime::kernel::CompiledKernel::<AscendCompiler> {
                         entrypoint_name:repr.entrypoint().into(), source:repr.source().into(), repr:Some(repr),
