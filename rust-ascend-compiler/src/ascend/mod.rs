@@ -5,6 +5,7 @@
 //! an external library. All formulas remain common Rust IR; Bisheng compiles the
 //! generated CCE intermediate. This is not a direct Rust-to-Ascend-ISA backend.
 mod lower;
+pub mod arguments;
 mod emit;
 mod plan;
 mod rows;
@@ -77,7 +78,7 @@ pub struct AscendBinding { pub id: u32, pub writable: bool, pub bytes: u64 }
 pub struct AscendKernel {
     source: String, entrypoint: String, target: AscendTarget,
     elements: u64, row_width: Option<u32>, block_dim: u32, tile_elements: u32,
-    ub_bytes: u32, temporary_slots: usize, bindings: Vec<AscendBinding>,
+    ub_bytes: u32, temporary_slots: usize, bindings: Vec<AscendBinding>, initialized_outputs: bool,
 }
 impl AscendKernel {
     pub fn source(&self) -> &str { &self.source }
@@ -90,6 +91,7 @@ impl AscendKernel {
     pub fn ub_bytes(&self) -> u32 { self.ub_bytes }
     pub fn temporary_slots(&self) -> usize { self.temporary_slots }
     pub fn bindings(&self) -> &[AscendBinding] { &self.bindings }
+    pub fn requires_initialized_outputs(&self) -> bool { self.initialized_outputs }
     /// Build-time metadata only. Not a loadable artifact until a real CANN build
     /// succeeds and the build tool adds source/object/compiler digests.
     pub fn build_contract(&self) -> String {
@@ -110,17 +112,17 @@ impl fmt::Display for AscendKernel {
 
 #[derive(Clone, Debug, Default)]
 pub struct AscendCompiler;
-impl AscendCompiler { pub const CACHE_VERSION: u32 = 2; }
+impl AscendCompiler { pub const CACHE_VERSION: u32 = 3; }
 impl Compiler for AscendCompiler {
     type Representation = AscendKernel;
     type CompilationOptions = AscendOptions;
     fn compile(&mut self, kernel: KernelDefinition, o: &AscendOptions,
         mode: ExecutionMode, address: StorageType) -> Result<AscendKernel> {
         let target = o.validate()?;
-        if mode != ExecutionMode::Checked {
-            return Err(unsupported("only Checked mode; Validate diagnostics and Unchecked mode are not implemented"));
+        if mode == ExecutionMode::Validate || (mode==ExecutionMode::Unchecked && o.row_width.is_some()) {
+            return Err(unsupported("Validate diagnostics and unchecked row mode are not implemented"));
         }
-        if address != StorageType::from(UIntKind::U64) { return Err(unsupported("64-bit addresses required")); }
+        if address != StorageType::from(UIntKind::U64) && address != StorageType::from(UIntKind::U32) { return Err(unsupported("u32 or u64 logical index type required")); }
         if let Some(width) = o.row_width {
             let p = rows::lower(kernel, o.elements, width)?;
             let alloc = rows::allocate(&p, o.reuse_temporaries, o.ub_limit_bytes)?;
@@ -130,18 +132,19 @@ impl Compiler for AscendCompiler {
                 bytes: b.kind.count(p.rows, width) * 4 }).collect();
             return Ok(AscendKernel { source, entrypoint: p.name, target, elements: o.elements,
                 row_width: Some(width), block_dim: o.vector_cores, tile_elements: width,
-                ub_bytes: alloc.ub_bytes, temporary_slots: alloc.slots, bindings });
+                ub_bytes: alloc.ub_bytes, temporary_slots: alloc.slots, bindings, initialized_outputs:false });
         }
         let p = lower::lower(kernel, o.elements)?;
         let alloc = plan::allocate(&p, o.reuse_temporaries)?;
-        let vectors = p.bindings.len().checked_add(alloc.slots).ok_or_else(|| invalid("UB count overflow"))?;
+        let inplace=p.nodes.iter().filter(|n|matches!(n,lower::Node::Input(i) if p.bindings[*i].visibility==Visibility::ReadWrite)).count();
+        let vectors = p.bindings.len().checked_add(alloc.slots).and_then(|n|n.checked_add(inplace)).ok_or_else(|| invalid("UB count overflow"))?;
         let ub = vectors.checked_mul(o.tile_elements as usize).and_then(|n| n.checked_mul(4))
             .ok_or_else(|| invalid("UB byte count overflow"))?;
         if ub > o.ub_limit_bytes as usize { return Err(unsupported(format!("kernel requires {ub} UB bytes, limit is {}", o.ub_limit_bytes))); }
         let source = emit::emit(&p, &alloc, o);
         Ok(AscendKernel { source, entrypoint: p.name, target, elements: o.elements, row_width: None,
             block_dim: o.vector_cores, tile_elements: o.tile_elements, ub_bytes: ub as u32,
-            temporary_slots: alloc.slots,
+            temporary_slots: alloc.slots, initialized_outputs:inplace!=0,
             bindings: p.bindings.iter().map(|b| AscendBinding { id: b.id,
                 writable: b.visibility == Visibility::ReadWrite, bytes: o.elements * 4 }).collect() })
     }

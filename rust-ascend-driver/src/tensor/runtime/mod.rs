@@ -91,6 +91,7 @@ impl AscendDevice {
         self.ordinal
     }
 }
+impl ruda_tensor::DeviceOps for AscendDevice {}
 impl Device for AscendDevice {
     fn from_id(id: DeviceId) -> Self {
         assert_eq!(id.type_id, 0, "unsupported Ascend device type");
@@ -251,6 +252,7 @@ impl DeviceService for AscendServer {
             TimingMethod::System,
         );
         properties.register_address_type(AddressType::U64);
+        properties.register_address_type(AddressType::U32);
         properties.register_type_usage(FloatKind::F32, TypeUsage::Buffer);
         let logger = Arc::new(ServerLogger::default());
         let utilities = Arc::new(ServerUtilities::new(
@@ -346,9 +348,9 @@ impl AscendServer {
         arguments: KernelArguments,
         mode: ExecutionMode,
     ) -> std::result::Result<(), ServerError> {
-        if !arguments.tensor_maps.is_empty() || !arguments.info.data.is_empty() {
+        if !arguments.tensor_maps.is_empty() {
             return Err(server_error(
-                "Ascend common IR does not yet lower packed runtime metadata/scalars or tensor maps",
+                "Ascend common IR does not yet lower tensor maps",
             ));
         }
         let elements = arguments
@@ -372,9 +374,22 @@ impl AscendServer {
             elements: elements / 4,
             ..Default::default()
         };
-        let compiled = task
-            .compile(&mut AscendCompiler, &options, mode, task.address_type())
-            .map_err(|e| ServerError::Launch(LaunchError::CompilationError(e)))?;
+        let compiled = if arguments.info.data.is_empty() {
+            task.compile(&mut AscendCompiler, &options, mode, task.address_type())
+        } else {
+            use ruda_core::compiler::Compiler;
+            let definition=task.kernel_definition().ok_or_else(||server_error("packed arguments require a public KernelDefinition"))?;
+            let dim=definition.ruda_dim;
+            rust_ascend_compiler::ascend::arguments::specialize(definition,&arguments.info.data,
+                arguments.info.dynamic_metadata_offset,task.address_type()).and_then(|definition| {
+                AscendCompiler.compile(definition,&options,mode,task.address_type()).map(|repr| {
+                    ruda_runtime::runtime::kernel::CompiledKernel::<AscendCompiler> {
+                        entrypoint_name:repr.entrypoint().into(), source:repr.source().into(), repr:Some(repr),
+                        debug_name:Some(task.name()),ruda_dim:dim,debug_info:None,
+                    }
+                })
+            })
+        }.map_err(|e| ServerError::Launch(LaunchError::CompilationError(e)))?;
         let grid = match count {
             RudaCount::Static(x, y, z) => (x, y, z),
             RudaCount::Dynamic(binding) => {

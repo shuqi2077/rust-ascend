@@ -17,16 +17,19 @@ pub(super) struct Program {
     pub stores: Vec<(usize, usize)>,
 }
 #[derive(Clone, Copy, Debug)]
-enum Value { Lane, Length, Outside, Vector(usize) }
+enum Value { Lane, Length, Inside, Outside, Index(u64), Vector(usize) }
 fn f32_type() -> Type { Type::scalar(ElemType::Float(FloatKind::F32)) }
 fn is_index(ty: Type) -> bool { ty == Type::scalar(ElemType::UInt(UIntKind::U32)) || ty == Type::scalar(ElemType::UInt(UIntKind::U64)) }
 fn valid_local(v: Variable) -> bool { matches!(v.kind, VariableKind::LocalMut{..} | VariableKind::LocalConst{..} | VariableKind::Versioned{..}) }
 fn ident(s:&str)->bool { !["for","while","if","else","return","float","int","void","class","template","auto","const","extern","union","struct","namespace","operator","new","delete"].contains(&s) && !s.is_empty() && s.len()<=128 && s.as_bytes()[0].is_ascii_alphabetic() && s.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_') }
 
-struct Lower { p: Program, values: HashMap<Variable,Value>, loads: HashMap<usize,usize>, constants: HashMap<u32,usize>, wrote: HashSet<usize> }
+struct Lower { p: Program, elements:u64, values: HashMap<Variable,Value>, loads: HashMap<usize,usize>, constants: HashMap<u32,usize>, wrote: HashSet<usize> }
 impl Lower {
     fn resolve(&self, v: Variable) -> Result<Value> {
-        if matches!(v.kind, VariableKind::Builtin(Builtin::AbsolutePosX)) && is_index(v.ty) { return Ok(Value::Lane); }
+        if matches!(v.kind, VariableKind::Builtin(Builtin::AbsolutePosX | Builtin::AbsolutePos)) && is_index(v.ty) { return Ok(Value::Lane); }
+        if let VariableKind::Constant(ConstantValue::UInt(n))=v.kind {
+            if is_index(v.ty) { return Ok(if n==self.elements {Value::Length}else{Value::Index(n)}); }
+        }
         self.values.get(&v).copied().ok_or_else(|| invalid(format!("undefined or unsupported operand {v:?}")))
     }
     fn vector(&mut self,v:Variable)->Result<usize> {
@@ -42,19 +45,19 @@ impl Lower {
     }
     fn assign(&mut self,out:Variable,value:Value)->Result<()> {
         if !valid_local(out) { return Err(invalid(format!("not a local destination: {out:?}"))); }
-        let ty_ok=match value { Value::Vector(_)=>out.ty==f32_type(),Value::Outside=>out.ty==Type::scalar(ElemType::Bool),_=>is_index(out.ty) };
+        let ty_ok=match value { Value::Vector(_)=>out.ty==f32_type(),Value::Outside|Value::Inside=>out.ty==Type::scalar(ElemType::Bool),_=>is_index(out.ty) };
         if !ty_ok { return Err(invalid("IR output type does not match operation")); }
         if self.values.contains_key(&out) && !matches!(out.kind,VariableKind::LocalMut{..}) { return Err(invalid("immutable local assigned twice")); }
         self.values.insert(out,value);Ok(())
     }
     fn array(&self,v:Variable,writable:bool)->Result<usize> {
-        let id=match (v.kind,writable) {
-            (VariableKind::GlobalInputArray(id),false)|(VariableKind::GlobalOutputArray(id),true)=>id,
-            _=>return Err(unsupported("only readonly input loads and distinct output stores are supported")),
+        let id=match v.kind {
+            VariableKind::GlobalInputArray(id)|VariableKind::GlobalOutputArray(id)=>id,
+            _=>return Err(unsupported("expected global buffer")),
         };
         let i=self.p.bindings.iter().position(|b|b.id==id).ok_or_else(||invalid("unknown buffer id"))?;
         let b=&self.p.bindings[i];
-        if b.ty!=v.ty || (b.visibility==Visibility::ReadWrite)!=writable { return Err(invalid("buffer visibility/type mismatch")); }
+        if b.ty!=v.ty || (writable && b.visibility!=Visibility::ReadWrite) { return Err(invalid("buffer visibility/type mismatch")); }
         Ok(i)
     }
     fn length_array(&self,v:Variable)->Result<()> {
@@ -79,6 +82,27 @@ impl Lower {
                     self.assign(out.ok_or_else(||invalid("comparison output missing"))?,Value::Outside)
                 } else { Err(unsupported("only canonical index >= length guard is supported")) }
             },
+            Operation::Comparison(Comparison::Lower(op))=>{
+                if matches!((self.resolve(op.lhs)?,self.resolve(op.rhs)?),(Value::Lane,Value::Length)) {
+                    self.assign(out.ok_or_else(||invalid("comparison output missing"))?,Value::Inside)
+                } else {Err(unsupported("only canonical index < length is supported"))}
+            },
+            Operation::Operator(Operator::Not(op))=>{
+                let value=match self.resolve(op.input)?{Value::Inside=>Value::Outside,Value::Outside=>Value::Inside,_=>return Err(unsupported("non-domain boolean negation"))};
+                self.assign(out.ok_or_else(||invalid("not output missing"))?,value)
+            },
+            Operation::Operator(Operator::Cast(op))=>{
+                let dst=out.ok_or_else(||invalid("cast output missing"))?;
+                if dst.ty==op.input.ty {let value=if dst.ty==f32_type(){Value::Vector(self.vector(op.input)?)}else{self.resolve(op.input)?};return self.assign(dst,value);}
+                if is_index(dst.ty)&&is_index(op.input.ty){return self.assign(dst,self.resolve(op.input)?);}
+                Err(unsupported("non-identity data cast"))
+            },
+            Operation::Operator(Operator::Reinterpret(op))=>{
+                let dst=out.ok_or_else(||invalid("reinterpret output missing"))?;
+                if dst.ty!=f32_type() || op.input.ty!=Type::new(UIntKind::U32.into()){return Err(unsupported("reinterpret must preserve FP32 scalar bits"));}
+                let VariableKind::Constant(ConstantValue::UInt(bits))=op.input.kind else{return Err(unsupported("nonconstant reinterpret"));};
+                self.add(dst,Node::Constant(bits as u32))
+            },
             Operation::Branch(Branch::If(branch))=>{
                 if !matches!(self.resolve(branch.cond)?,Value::Outside) { return Err(unsupported("data-dependent branch")); }
                 let ops:Vec<_>=branch.scope.instructions.iter().filter(|i|!matches!(i.operation,Operation::NonSemantic(_))).collect();
@@ -87,13 +111,14 @@ impl Lower {
                 // only [0,elements), so this exact guard is redundant on every lane.
                 Ok(())
             },
-            Operation::Operator(Operator::Index(op))=>{
+            Operation::Operator(Operator::Index(op)|Operator::UncheckedIndex(op))=>{
                 if op.vector_size!=0 || op.unroll_factor!=1 || !matches!(self.resolve(op.index)?,Value::Lane) { return Err(unsupported("loads must index one scalar at AbsolutePosX")); }
                 let a=self.array(op.list,false)?;
+                if self.wrote.contains(&a){return Err(unsupported("load after store needs explicit ordering lowering"));}
                 let id=if let Some(&n)=self.loads.get(&a){n}else{let n=self.p.nodes.len();self.p.nodes.push(Node::Input(a));self.loads.insert(a,n);n};
                 self.assign(out.ok_or_else(||invalid("load output missing"))?,Value::Vector(id))
             },
-            Operation::Operator(Operator::IndexAssign(op))=>{
+            Operation::Operator(Operator::IndexAssign(op)|Operator::UncheckedIndexAssign(op))=>{
                 if op.vector_size!=0 || op.unroll_factor!=1 || !matches!(self.resolve(op.index)?,Value::Lane) { return Err(unsupported("stores must index one scalar at AbsolutePosX")); }
                 let a=self.array(out.ok_or_else(||invalid("store output missing"))?,true)?;
                 if !self.wrote.insert(a){return Err(unsupported("multiple stores to one output"));}
@@ -129,12 +154,12 @@ pub(super) fn lower(mut k:KernelDefinition,elements:u64)->Result<Program> {
     // Read actual scope instructions. Unused local declarations carry no effects;
     // every operation, operand and referenced special storage is checked below.
     if k.body.instructions.len()>4096{return Err(unsupported("instruction limit exceeded"));}
-    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![]},values:HashMap::new(),loads:HashMap::new(),constants:HashMap::new(),wrote:HashSet::new()};
+    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![]},elements,values:HashMap::new(),loads:HashMap::new(),constants:HashMap::new(),wrote:HashSet::new()};
     for (n,i) in k.body.instructions.iter().enumerate(){l.instruction(i).map_err(|e|{
         let text=format!("instruction {n}: {e}");
         if matches!(e,ruda_core::compiler::CompilationError::UnsupportedInstruction{..}){unsupported(text)}else{invalid(text)}
     })?;}
     if l.wrote.len()!=outputs{return Err(invalid("every declared output must be written exactly once"));}
-    if l.loads.len()!=inputs{return Err(unsupported("unused input bindings must be removed before lowering"));}
+    if l.p.bindings.iter().enumerate().any(|(i,b)|b.visibility==Visibility::Read&&!l.loads.contains_key(&i)){return Err(unsupported("unused input bindings must be removed before lowering"));}
     Ok(l.p)
 }

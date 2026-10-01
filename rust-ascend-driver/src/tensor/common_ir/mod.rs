@@ -30,6 +30,7 @@ impl CannProgram{
     /// only a contiguous binding domain. Row statistics are allocated by their own
     /// compiled byte length, not by the full activation length. No implicit tensor broadcasting.
     pub fn run(&self,inputs:&[&CannTensor])->Result<Vec<CannTensor>,CannError>{
+        if self.compiled.requires_initialized_outputs(){return Err(invalid("in-place IR requires initialized output tensors; use run_into"));}
         let mut out=Vec::new();for b in self.compiled.bindings(){if b.writable{out.push(self.kernel.api.session.allocate_tensor(&[(b.bytes / 4) as i64],DType::F32)?);}}
         let mut refs:Vec<_>=out.iter_mut().collect();self.run_into(inputs,&mut refs)?;Ok(out)
     }

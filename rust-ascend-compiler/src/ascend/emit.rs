@@ -20,6 +20,10 @@ pub(super) fn emit(p:&Program,a:&Allocation,o:&AscendOptions)->String{
         line(&mut s,format!("g{i}.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(b{i}), elements);"));
         line(&mut s,format!("AscendC::TQue<AscendC::TPosition::{pos}, 1> q{i};"));
         line(&mut s,format!("pipe.InitBuffer(q{i}, 1, tile * sizeof(float));"));
+        if b.visibility==Visibility::ReadWrite && p.nodes.iter().any(|n|matches!(n,Node::Input(j) if *j==i)) {
+            line(&mut s,format!("AscendC::TQue<AscendC::TPosition::VECIN, 1> loadq{i};"));
+            line(&mut s,format!("pipe.InitBuffer(loadq{i}, 1, tile * sizeof(float));"));
+        }
     }
     if a.slots>0 {
         line(&mut s,"AscendC::TBuf<AscendC::TPosition::VECCALC> scratch;");
@@ -33,11 +37,12 @@ pub(super) fn emit(p:&Program,a:&Allocation,o:&AscendOptions)->String{
     line(&mut s,"    const uint32_t aligned = (count + 7U) / 8U * 8U;");
     line(&mut s,"    AscendC::DataCopyExtParams copy{1, count * uint32_t(sizeof(float)), 0, 0, 0};");
     line(&mut s,"    AscendC::DataCopyPadExtParams<float> pad{true, 0, static_cast<uint8_t>(aligned-count), 0.0f};");
-    for (i,b) in p.bindings.iter().enumerate(){if b.visibility==Visibility::Read {
-        line(&mut s,format!("    auto load{i} = q{i}.AllocTensor<float>();"));
+    for (i,b) in p.bindings.iter().enumerate(){if p.nodes.iter().any(|n|matches!(n,Node::Input(j) if *j==i)) {
+        let q=if b.visibility==Visibility::Read{format!("q{i}")}else{format!("loadq{i}")};
+        line(&mut s,format!("    auto load{i} = {q}.AllocTensor<float>();"));
         line(&mut s,format!("    AscendC::DataCopyPad(load{i}, g{i}[offset], copy, pad);"));
-        line(&mut s,format!("    q{i}.EnQue(load{i});"));
-        line(&mut s,format!("    auto x{i} = q{i}.DeQue<float>();"));
+        line(&mut s,format!("    {q}.EnQue(load{i});"));
+        line(&mut s,format!("    auto x{i} = {q}.DeQue<float>();"));
     }}
     // Operations use padded local lanes. No lane reduction can expose the padding;
     // exact-byte CopyOut writes only count live elements to GM.
@@ -65,6 +70,8 @@ pub(super) fn emit(p:&Program,a:&Allocation,o:&AscendOptions)->String{
         line(&mut s,format!("    q{i}.FreeTensor(ready{i});"));
     }
     line(&mut s,"    AscendC::PipeBarrier<PIPE_ALL>();");
-    for (i,b) in p.bindings.iter().enumerate(){if b.visibility==Visibility::Read{line(&mut s,format!("    q{i}.FreeTensor(x{i});"));}}
+    for (i,b) in p.bindings.iter().enumerate(){if p.nodes.iter().any(|n|matches!(n,Node::Input(j) if *j==i)){
+        let q=if b.visibility==Visibility::Read{format!("q{i}")}else{format!("loadq{i}")};
+        line(&mut s,format!("    {q}.FreeTensor(x{i});"));}}
     line(&mut s,"}");s.push_str("}\n");s
 }
