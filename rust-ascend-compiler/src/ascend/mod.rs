@@ -148,7 +148,7 @@ impl Compiler for AscendCompiler {
             block_dim: o.vector_cores, tile_elements: o.tile_elements, ub_bytes: ub as u32,
             temporary_slots: alloc.slots, initialized_outputs:inplace!=0,
             bindings: p.bindings.iter().map(|b| AscendBinding { id: b.id,
-                writable: b.visibility == Visibility::ReadWrite, bytes: u64::from(b.size.unwrap_or(o.elements as u32)) * 4 }).collect() })
+                writable: b.visibility == Visibility::ReadWrite, bytes: b.size.map(|n|n as u64).unwrap_or(o.elements) * 4 }).collect() })
     }
     fn elem_size(&self, elem: ElemType) -> usize { elem.size() }
     fn extension(&self) -> &'static str { "asc" }

@@ -383,7 +383,7 @@ impl AscendServer {
             rust_ascend_compiler::ascend::arguments::specialize(definition,&arguments.info.data,
                 arguments.info.dynamic_metadata_offset,task.address_type()).and_then(|definition| {
                 options.elements=definition.buffers.iter().filter(|b| b.visibility==ruda_core::kernel::Visibility::ReadWrite)
-                    .filter_map(|b|b.size).map(u64::from).max().unwrap_or(0);
+                    .filter_map(|b|b.size).map(|n|n as u64).max().unwrap_or(0);
                 AscendCompiler.compile(definition,&options,mode,task.address_type()).map(|repr| {
                     ruda_runtime::runtime::kernel::CompiledKernel::<AscendCompiler> {
                         entrypoint_name:repr.entrypoint().into(), source:repr.source().into(), repr:Some(repr),

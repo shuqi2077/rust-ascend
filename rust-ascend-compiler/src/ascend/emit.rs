@@ -19,7 +19,7 @@ pub(super) fn emit(p:&Program,a:&Allocation,o:&AscendOptions)->String{
     for (i,b) in p.bindings.iter().enumerate(){
         let pos=if b.visibility==Visibility::Read{"VECIN"}else{"VECOUT"};
         line(&mut s,format!("AscendC::GlobalTensor<float> g{i};"));
-        line(&mut s,format!("g{i}.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(b{i}), {}ULL);",b.size.unwrap_or(o.elements as u32)));
+        line(&mut s,format!("g{i}.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(b{i}), {}ULL);",b.size.map(|n|n as u64).unwrap_or(o.elements)));
         line(&mut s,format!("AscendC::TQue<AscendC::TPosition::{pos}, 1> q{i};"));
         line(&mut s,format!("pipe.InitBuffer(q{i}, 1, tile * sizeof(float));"));
         if b.visibility==Visibility::ReadWrite && p.nodes.iter().any(|n|matches!(n,Node::Input(j) if *j==i)) {

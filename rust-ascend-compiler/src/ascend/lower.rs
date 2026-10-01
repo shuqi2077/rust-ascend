@@ -86,7 +86,7 @@ impl Lower {
             },
             Operation::Metadata(Metadata::Length{var}|Metadata::BufferLength{var})=>{
                 self.length_array(*var)?;
-                let size=u64::from(self.p.bindings[self.array(*var,false)?].size.unwrap_or(self.elements as u32));
+                let size=self.p.bindings[self.array(*var,false)?].size.map(|n|n as u64).unwrap_or(self.elements);
                 self.assign(out.ok_or_else(||invalid("metadata output missing"))?,if size==self.elements{Value::Length}else{Value::Index(size)})
             },
             Operation::Comparison(Comparison::GreaterEqual(op))=>{
@@ -140,7 +140,7 @@ impl Lower {
                 if op.vector_size!=0 || op.unroll_factor!=1 { return Err(unsupported("loads must index one scalar")); }
                 let a=self.array(op.list,false)?;
                 let index=self.index(op.index)?;
-                let size=u64::from(self.p.bindings[a].size.unwrap_or(self.elements as u32));
+                let size=self.p.bindings[a].size.map(|n|n as u64).unwrap_or(self.elements);
                 if self.elements!=0 && index.bounds(self.elements)?.1>=size{return Err(invalid("layout load may exceed the bound buffer"));}
                 if self.p.bindings[a].visibility==Visibility::ReadWrite && *index!=Index::Lane{return Err(unsupported("mapped in-place reads require scatter dependency analysis"));}
                 if self.p.load_indices.get(&a).is_some_and(|old|old!=&index){return Err(unsupported("multiple distinct layouts for one input binding"));}
