@@ -43,8 +43,24 @@ impl CannSession {
     /// during this environment's lifetime. Libraries must be trusted CANN binaries.
     /// Do NOT call in a process using torch_npu; borrow its resources with attach().
     pub unsafe fn open_exclusive(device:crate::CannDevice,acl_library:impl AsRef<OsStr>,operator_library:impl AsRef<OsStr>)->Result<Rc<Self>,CannError>{
+        unsafe { Self::open_exclusive_libraries(device, acl_library, [operator_library]) }
+    }
+
+    /// Own an ACL environment with explicitly selected split CANN operator libraries.
+    ///
+    /// # Safety
+    /// Same requirements as `open_exclusive`; all paths must identify libraries
+    /// from one trusted, ABI-compatible CANN installation.
+    pub unsafe fn open_exclusive_libraries<P: AsRef<OsStr>>(
+        device: crate::CannDevice,
+        acl_library: impl AsRef<OsStr>,
+        operator_libraries: impl IntoIterator<Item = P>,
+    ) -> Result<Rc<Self>, CannError> {
         let api=Rc::new(unsafe{CannApi::load_from(acl_library)?});
-        let operators=unsafe{CannLibrary::load_from(operator_library)?};
+        let operators: Vec<_> = operator_libraries.into_iter()
+            .map(|path| unsafe { CannLibrary::load_from(path) })
+            .collect::<Result<_, _>>()?;
+        if operators.is_empty() { return Err(invalid("at least one CANN operator library is required")); }
         if EXCLUSIVE.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err(){return Err(invalid("another exclusive CANN environment exists in this process"));}
         let mut owner=Owner{api:api.clone(),device:device.acl_id(),initialized:false,selected:false,context:std::ptr::null_mut(),stream:std::ptr::null_mut()};
         // SAFETY: the caller promised exclusive ACL ownership; handles live in Owner.
@@ -58,7 +74,7 @@ impl CannSession {
             check_status("aclrtSetCurrentContext",api.aclrtSetCurrentContext(owner.context))?;
             check_status("aclrtCreateStream",api.aclrtCreateStream(&mut owner.stream))?;
             if owner.stream.is_null(){return Err(CannError::NullHandle("aclrtCreateStream"));}
-            let mut session=CannSession::attach(api,operators,owner.context,owner.stream)?;
+            let mut session=CannSession::attach_libraries(api,operators,owner.context,owner.stream)?;
             Rc::get_mut(&mut session).expect("newly attached session must be unique").owner=Some(Rc::new(owner));
             Ok(session)
         }

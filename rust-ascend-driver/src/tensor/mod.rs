@@ -9,6 +9,7 @@ mod ffi;
 mod layout;
 mod ops;
 mod owner;
+mod backward;
 use crate::{CannApi, CannError, CannLibrary, check_status, sys::*};
 use ffi::*;
 use layout::invalid;
@@ -40,11 +41,26 @@ impl CannSession {
         context: AclContext,
         stream: AclStream,
     ) -> Result<Rc<Self>, CannError> {
+        unsafe { Self::attach_libraries(api, vec![operators], context, stream) }
+    }
+
+    /// Borrow a context/stream using CANN's split operator libraries.
+    /// All libraries are retained until the session and its tensors are released.
+    ///
+    /// # Safety
+    /// Same lifecycle and exclusive-stream requirements as `attach`. Every
+    /// supplied library must belong to the same trusted, ABI-compatible SDK.
+    pub unsafe fn attach_libraries(
+        api: Rc<CannApi>,
+        operators: Vec<CannLibrary>,
+        context: AclContext,
+        stream: AclStream,
+    ) -> Result<Rc<Self>, CannError> {
         if context.is_null() || stream.is_null() {
             return Err(invalid("CANN context and stream must be non-null"));
         }
         // SAFETY: library identity and context/stream ownership are guaranteed by caller.
-        let ops = unsafe { OperatorApi::load(operators)? };
+        let ops = unsafe { OperatorApi::load_libraries(operators)? };
         let session = Rc::new(Self {
             api,
             ops,

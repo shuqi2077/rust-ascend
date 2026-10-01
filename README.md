@@ -24,6 +24,10 @@ use rust_ascend::{
 | `rust_ascend::kernels` | Rust BF16 矩阵设备程序与 CCE 生成 |
 | `rust_ascend::core` | RUDA 公共 IR 与编译器接口 |
 
+ACLNN 路径另提供 `cast`、`silu_backward`、`softmax_backward`、`log_softmax_backward` 和 `rms_norm_backward`。反向接口支持 FP32/FP16/BF16；RMSNorm 返回输入梯度及 FP32 权重梯度。调用示例见 [gradients](examples/gradients.rs)。
+
+`CannSession::open_exclusive_libraries` / `attach_libraries` 可显式传入 CANN 9 的 `libnnopbase.so`、`libopapi_math.so`、`libopapi_nn.so` 等拆分库；原有单库接口保留。
+
 公共 IR 依赖 `ruda-core`。可选的 `rust-ascend-compiler/ptx` 使用 RUDA PTX 编译器检查同一 IR 的兼容性，不改变默认昇腾执行路径。
 
 ## 生成与执行
@@ -58,7 +62,7 @@ python tools/ascend/build_deepgemm.py --emit-only --out ./target/bf16-source
 - BF16 矩阵：direct-store Dense/Batched NN/NT/TN/TT、对齐的 MGrouped NT，BF16/FP32 输出。
 - 设备代码目标为 Ascend950DT / dav-c310；不自动推断或替换目标型号。
 - Rust 程序生成 CCE，再由 Bisheng 编译为设备机器码，不是直接 Rust → 昇腾 ISA。
-- 不包含完整 PyTorch 昇腾后端、RMSNorm 权重梯度、通用低精度行计算或任意 stride/广播。
+- 不包含完整 PyTorch 昇腾后端、公共 IR 中的 RMSNorm 权重梯度、通用低精度行计算或任意 stride/广播。
 
 ## 测试入口
 

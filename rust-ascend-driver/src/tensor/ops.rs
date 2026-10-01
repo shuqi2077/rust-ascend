@@ -262,14 +262,25 @@ impl CannSession {
     }
 
     pub fn softmax(self: &Rc<Self>, input: &CannTensor, dim: i64) -> Result<CannTensor, CannError> {
+        self.softmax_forward(input, dim, c"aclnnSoftmaxGetWorkspaceSize", c"aclnnSoftmax", "aclnnSoftmax")
+    }
+
+    pub fn log_softmax(self: &Rc<Self>, input: &CannTensor, dim: i64) -> Result<CannTensor, CannError> {
+        self.softmax_forward(input, dim, c"aclnnLogSoftmaxGetWorkspaceSize", c"aclnnLogSoftmax", "aclnnLogSoftmax")
+    }
+
+    fn softmax_forward(
+        self: &Rc<Self>, input: &CannTensor, dim: i64,
+        plan_name: &CStr, run_name: &CStr, operation: &'static str,
+    ) -> Result<CannTensor, CannError> {
         self.same_session(&[input])?;
         let dim = layout::axis(dim, input.layout.shape.len())? as i64;
         let output = self.allocate_tensor(input.layout.shape(), input.layout.dtype())?;
         // SAFETY: exact SDK signature; axis and storage are valid.
         unsafe {
-            let plan: SoftmaxPlan = self.ops.get(c"aclnnSoftmaxGetWorkspaceSize")?;
-            let run = self.ops.get(c"aclnnSoftmax")?;
-            self.execute("aclnnSoftmax", run, |size, exec| {
+            let plan: SoftmaxPlan = self.ops.get(plan_name)?;
+            let run = self.ops.get(run_name)?;
+            self.execute(operation, run, |size, exec| {
                 plan(
                     input.descriptor.as_ptr(),
                     dim,
