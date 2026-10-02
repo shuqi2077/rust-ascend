@@ -10,13 +10,14 @@ fn inputs(op: RowProgram, rows: usize, width: usize) -> Vec<Vec<f32>> {
     let weight: Vec<f32> = (0..width).map(|i| 0.7+(i%7) as f32/13.0).collect();
     match op {
         RowProgram::LayerNorm => vec![x, weight, (0..width).map(|i| (i%5) as f32/11.0-0.2).collect()],
-        RowProgram::LayerNormInputBackward => {
+        RowProgram::LayerNormInputBackward | RowProgram::LayerNormWeightContributions => {
             let mean: Vec<f32> = x.chunks(width).map(|row| (row.iter().map(|&v| v as f64).sum::<f64>()/width as f64) as f32).collect();
             let rstd: Vec<f32> = x.chunks(width).map(|row| {
                 let m = row.iter().map(|&v| v as f64).sum::<f64>()/width as f64;
                 (row.iter().map(|&v| (v as f64-m).powi(2)).sum::<f64>()/width as f64+1e-5).sqrt().recip() as f32
             }).collect();
-            vec![x, dy, weight, mean, rstd]
+            if op == RowProgram::LayerNormInputBackward { vec![x, dy, weight, mean, rstd] }
+            else { vec![x, dy, mean, rstd] }
         }
         RowProgram::RmsNorm => vec![x, weight],
         RowProgram::RmsNormInputBackward => {
@@ -52,6 +53,9 @@ fn reference(op: RowProgram, rows: usize, width: usize, x: &[Vec<f32>]) -> Vec<V
                 let variance = a.iter().map(|&v| (v-mean).powi(2)).sum::<f64>()/width as f64;
                 let r = (variance+1e-5).sqrt().recip(); out[1][row] = mean as f32; out[2][row] = r as f32;
                 for j in 0..width { out[0][offset+j] = ((a[j]-mean)*r*x[1][j] as f64+x[2][j] as f64) as f32; }
+            }
+            RowProgram::LayerNormWeightContributions => {
+                for j in 0..width { out[0][offset+j] = ((a[j]-x[2][row] as f64)*x[3][row] as f64*x[1][offset+j] as f64) as f32; }
             }
             RowProgram::LayerNormInputBackward => {
                 let mean = x[3][row] as f64; let r = x[4][row] as f64;

@@ -2,6 +2,7 @@
 //! CANN objects stay on one owning thread; callers exchange allocation IDs only.
 mod build;
 mod worker;
+mod normalization;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -137,6 +138,21 @@ impl Runtime for AscendRuntime {
     type Compiler = AscendCompiler;
     type Server = AscendServer;
     type Device = AscendDevice;
+    fn has_native_layer_norm() -> bool { true }
+    fn layer_norm(
+        client: &ComputeClient<Self>, input: portable::normalization::TensorBuffer,
+        weight: portable::normalization::TensorBuffer, bias: Option<portable::normalization::TensorBuffer>,
+        epsilon: f64,
+    ) -> [portable::normalization::TensorBuffer; 3] {
+        normalization::forward(client, input, weight, bias, epsilon).expect("Ascend LayerNorm failed")
+    }
+    fn layer_norm_backward(
+        client: &ComputeClient<Self>, input: portable::normalization::TensorBuffer,
+        weight: portable::normalization::TensorBuffer, grad: portable::normalization::TensorBuffer,
+        mean: portable::normalization::TensorBuffer, rstd: portable::normalization::TensorBuffer,
+    ) -> [portable::normalization::TensorBuffer; 3] {
+        normalization::backward(client, input, weight, grad, mean, rstd).expect("Ascend LayerNorm backward failed")
+    }
     fn client(device: &Self::Device) -> ComputeClient<Self> {
         ComputeClient::load(device)
     }

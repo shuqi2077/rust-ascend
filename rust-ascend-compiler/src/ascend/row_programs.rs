@@ -12,13 +12,13 @@ use ruda_core::{ir::*, kernel::{KernelArg, KernelDefinition, KernelOptions, Visi
 pub enum RowProgram {
     Sum, Mean, Max, Softmax, LogSoftmax, RmsNorm,
     SoftmaxBackward, LogSoftmaxBackward, RmsNormInputBackward,
-    LayerNorm, LayerNormInputBackward,
+    LayerNorm, LayerNormInputBackward, LayerNormWeightContributions,
 }
 impl RowProgram {
-    pub const ALL: [Self; 11] = [Self::Sum, Self::Mean, Self::Max, Self::Softmax,
+    pub const ALL: [Self; 12] = [Self::Sum, Self::Mean, Self::Max, Self::Softmax,
         Self::LogSoftmax, Self::RmsNorm, Self::SoftmaxBackward,
         Self::LogSoftmaxBackward, Self::RmsNormInputBackward, Self::LayerNorm,
-        Self::LayerNormInputBackward];
+        Self::LayerNormInputBackward, Self::LayerNormWeightContributions];
     pub fn name(self) -> &'static str { match self {
         Self::Sum => "row_sum", Self::Mean => "row_mean", Self::Max => "row_max",
         Self::Softmax => "softmax", Self::LogSoftmax => "log_softmax",
@@ -26,6 +26,7 @@ impl RowProgram {
         Self::LogSoftmaxBackward => "log_softmax_backward",
         Self::RmsNormInputBackward => "rms_norm_input_backward",
         Self::LayerNorm => "layer_norm", Self::LayerNormInputBackward => "layer_norm_input_backward",
+        Self::LayerNormWeightContributions => "layer_norm_weight_contributions",
     }}
     pub fn parse(s: &str) -> Option<Self> { Self::ALL.into_iter().find(|p| p.name() == s) }
 }
@@ -105,7 +106,7 @@ pub fn definition(op: RowProgram, width: u32, epsilon: f32) -> Result<KernelDefi
     if !epsilon.is_finite() || epsilon <= 0.0 { return Err(invalid("epsilon must be finite and positive")); }
     let mut b = Builder::new(format!("ruda_cann_{}", op.name()), width);
     let count = match op { RowProgram::LayerNormInputBackward => 5,
-        RowProgram::LayerNorm => 3, RowProgram::RmsNormInputBackward => 4,
+        RowProgram::LayerNorm => 3, RowProgram::RmsNormInputBackward | RowProgram::LayerNormWeightContributions => 4,
         RowProgram::RmsNorm | RowProgram::SoftmaxBackward | RowProgram::LogSoftmaxBackward => 2, _ => 1 };
     let input: Vec<_> = (0..count).map(|_| b.array(false)).collect();
     let output = b.array(true);
@@ -160,6 +161,14 @@ pub fn definition(op: RowProgram, width: u32, epsilon: f32) -> Result<KernelDefi
             b.write_row(output, &y);
             let (mean_out, rstd_out) = layer_stats.unwrap();
             b.write_scalar(mean_out, mean); b.write_scalar(rstd_out, r);
+        }
+        RowProgram::LayerNormWeightContributions => {
+            let dy = b.chunks(input[1], false);
+            let row = b.row; let mean = b.read(input[2], row); let r = b.read(input[3], row);
+            let dw: Vec<_> = x.iter().zip(dy).map(|(&v, g)| {
+                let centered = b.sub(v, mean); let normalized = b.mul(centered, r); b.mul(normalized, g)
+            }).collect();
+            b.write_row(output, &dw);
         }
         RowProgram::LayerNormInputBackward => {
             let dy = b.chunks(input[1], false); let weight = b.chunks(input[2], true);

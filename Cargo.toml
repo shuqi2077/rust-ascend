@@ -9,7 +9,7 @@ repository = "https://github.com/shuqi2077/rust-ascend"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-ruda-core = { version = "=0.1.3", default-features = false, features = ["ir", "compiler-std", "argument-layout"] }
+ruda-core = { git = "https://github.com/shuqi2077/RUDA.git", rev = "c5ba9d2c0d50ab70fea54e9908b28e292e8539a6", default-features = false, features = ["ir", "compiler-std", "argument-layout"] }
 rust-ascend-compiler = { path = "rust-ascend-compiler", version = "0.1.0", default-features = false }
 rust-ascend-driver = { path = "rust-ascend-driver", version = "0.1.0", default-features = false }
 rust-ascend-kernels = { path = "rust-ascend-kernels", version = "0.1.0" }
@@ -28,10 +28,11 @@ ruda-core.workspace = true
 rust-ascend-compiler = { workspace = true, features = ["ascend"] }
 rust-ascend-driver = { workspace = true, features = ["runtime"] }
 rust-ascend-kernels.workspace = true
-ruda-tensor = { version = "=0.21.15", default-features = false, features = ["api-std"] }
-ruda-tensor-device = { version = "=0.21.15", default-features = false, features = ["std"] }
-ruda-autodiff = { version = "=0.21.14", default-features = false, features = ["std"] }
+ruda-tensor = { git = "https://github.com/shuqi2077/RUDA.git", rev = "c5ba9d2c0d50ab70fea54e9908b28e292e8539a6", default-features = false, features = ["api-std"] }
+ruda-tensor-device = { git = "https://github.com/shuqi2077/RUDA.git", rev = "c5ba9d2c0d50ab70fea54e9908b28e292e8539a6", default-features = false, features = ["std"] }
+ruda-autodiff = { git = "https://github.com/shuqi2077/RUDA.git", rev = "c5ba9d2c0d50ab70fea54e9908b28e292e8539a6", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-ruda-kernel = { version = "=0.1.5", default-features = false, features = ["frontend-std", "library"] }
-ruprim = { package = "ruPRIM", version = "=0.1.13", default-features = false, features = ["std", "elementwise"] }
+ruda-kernel = { git = "https://github.com/shuqi2077/RUDA.git", rev = "c5ba9d2c0d50ab70fea54e9908b28e292e8539a6", default-features = false, features = ["frontend-std", "library"] }
+ruprim = { package = "ruPRIM", git = "https://github.com/shuqi2077/RUDA.git", rev = "c5ba9d2c0d50ab70fea54e9908b28e292e8539a6", default-features = false, features = ["std", "elementwise"] }
+ruda-nn = { git = "https://github.com/shuqi2077/RUDA.git", rev = "c5ba9d2c0d50ab70fea54e9908b28e292e8539a6", default-features = false, features = ["std"] }

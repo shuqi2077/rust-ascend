@@ -18,7 +18,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 ROW_OPS = ("row_sum", "row_mean", "row_max", "softmax", "log_softmax", "rms_norm",
            "softmax_backward", "log_softmax_backward", "rms_norm_input_backward",
-           "layer_norm", "layer_norm_input_backward")
+           "layer_norm", "layer_norm_input_backward", "layer_norm_weight_contributions")
 OPS = ("copy", "add", "mul", "silu", "silu_mul", "silu_backward", "silu_mul_backward")
 
 

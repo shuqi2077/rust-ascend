@@ -57,7 +57,15 @@ let dx = x.grad(&gradients).unwrap();
 
 `RowProgram::LayerNorm` 接收连续 FP32 的 `X[rows,width]`、`weight[width]`、`bias[width]`，输出 `Y[rows,width]`、`mean[rows]` 和 `rstd[rows]`。方差按行宽计算，使用中心化平方和。
 
-`RowProgram::LayerNormInputBackward` 接收 `X`、`dY`、`weight`、保存的 `mean`、`rstd`，返回 `dX`。前向统计量可直接保留在设备端传给反向。两条路径都使用公共 Rust IR、既有 32-lane 行降级和 CCE 向量指令，不调用 ACLNN LayerNorm。宽度为 32～4096 且是 32 的倍数；不包含 weight/bias 梯度，也不会自动注册为 RUDA 张量后端的 LayerNorm 分发。
+`RowProgram::LayerNormInputBackward` 接收 `X`、`dY`、`weight`、保存的 `mean`、`rstd`，返回 `dX`。`LayerNormWeightContributions` 计算逐元素权重梯度贡献，再通过设备端逐级成对求和生成 weight 梯度；bias 梯度由 `dY` 按同样方式求和。前向统计量保留在设备端传给反向。上述路径使用公共 Rust IR 和 CCE 向量指令，不调用 ACLNN LayerNorm。
+
+RUDA 的现有 `ruda_nn::LayerNorm` 已接入 `Ascend` 和 `Autodiff<Ascend>`，包括输入、weight、可选 bias 的梯度及共享计算图梯度累积。输入为连续 FP32，归一化最后一维，宽度为 32～4096 且是 32 的倍数；支持任意数量的前导维度和空 batch。不支持的 dtype／布局直接报错。
+
+当前接入使用 Cargo.toml 中固定 Git 提交的 RUDA 依赖，尚不包含在已发布的 crates.io 0.1.0 中。从本仓库运行完整张量／自动求导示例：
+
+```bash
+cargo run --locked --release --example layer_norm_tensor
+```
 
 在配置 CANN 的编译／设备机器上构建三行、宽度 96 的示例，输出目录必须尚不存在：
 

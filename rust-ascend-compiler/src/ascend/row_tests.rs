@@ -2,6 +2,37 @@
 //! cargo; the Python host reference is deliberately a separate validation tier.
 use super::{rows::{self, BindingKind, Binary, Node, Reduction, Unary}, row_programs::{self, RowProgram}, *};
 use ruda_core::{compiler::Compiler, ir::*, kernel::*, launch::RudaDim};
+#[test]
+fn layer_norm_weight_contributions_match_parameter_finite_differences() {
+    for width in [32usize, 96, 4096] {
+        let rows = 3;
+        let x: Vec<f32> = (0..rows*width).map(|i| (i%37) as f32/11.0-1.0).collect();
+        let dy: Vec<f32> = (0..rows*width).map(|i| (i%13) as f32/9.0-0.6).collect();
+        let weight = vec![0.7; width]; let bias = vec![0.2; width];
+        let out = eval(RowProgram::LayerNorm, width as u32, &[x.clone(), weight.clone(), bias.clone()]);
+        let parts = eval(RowProgram::LayerNormWeightContributions, width as u32,
+            &[x.clone(), dy.clone(), out[1].clone(), out[2].clone()]);
+        for col in [0, width/2, width-1] {
+            let objective = |w: &[f32], b: &[f32]| -> f64 {
+                (0..rows).map(|r| {
+                    let row = &x[r*width..(r+1)*width];
+                    let m = row.iter().map(|&x| x as f64).sum::<f64>()/width as f64;
+                    let v = row.iter().map(|&x| (x as f64-m).powi(2)).sum::<f64>()/width as f64;
+                    ((row[col] as f64-m)/(v+1e-5).sqrt()*w[col] as f64+b[col] as f64)*dy[r*width+col] as f64
+                }).sum()
+            };
+            let mut hi = weight.clone(); let mut lo = weight.clone(); hi[col] += 0.01; lo[col] -= 0.01;
+            let numerical = (objective(&hi, &bias)-objective(&lo, &bias))/(hi[col]-lo[col]) as f64;
+            let actual = (0..rows).map(|r| parts[0][r*width+col] as f64).sum::<f64>();
+            assert!((numerical-actual).abs() < 1e-4, "{numerical} != {actual}");
+            let mut hi = bias.clone(); let mut lo = bias.clone(); hi[col] += 0.01; lo[col] -= 0.01;
+            let numerical = (objective(&weight, &hi)-objective(&weight, &lo))/(hi[col]-lo[col]) as f64;
+            let actual = (0..rows).map(|r| dy[r*width+col] as f64).sum::<f64>();
+            assert!((numerical-actual).abs() < 1e-7);
+        }
+    }
+}
+
 fn opts(rows: u64, width: u32) -> AscendOptions { AscendOptions { target: Some(AscendTarget::Ascend950DT),
     elements: rows * width as u64, row_width: Some(width), ..Default::default() } }
 fn compile(op: RowProgram, rows: u64, width: u32) -> Result<AscendKernel> {
@@ -130,7 +161,7 @@ fn mutated(k: KernelDefinition) -> Result<AscendKernel> {
     #[cfg(feature = "ptx")] {
         use crate::ptx::*;
         for op in [RowProgram::RmsNorm, RowProgram::Softmax, RowProgram::RmsNormInputBackward,
-            RowProgram::LayerNorm, RowProgram::LayerNormInputBackward] {
+            RowProgram::LayerNorm, RowProgram::LayerNormInputBackward, RowProgram::LayerNormWeightContributions] {
             let ir = row_programs::definition(op, 64, 1e-5).unwrap();
             let ptx = PtxCompiler.compile(ir.clone(), &PtxCompilationOptions { target: Some(PtxTarget { version: (8, 0), sm: 75 }) }, ExecutionMode::Checked, UIntKind::U64.into()).unwrap();
             assert!(ptx.source.contains(".entry")); assert!(mutated(ir).is_ok());
