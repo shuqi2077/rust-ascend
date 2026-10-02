@@ -113,7 +113,7 @@ impl fmt::Display for AscendKernel {
 
 #[derive(Clone, Debug, Default)]
 pub struct AscendCompiler;
-impl AscendCompiler { pub const CACHE_VERSION: u32 = 4; }
+impl AscendCompiler { pub const CACHE_VERSION: u32 = 5; }
 impl Compiler for AscendCompiler {
     type Representation = AscendKernel;
     type CompilationOptions = AscendOptions;

@@ -70,7 +70,7 @@ fn definition(elements: usize, step: AdamWStorageStep) -> KernelDefinition {
     let kernel=builder.build(KernelSettings::default().address_type(address)
         .ruda_dim(RudaDim::new_1d(64)).kernel_name("ruda_ascend_adamw_storage"));
     let mut info=InfoBuilder::default();
-    for _ in 0..4 {info.metadata.register_tensor(1,elements,elements,vec![elements].into(),vec![1].into(),address);}
+    for _ in 0..4 {info.metadata.register_tensor(1,elements as u64,elements as u64,vec![elements].into(),vec![1].into(),address);}
     let info=info.finish(address);
     crate::compiler::arguments::specialize(kernel,&info.data,info.dynamic_metadata_offset,address.unsigned_type())
         .expect("internally constructed AdamW metadata must match RUDA's ABI")
@@ -94,7 +94,7 @@ fn elements(tensor: &TensorBuffer) -> Result<usize> {
         .ok_or_else(||error("AdamW shape overflow"))?;
     if !tensor.shape.contains(&0) {
         let mut expected=1usize;
-        for (&dim,&stride) in tensor.shape.iter().zip(&tensor.strides).rev() {
+        for (&dim,&stride) in tensor.shape.iter().zip(tensor.strides.iter()).rev() {
             if dim>1 && stride!=expected {return Err(error("AdamW storage is not contiguous"));}
             expected=expected.checked_mul(dim).ok_or_else(||error("AdamW stride overflow"))?;
         }

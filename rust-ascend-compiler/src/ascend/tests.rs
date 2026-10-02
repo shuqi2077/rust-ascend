@@ -19,6 +19,25 @@ fn v(id:u32)->Variable{Variable::new(VariableKind::LocalMut{id},f())}
 #[test]fn undefined_local_rejected(){let mut k=definition(MapProgram::Add);if let Operation::Arithmetic(Arithmetic::Add(op))=&mut k.body.instructions[2].operation{op.lhs=v(999);}assert!(compile(k,16).is_err());}
 #[test]fn unsupported_matrix_warp_sync_not_scalarized(){let mut k=definition(MapProgram::Add);k.body.instructions.insert(0,Instruction::no_out(Branch::Return));assert!(compile(k,16).is_err());let mut k=definition(MapProgram::Add);k.ruda_dim=RudaDim::new_2d(32,4);assert!(compile(k,16).is_err());}
 #[test]fn canonical_length_guard_is_accepted(){let mut k=definition(MapProgram::Add);let arr=Variable::new(VariableKind::GlobalInputArray(0),f());let len=Variable::new(VariableKind::LocalMut{id:50},Type::scalar(ElemType::UInt(UIntKind::U32)));let outside=Variable::new(VariableKind::LocalMut{id:51},Type::scalar(ElemType::Bool));let index=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U32.into());let mut child=Scope::root(false);child.instructions.push(Instruction::no_out(Branch::Return));let mut prefix=vec![Instruction::new(Metadata::Length{var:arr},len),Instruction::new(Comparison::GreaterEqual(BinaryOperator{lhs:index,rhs:len}),outside),Instruction::no_out(Branch::If(Box::new(If{cond:outside,scope:child})))];prefix.append(&mut k.body.instructions);k.body.instructions=prefix;assert!(compile(k,17).is_ok());}
+#[test]fn canonical_inside_guard_keeps_the_same_vector_operations(){
+    for n in [0,1,65,1025] {
+        let flat=definition(MapProgram::SiluMulBackward);
+        let mut guarded=flat.clone();
+        let len=Variable::new(VariableKind::LocalMut{id:50},Type::new(UIntKind::U64.into()));
+        let inside=Variable::new(VariableKind::LocalMut{id:51},Type::scalar(ElemType::Bool));
+        let mut child=Scope::root(false);child.instructions=std::mem::take(&mut guarded.body.instructions);
+        guarded.body.instructions=vec![
+            Instruction::new(Metadata::Length{var:Variable::new(VariableKind::GlobalInputArray(0),f())},len),
+            Instruction::new(Comparison::Lower(BinaryOperator{lhs:Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into()),rhs:len}),inside),
+            Instruction::no_out(Branch::If(Box::new(If{cond:inside,scope:child}))),
+        ];
+        assert_eq!(compile(guarded.clone(),n).unwrap().source(),compile(flat,n).unwrap().source());
+        if let Operation::Branch(Branch::If(branch))=&mut guarded.body.instructions[2].operation {
+            branch.scope.instructions.insert(0,Instruction::no_out(Branch::Return));
+        }
+        assert!(compile(guarded,n).is_err());
+    }
+}
 #[test]fn input_sizes_and_extended_metadata_are_checked(){let mut k=definition(MapProgram::Add);k.buffers[0].size=Some(18);assert_eq!(compile(k.clone(),17).unwrap().bindings()[0].bytes,72);k.buffers[0].size=Some(16);assert!(compile(k.clone(),17).is_err());k.buffers[0].size=Some(18);k.buffers[0].has_extended_meta=true;assert!(compile(k,17).is_err());}
 #[test]fn signed_zero_constant_bits_survive(){let mut k=definition(MapProgram::Copy);let value=Variable::constant(ConstantValue::Float(-0.0),f());k.body.instructions.insert(1,Instruction::new(Arithmetic::Add(BinaryOperator{lhs:v(0),rhs:value}),v(10))); // use the actual loaded value type/kind below
 if let Some(load)=k.body.instructions[0].out{if let Operation::Arithmetic(Arithmetic::Add(op))=&mut k.body.instructions[1].operation{op.lhs=load;}}

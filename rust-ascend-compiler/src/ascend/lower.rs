@@ -129,12 +129,20 @@ impl Lower {
                 self.add(dst,Node::Constant(bits as u32))
             },
             Operation::Branch(Branch::If(branch))=>{
-                if !matches!(self.resolve(branch.cond)?,Value::Outside) { return Err(unsupported("data-dependent branch")); }
-                let ops:Vec<_>=branch.scope.instructions.iter().filter(|i|!matches!(i.operation,Operation::NonSemantic(_))).collect();
-                if ops.len()!=1 || !matches!(ops[0].operation,Operation::Branch(Branch::Return)) { return Err(unsupported("only a canonical tail-guard return is allowed")); }
-                // The actual loader contract is equal lengths; lowering dispatches
-                // only [0,elements), so this exact guard is redundant on every lane.
-                Ok(())
+                match self.resolve(branch.cond)? {
+                    Value::Inside => {
+                        // Every dispatched lane is in [0,elements). Keep the original
+                        // guarded operations and their order; do not lower data branches.
+                        for instruction in &branch.scope.instructions {self.instruction(instruction)?;}
+                        Ok(())
+                    },
+                    Value::Outside => {
+                        let ops:Vec<_>=branch.scope.instructions.iter().filter(|i|!matches!(i.operation,Operation::NonSemantic(_))).collect();
+                        if ops.len()!=1 || !matches!(ops[0].operation,Operation::Branch(Branch::Return)) { return Err(unsupported("only a canonical tail-guard return is allowed")); }
+                        Ok(())
+                    },
+                    _ => Err(unsupported("data-dependent branch")),
+                }
             },
             Operation::Operator(Operator::Index(op)|Operator::UncheckedIndex(op))=>{
                 if op.vector_size!=0 || op.unroll_factor!=1 { return Err(unsupported("loads must index one scalar")); }
