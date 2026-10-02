@@ -16,6 +16,31 @@ pub trait RmsNormBackend: Backend {
         -> Result<FloatTensor<Self>>;
 }
 
+/// Backend extension for native last-axis Softmax and LogSoftmax.
+pub trait SoftmaxBackend: Backend {
+    /// Forward primitive with optional log-probabilities and native first-order backward.
+    fn normalized_exponential(input: FloatTensor<Self>, logarithmic: bool) -> Result<FloatTensor<Self>>;
+}
+
+/// Native last-axis FP32 Softmax on a RUDA tensor, including RUDA autodiff.
+pub fn softmax<B: SoftmaxBackend, const D: usize>(input: Tensor<B,D>) -> Result<Tensor<B,D>> {
+    normalized_exponential(input, false)
+}
+
+/// Native last-axis FP32 LogSoftmax on a RUDA tensor, including RUDA autodiff.
+pub fn log_softmax<B: SoftmaxBackend, const D: usize>(input: Tensor<B,D>) -> Result<Tensor<B,D>> {
+    normalized_exponential(input, true)
+}
+
+fn normalized_exponential<B: SoftmaxBackend, const D: usize>(input: Tensor<B,D>, logarithmic: bool)
+    -> Result<Tensor<B,D>> {
+    let primitive = match input.into_primitive() {
+        TensorPrimitive::Float(tensor) => tensor,
+        TensorPrimitive::QFloat(_) => return Err(CannError::InvalidTensor("native Softmax does not dequantize inputs implicitly".into())),
+    };
+    B::normalized_exponential(primitive, logarithmic).map(|output| Tensor::from_primitive(TensorPrimitive::Float(output)))
+}
+
 /// Normalize the last dimension of a contiguous FP32 RUDA tensor.
 /// The shared weight has rank one; width must be 32..4096 and divisible by 32.
 /// `Autodiff<Ascend>` tracks input and weight gradients using saved device statistics.
@@ -34,23 +59,23 @@ fn buffer(tensor: Primitive) -> TensorBuffer {
     TensorBuffer { handle: tensor.handle, shape: tensor.meta.shape().clone(),
         strides: tensor.meta.strides().clone(), dtype: tensor.dtype }
 }
-fn check_queue(input: &Primitive, others: &[&Primitive]) -> Result<()> {
+fn check_queue(input: &Primitive, others: &[&Primitive], operation: &str) -> Result<()> {
     for other in others {
         if input.device != other.device || !input.client.same_execution_queue(&other.client) {
-            return Err(CannError::InvalidTensor("native RMSNorm device or execution queue mismatch".into()));
+            return Err(CannError::InvalidTensor(format!("native {operation} device or execution queue mismatch")));
         }
     }
     Ok(())
 }
 fn forward(input: Primitive, weight: Primitive, epsilon: f64) -> Result<[Primitive; 2]> {
-    check_queue(&input, &[&weight])?;
+    check_queue(&input, &[&weight], "RMSNorm")?;
     let client = input.client.clone(); let device = input.device.clone();
     let output = AscendRuntime::rms_norm(&client, buffer(input), buffer(weight), epsilon)?;
     Ok(output.map(|b| Primitive::new(client.clone(), b.handle, Metadata::new(b.shape,b.strides),
         device.clone(), b.dtype)))
 }
 fn backward(input: Primitive, weight: Primitive, grad: Primitive, rstd: Primitive) -> Result<[Primitive; 2]> {
-    check_queue(&input, &[&weight,&grad,&rstd])?;
+    check_queue(&input, &[&weight,&grad,&rstd], "RMSNorm")?;
     let client = input.client.clone(); let device = input.device.clone();
     let output = AscendRuntime::rms_norm_backward(&client, buffer(input), buffer(weight), buffer(grad), buffer(rstd))?;
     Ok(output.map(|b| Primitive::new(client.clone(), b.handle, Metadata::new(b.shape,b.strides),
@@ -83,6 +108,46 @@ impl<C: CheckpointStrategy> RmsNormBackend for Autodiff<Ascend, C> {
         let [output,rstd] = forward(x.clone(), w.clone(), epsilon)?;
         Ok(match RmsNormBackward.prepare::<C>([input.node, weight.node]).compute_bound().stateful() {
             OpsKind::Tracked(prep) => prep.finish((x,w,rstd), output),
+            OpsKind::UnTracked(prep) => prep.finish(output),
+        })
+    }
+}
+
+fn softmax_forward(input: Primitive, logarithmic: bool) -> Result<Primitive> {
+    let client = input.client.clone(); let device = input.device.clone();
+    let b = if logarithmic {AscendRuntime::log_softmax(&client, buffer(input))?}
+        else {AscendRuntime::softmax(&client, buffer(input))?};
+    Ok(Primitive::new(client, b.handle, Metadata::new(b.shape,b.strides), device, b.dtype))
+}
+fn softmax_backward(output: Primitive, grad: Primitive, logarithmic: bool) -> Result<Primitive> {
+    check_queue(&output, &[&grad], if logarithmic {"LogSoftmax"} else {"Softmax"})?;
+    let client = output.client.clone(); let device = output.device.clone();
+    let b = if logarithmic {AscendRuntime::log_softmax_backward(&client, buffer(output), buffer(grad))?}
+        else {AscendRuntime::softmax_backward(&client, buffer(output), buffer(grad))?};
+    Ok(Primitive::new(client, b.handle, Metadata::new(b.shape,b.strides), device, b.dtype))
+}
+impl SoftmaxBackend for Ascend {
+    fn normalized_exponential(input: FloatTensor<Self>, logarithmic: bool) -> Result<FloatTensor<Self>> {
+        softmax_forward(input, logarithmic)
+    }
+}
+
+#[derive(Debug)]
+struct SoftmaxBackward;
+impl Backward<Ascend, 1> for SoftmaxBackward {
+    type State = (Primitive, bool);
+    fn backward(self, ops: Ops<Self::State, 1>, grads: &mut Gradients, _: &mut Checkpointer) {
+        let (output, logarithmic) = ops.state;
+        let grad = grads.consume::<Ascend>(&ops.node);
+        let dx = softmax_backward(output, grad, logarithmic).expect("Ascend Softmax backward failed");
+        if let Some(parent) = ops.parents[0].as_ref() { grads.register::<Ascend>(parent.id, dx); }
+    }
+}
+impl<C: CheckpointStrategy> SoftmaxBackend for Autodiff<Ascend,C> {
+    fn normalized_exponential(input: FloatTensor<Self>, logarithmic: bool) -> Result<FloatTensor<Self>> {
+        let output = softmax_forward(input.primitive, logarithmic)?;
+        Ok(match SoftmaxBackward.prepare::<C>([input.node]).compute_bound().stateful() {
+            OpsKind::Tracked(prep) => prep.finish((output.clone(),logarithmic), output),
             OpsKind::UnTracked(prep) => prep.finish(output),
         })
     }

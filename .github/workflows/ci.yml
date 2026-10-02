@@ -63,6 +63,8 @@ jobs:
           python3 tools/ascend/build_common_ir.py --emit-only --op silu_mul --elements 1025 --out "$RUNNER_TEMP/map"
           python3 tools/ascend/build_common_ir.py --emit-only --op rms_norm --elements 12288 --row-width 4096 --out "$RUNNER_TEMP/rows"
           python3 tools/ascend/build_common_ir.py --emit-only --op rms_norm_weight_contributions --elements 12288 --row-width 4096 --out "$RUNNER_TEMP/rmsnorm-weight"
+          python3 tools/ascend/build_common_ir.py --emit-only --op softmax_backward --elements 12288 --row-width 4096 --out "$RUNNER_TEMP/softmax-backward"
+          python3 tools/ascend/build_common_ir.py --emit-only --op log_softmax_backward --elements 12288 --row-width 4096 --out "$RUNNER_TEMP/log-softmax-backward"
           python3 tools/ascend/build_common_ir.py --emit-only --op layer_norm --elements 12288 --row-width 4096 --out "$RUNNER_TEMP/layernorm"
           python3 tools/ascend/build_common_ir.py --emit-only --op layer_norm_input_backward --elements 12288 --row-width 4096 --out "$RUNNER_TEMP/layernorm-backward"
           python3 tools/ascend/build_common_ir.py --emit-only --op layer_norm_weight_contributions --elements 12288 --row-width 4096 --out "$RUNNER_TEMP/layernorm-weight"

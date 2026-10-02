@@ -50,3 +50,17 @@ fn native_rms_norm_accepts_ruda_tensor_and_autodiff_backends() {
     let _: fn(Tensor<Autodiff<Ascend>, 3>, Tensor<Autodiff<Ascend>, 1>, f64)
         -> Result<Tensor<Autodiff<Ascend>, 3>, CannError> = nn::rms_norm::<Autodiff<Ascend>, 3>;
 }
+
+#[test]
+fn native_softmax_exposes_runtime_and_ruda_autodiff_entries() {
+    use rust_ascend::{Ascend, Autodiff, driver::CannError, nn,
+        runtime::{AscendRuntime, ComputeClient, TensorBuffer}, tensor::api::Tensor};
+    let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer) -> Result<TensorBuffer,CannError> = AscendRuntime::softmax;
+    let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer) -> Result<TensorBuffer,CannError> = AscendRuntime::log_softmax;
+    let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer, TensorBuffer) -> Result<TensorBuffer,CannError> = AscendRuntime::softmax_backward;
+    let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer, TensorBuffer) -> Result<TensorBuffer,CannError> = AscendRuntime::log_softmax_backward;
+    let _: fn(Tensor<Ascend,3>) -> Result<Tensor<Ascend,3>,CannError> = nn::softmax::<Ascend,3>;
+    let _: fn(Tensor<Autodiff<Ascend>,3>) -> Result<Tensor<Autodiff<Ascend>,3>,CannError> = nn::softmax::<Autodiff<Ascend>,3>;
+    let _: fn(Tensor<Ascend,3>) -> Result<Tensor<Ascend,3>,CannError> = nn::log_softmax::<Ascend,3>;
+    let _: fn(Tensor<Autodiff<Ascend>,3>) -> Result<Tensor<Autodiff<Ascend>,3>,CannError> = nn::log_softmax::<Autodiff<Ascend>,3>;
+}

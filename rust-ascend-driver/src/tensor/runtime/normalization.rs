@@ -9,7 +9,7 @@ type Client = ComputeClient<AscendRuntime>;
 fn layout(shape: &[usize], strides: &[usize], dtype: DType) -> Result<(usize, u32)> {
     layout_for(shape, strides, dtype, "LayerNorm")
 }
-fn layout_for(shape: &[usize], strides: &[usize], dtype: DType, operation: &str) -> Result<(usize, u32)> {
+pub(super) fn layout_for(shape: &[usize], strides: &[usize], dtype: DType, operation: &str) -> Result<(usize, u32)> {
     if dtype != DType::F32 || !contiguous(shape, strides) {
         return Err(error(format!("native {operation} requires contiguous FP32 tensors")));
     }
@@ -27,7 +27,7 @@ fn layout_for(shape: &[usize], strides: &[usize], dtype: DType, operation: &str)
 fn check(t: &TensorBuffer, shape: &[usize]) -> Result<()> {
     check_for(t, shape, "LayerNorm")
 }
-fn check_for(t: &TensorBuffer, shape: &[usize], operation: &str) -> Result<()> {
+pub(super) fn check_for(t: &TensorBuffer, shape: &[usize], operation: &str) -> Result<()> {
     let count = shape.iter().try_fold(1usize, |n, &d| n.checked_mul(d))
         .and_then(|n| n.checked_mul(4)).ok_or_else(|| error(format!("{operation} buffer size overflow")))?;
     if t.dtype != DType::F32 || &t.shape[..] != shape || !contiguous(&t.shape, &t.strides)
@@ -46,7 +46,7 @@ fn epsilon_for(value: f64, operation: &str) -> Result<f32> {
     }
     Ok(v)
 }
-fn buffer(client: &Client, shape: Shape, zero: bool) -> TensorBuffer {
+pub(super) fn buffer(client: &Client, shape: Shape, zero: bool) -> TensorBuffer {
     let elements: usize = shape.iter().product();
     let handle = if zero { client.create_from_slice(&vec![0; elements*4]) } else { client.empty(elements*4) };
     let mut strides = vec![0; shape.len()];
@@ -54,7 +54,7 @@ fn buffer(client: &Client, shape: Shape, zero: bool) -> TensorBuffer {
     for (i, &dim) in shape.iter().enumerate().rev() { strides[i] = stride; stride *= dim; }
     TensorBuffer { handle, shape, strides: Strides::from(strides), dtype: DType::F32 }
 }
-fn row(op: RowProgram, rows: usize, width: u32, eps: f32) -> Result<AscendKernel> {
+pub(super) fn row(op: RowProgram, rows: usize, width: u32, eps: f32) -> Result<AscendKernel> {
     AscendCompiler.compile(row_programs::definition(op, width, eps).map_err(error)?, &AscendOptions {
         target: Some(AscendTarget::Ascend950DT), elements: rows as u64*width as u64,
         row_width: Some(width), ..Default::default()
@@ -65,7 +65,7 @@ fn map(op: MapProgram, count: usize) -> Result<AscendKernel> {
         target: Some(AscendTarget::Ascend950DT), elements: count as u64, ..Default::default()
     }, ExecutionMode::Checked, UIntKind::U64.into()).map_err(error)
 }
-fn run(client: &Client, kernel: AscendKernel, tensors: &[&TensorBuffer]) -> Result<()> {
+pub(super) fn run(client: &Client, kernel: AscendKernel, tensors: &[&TensorBuffer]) -> Result<()> {
     if tensors.len() != kernel.bindings().len() { return Err(error("LayerNorm kernel binding mismatch")); }
     client.flush().map_err(error)?;
     let guards = tensors.iter().map(|t| client.get_resource(t.handle.clone()).map_err(error))

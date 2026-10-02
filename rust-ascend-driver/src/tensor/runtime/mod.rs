@@ -4,6 +4,7 @@ mod build;
 mod worker;
 mod normalization;
 mod matrix;
+mod rows;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -117,6 +118,28 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Native FP32 Softmax along the last dimension (width 32..4096, multiple of 32).
+    pub fn softmax(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
+        rows::softmax(client, input, false)
+    }
+
+    /// Native FP32 LogSoftmax along the last dimension, preserving all leading dimensions.
+    pub fn log_softmax(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
+        rows::softmax(client, input, true)
+    }
+
+    /// Native Softmax input gradient from saved forward output and upstream gradient.
+    pub fn softmax_backward(client: &ComputeClient<Self>, output: TensorBuffer, grad: TensorBuffer)
+        -> Result<TensorBuffer> {
+        rows::softmax_backward(client, output, grad, false)
+    }
+
+    /// Native LogSoftmax input gradient from saved log-probabilities and upstream gradient.
+    pub fn log_softmax_backward(client: &ComputeClient<Self>, output: TensorBuffer, grad: TensorBuffer)
+        -> Result<TensorBuffer> {
+        rows::softmax_backward(client, output, grad, true)
+    }
+
     /// Native BF16 GEMM on contiguous rank-2 or matching rank-3 TensorBuffers.
     /// M/N/K must be positive multiples of 16. Output may be BF16 or FP32.
     /// Rust-authored matrix kernels are JIT-built and cached on the owning device thread.
