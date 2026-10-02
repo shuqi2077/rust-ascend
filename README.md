@@ -97,6 +97,14 @@ cargo run --locked --release --example layer_norm -- ./target/layernorm-forward 
 
 完整设备前向 → 保存统计量 → 输入反向调用见 [layer_norm 示例](examples/layer_norm.rs)。
 
+## 原位 AdamW 存储更新
+
+`rust_ascend::optim::adamw_step` 通过 RUDA `ComputeClient` 执行已有 `ruda_optim::fused_adamw::storage::adamw_scaled` 的公共 IR，不另写优化器公式。参数、梯度和一阶／二阶矩为形状相同的连续 FP32 缓冲区；参数和矩原位更新、地址不变，梯度保持只读。支持非对齐尾部和空张量。
+
+`AdamWStorageStep` 显式提供学习率、beta、epsilon、weight decay、两个 bias correction、逆梯度 scale 和 clip multiplier。FP32 unscale 后再应用 clip；epsilon 加在 bias-corrected 平方根外。函数同步完成后返回，不隐式生成全局 step，不做 AMSGrad、低精度 master cast 或自动梯度检查。
+
+调用见 [adamw_storage 示例](examples/adamw_storage.rs)：`cargo run --locked --release --example adamw_storage`。
+
 ## 生成与执行
 
 ```bash
