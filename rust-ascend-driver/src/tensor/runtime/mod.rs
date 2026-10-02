@@ -3,6 +3,7 @@
 mod build;
 mod worker;
 mod normalization;
+mod matrix;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -33,6 +34,7 @@ use ruda_runtime::runtime::{
 };
 pub use ruda_runtime::runtime::{client::ComputeClient, compiler::RudaTask};
 pub use ruda_runtime::runtime::normalization::TensorBuffer;
+pub use crate::tensor::deepgemm::Transpose;
 use rust_ascend_compiler::ascend::{AscendCompiler, AscendOptions, AscendTarget};
 use std::{
     ffi::OsString,
@@ -115,6 +117,27 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Native BF16 GEMM on contiguous rank-2 or matching rank-3 TensorBuffers.
+    /// M/N/K must be positive multiples of 16. Output may be BF16 or FP32.
+    /// Rust-authored matrix kernels are JIT-built and cached on the owning device thread.
+    pub fn gemm(client: &ComputeClient<Self>, a: TensorBuffer, b: TensorBuffer,
+        ta: Transpose, tb: Transpose, dtype: ruda_core::tensor::DType) -> Result<TensorBuffer> {
+        matrix::gemm(client, a, b, ta, tb, dtype)
+    }
+
+    /// Execute GEMM into reusable output storage. Overlapping input/output is rejected.
+    pub fn gemm_into(client: &ComputeClient<Self>, a: TensorBuffer, b: TensorBuffer,
+        ta: Transpose, tb: Transpose, out: TensorBuffer) -> Result<()> {
+        matrix::gemm_into(client, a, b, ta, tb, out)
+    }
+
+    /// Native rank-2 linear backward for Y = X W^T. Returns [BF16 dX, FP32 dWeight].
+    /// X, W and dY must be BF16. This is an explicit runtime call, not autograd registration.
+    pub fn linear_nt_backward(client: &ComputeClient<Self>, input: TensorBuffer,
+        weight: TensorBuffer, grad: TensorBuffer) -> Result<[TensorBuffer; 2]> {
+        matrix::linear_nt_backward(client, input, weight, grad)
+    }
+
     /// Native common-IR RMSNorm on contiguous FP32 tensors. Returns [output, rstd].
     /// The last dimension must be 32..4096 and divisible by 32.
     pub fn rms_norm(client: &ComputeClient<Self>, input: TensorBuffer,

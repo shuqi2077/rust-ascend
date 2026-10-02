@@ -53,6 +53,12 @@ let dx = x.grad(&gradients).unwrap();
 
 完整进程初始化与调用见 [tensor 示例](examples/tensor.rs)：`cargo run --release --example tensor`。
 
+## 计算客户端原生 BF16 矩阵
+
+`AscendRuntime::gemm` / `gemm_into` 使用 RUDA `ComputeClient` 的 `TensorBuffer`，在设备线程按需生成、编译和缓存已有 Rust BF16 矩阵内核，无需预先准备算子目录。支持连续 BF16 输入、BF16／FP32 输出，rank-2 Dense 和 batch 数相同的 rank-3 Batched，以及 NN／NT／TN／TT 四种转置组合。M／N／K 必须为正且是 16 的倍数，不做 batch 广播。
+
+`AscendRuntime::linear_nt_backward` 为 rank-2 `Y = X W^T` 返回 `[BF16 dX, FP32 dWeight]`，输入、weight 和 `dY` 为 BF16。这些是显式原生运行时接口，不把公共 FP32 IR 编译器改成 BF16 编译器，也不自动注册张量 matmul 的自动求导。调用见 [matrix_runtime 示例](examples/matrix_runtime.rs)：`cargo run --locked --release --example matrix_runtime`。
+
 ## 原生 RMSNorm 公共 IR
 
 `AscendRuntime::rms_norm` 通过 RUDA `ComputeClient` 接收 `TensorBuffer` 的输入和共享 weight，返回 `[Y, rstd]`。`AscendRuntime::rms_norm_backward` 接收输入、weight、`dY` 及前向保存的 `rstd`，返回 `[dX, dWeight]`。`RowProgram::RmsNormWeightContributions` 生成逐元素 weight 梯度贡献，再在设备端归约所有前导行；空 batch 的 weight 梯度为零。

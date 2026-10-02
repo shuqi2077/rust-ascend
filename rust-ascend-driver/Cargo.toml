@@ -9,12 +9,13 @@ description = "Dynamically loaded AscendCL and ACLNN interfaces with native kern
 [features]
 default = []
 common-ir = ["dep:rust-ascend-compiler", "dep:ruda-core"]
-runtime = ["common-ir", "dep:ruda-runtime", "dep:tempfile", "dep:wait-timeout", "dep:ruda-tensor"]
+runtime = ["common-ir", "dep:ruda-runtime", "dep:tempfile", "dep:wait-timeout", "dep:ruda-tensor", "dep:rust-ascend-kernels"]
 
 [dependencies]
 libloading = "=0.8.9"
 sha2 = "=0.10.9"
 rust-ascend-compiler = { workspace = true, features = ["ascend"], optional = true }
+rust-ascend-kernels = { workspace = true, optional = true }
 ruda-core = { workspace = true, optional = true }
 ruda-runtime = { git = "https://github.com/shuqi2077/RUDA.git", rev = "c5ba9d2c0d50ab70fea54e9908b28e292e8539a6", optional = true }
 tempfile = { version = "3", optional = true }

@@ -28,3 +28,16 @@ fn compute_client_rms_norm_exposes_forward_and_both_gradients() {
     let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer, TensorBuffer, TensorBuffer, TensorBuffer)
         -> Result<[TensorBuffer; 2], CannError> = AscendRuntime::rms_norm_backward;
 }
+
+#[test]
+fn compute_client_matrix_exposes_native_gemm_and_linear_gradients() {
+    use rust_ascend::runtime::{AscendRuntime, ComputeClient, TensorBuffer, Transpose};
+    use rust_ascend::core::tensor::DType;
+    use rust_ascend::driver::CannError;
+    let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer, TensorBuffer, Transpose, Transpose, DType)
+        -> Result<TensorBuffer, CannError> = AscendRuntime::gemm;
+    let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer, TensorBuffer, Transpose, Transpose, TensorBuffer)
+        -> Result<(), CannError> = AscendRuntime::gemm_into;
+    let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer, TensorBuffer, TensorBuffer)
+        -> Result<[TensorBuffer; 2], CannError> = AscendRuntime::linear_nt_backward;
+}

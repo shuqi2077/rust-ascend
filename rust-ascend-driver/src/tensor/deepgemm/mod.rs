@@ -96,13 +96,36 @@ impl DeepGemm {
         // raw allocation identity to catch broken foreign/mock allocators before launch.
         let aa=a.buffer.data.as_ptr();let bb=b.buffer.data.as_ptr();let dd=out.buffer.data.as_ptr();
         if aa==dd||bb==dd{return Err(invalid("GEMM output aliases input"));}
+        self.execute_addresses(s, aa, bb, dd, groups.map_or(std::ptr::null_mut(),|t|t.buffer.data.as_ptr()))
+    }
+    /// # Safety
+    /// All addresses must belong to this provider's CANN session and remain allocated
+    /// through synchronized completion. Lengths and nonoverlapping output are checked.
+    #[cfg(feature = "runtime")]
+    pub(in crate::tensor) unsafe fn run_addresses(&self, s:&GemmSpec,
+        addresses:[(*mut std::ffi::c_void,usize);3])->Result<(),CannError> {
+        if s.kind==GemmKind::MGrouped{return Err(invalid("grouped GEMM requires explicit group metadata"));}
+        for ((_, bytes), layout) in addresses.iter().zip([&s.a,&s.b,&s.out]) {
+            if *bytes!=layout.byte_len(){return Err(invalid("native GEMM resource byte length mismatch"));}
+        }
+        let [(a,ab),(b,bb),(out,ob)]=addresses;
+        let range=|p:*mut std::ffi::c_void,n:usize| (p as usize).checked_add(n).map(|end|(p as usize,end))
+            .ok_or_else(||invalid("native GEMM address range overflow"));
+        let output=range(out,ob)?;
+        for input in [range(a,ab)?,range(b,bb)?] {
+            if input.0<output.1 && output.0<input.1{return Err(invalid("GEMM output overlaps input"));}
+        }
+        self.execute_addresses(s,a,b,out,std::ptr::null_mut())
+    }
+    fn execute_addresses(&self,s:&GemmSpec,aa:*mut std::ffi::c_void,bb:*mut std::ffi::c_void,
+        dd:*mut std::ffi::c_void,groups:*mut std::ffi::c_void)->Result<(),CannError> {
         self.prepare(s)?;
         let batched=s.kind==GemmKind::Batched;
         let mut args=Arguments{
             a:GmPtr{addr:aa as u64,stride_outer:*s.a.shape().last().unwrap() as u64,stride_batch:if batched{s.m as u64*s.k as u64}else{0}},
             b:GmPtr{addr:bb as u64,stride_outer:*s.b.shape().last().unwrap() as u64,stride_batch:if batched{s.n as u64*s.k as u64}else{0}},
             d:GmPtr{addr:dd as u64,stride_outer:s.n as u64,stride_batch:if batched{s.m as u64*s.n as u64}else{0}},
-            m:s.m,n:s.n,k:s.k,groups_ptr:groups.map_or(std::ptr::null_mut(),|t|t.buffer.data.as_ptr()),
+            m:s.m,n:s.n,k:s.k,groups_ptr:groups,
             groups:if s.kind==GemmKind::Dense{0}else{s.groups},
             epilogue:Epilogue{alpha:1.0,pad0:0,sfd:0,stride:0,n:s.n,pad1:0},
         };

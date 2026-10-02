@@ -2484,6 +2484,7 @@ dependencies = [
  "ruda-runtime",
  "ruda-tensor",
  "rust-ascend-compiler",
+ "rust-ascend-kernels",
  "sha2",
  "tempfile",
  "wait-timeout",

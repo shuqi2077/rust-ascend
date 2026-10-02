@@ -58,12 +58,42 @@ impl Toolchain {
     }
 
     pub fn build(&self, kernel: &AscendKernel) -> Result<TempDir> {
+        let work = self.build_source(kernel.source(), kernel.entrypoint(), false)?;
+        let image = fs::read(work.path().join("kernel.o")).map_err(error)?;
+        let manifest = format!(
+            "{}object=kernel.o\nsource_sha256={:x}\nobject_sha256={:x}\ncompiler_sha256={}\n",
+            kernel.build_contract(),
+            Sha256::digest(kernel.source().as_bytes()),
+            Sha256::digest(&image),
+            self.fingerprint
+        );
+        fs::write(work.path().join("kernel.ruda"), manifest).map_err(error)?;
+        Ok(work)
+    }
+
+    pub fn build_gemm(&self, key: &str, root: &Path) -> Result<()> {
+        let spec = rust_ascend_kernels::Spec::all().into_iter().find(|s| s.key() == key)
+            .ok_or_else(|| error("no Rust-authored matrix kernel for the GEMM contract"))?;
+        let source = rust_ascend_kernels::emit(spec).map_err(error)?;
+        let work = self.build_source(&source, &spec.entry(), true)?;
+        let image = fs::read(work.path().join("kernel.o")).map_err(error)?;
+        let manifest = format!(
+            "schema=ruda.ascend.rust.bf16.v2\narch=dav-c310\nsoc=Ascend950DT\ncores=32\nkey={key}\nobject=kernel.o\nkernel_name={}\nsha256={:x}\nsource_sha256={:x}\ncompiler_sha256={}\nsource_language=rust-device-ir\nlowering=cann-c-intrinsics\n",
+            spec.entry(), Sha256::digest(&image), Sha256::digest(source.as_bytes()), self.fingerprint
+        );
+        fs::write(work.path().join("kernel.ruda"), manifest).map_err(error)?;
+        // Publish only a successfully compiled and linked artifact into this worker's cache.
+        fs::rename(work.path(), root.join(key)).map_err(error)?;
+        Ok(())
+    }
+
+    fn build_source(&self, source: &str, name: &str, matrix: bool) -> Result<TempDir> {
         let work = tempfile::Builder::new()
             .prefix("rust-ascend-jit-")
             .tempdir()
             .map_err(error)?;
         let root = work.path();
-        fs::write(root.join("kernel.asc"), kernel.source()).map_err(error)?;
+        fs::write(root.join("kernel.asc"), source).map_err(error)?;
         let mut compile = Command::new(&self.compiler);
         compile.args([
             "-x",
@@ -72,8 +102,8 @@ impl Toolchain {
             "-O2",
             "--cce-aicore-only",
             "--cce-aicore-arch=dav-c310",
-            "-ffp-contract=off",
         ]);
+        compile.arg(if matrix { "--cce-disable-vf-stack-reserved-ubuf" } else { "-ffp-contract=off" });
         for include in &self.includes {
             compile.arg("-I").arg(include);
         }
@@ -90,17 +120,9 @@ impl Toolchain {
             .arg(root.join("kernel.o"));
         self.run(link, &root.join("link.log"))?;
         let image = fs::read(root.join("kernel.o")).map_err(error)?;
-        if entrypoint(&image)? != kernel.entrypoint() {
+        if entrypoint(&image)? != name {
             return Err(error("linked CANN entrypoint differs from the IR kernel"));
         }
-        let manifest = format!(
-            "{}object=kernel.o\nsource_sha256={:x}\nobject_sha256={:x}\ncompiler_sha256={}\n",
-            kernel.build_contract(),
-            Sha256::digest(kernel.source().as_bytes()),
-            Sha256::digest(&image),
-            self.fingerprint
-        );
-        fs::write(root.join("kernel.ruda"), manifest).map_err(error)?;
         Ok(work)
     }
 

@@ -2,7 +2,7 @@ use super::{Result, RuntimeOptions, build::Toolchain, error};
 use crate::{
     check_status,
     sys::*,
-    tensor::{Buffer, CannSession, common_ir::CannProgram, deepgemm::native::NativeApi},
+    tensor::{Buffer, CannSession, common_ir::CannProgram, deepgemm::{DeepGemm, GemmSpec, native::NativeApi}},
 };
 use ruda_runtime::runtime::storage::StorageId;
 use rust_ascend_compiler::ascend::AscendKernel;
@@ -54,11 +54,15 @@ impl Worker {
                             .api
                             .aclrtGetMemInfo(ACL_HBM_MEM, &mut free, &mut total)
                     })?;
+                    let gemm_artifacts = tempfile::Builder::new().prefix("rust-ascend-gemm-").tempdir().map_err(error)?;
+                    let gemm = unsafe { DeepGemm::load(&session, gemm_artifacts.path())? };
                     let state = State {
                         session,
                         tools,
                         buffers: HashMap::new(),
                         programs: HashMap::new(),
+                        gemm,
+                        gemm_artifacts,
                     };
                     Ok((state, total as u64))
                 })();
@@ -115,6 +119,8 @@ pub(super) struct State {
     tools: Toolchain,
     buffers: HashMap<StorageId, Buffer>,
     programs: HashMap<String, CannProgram>,
+    gemm: DeepGemm,
+    gemm_artifacts: tempfile::TempDir,
 }
 impl State {
     pub fn allocate(&mut self, id: StorageId, size: usize) -> Result<()> {
@@ -198,6 +204,19 @@ impl State {
         // All buffers and the program belong to this worker/session and stay alive
         // until run_addresses synchronizes. No pointers cross the channel.
         unsafe { self.programs[&key].run_addresses(addresses) }
+    }
+
+    pub fn gemm(&mut self, spec: GemmSpec, resources: [AscendResource; 3]) -> Result<()> {
+        let key = spec.key();
+        if !self.gemm_artifacts.path().join(&key).is_dir() {
+            self.tools.build_gemm(&key, self.gemm_artifacts.path())?;
+        }
+        let [a,b,out] = resources;
+        let addresses = [(self.pointer(&a)?,a.size), (self.pointer(&b)?,b.size),
+            (self.pointer(&out)?,out.size)];
+        // SAFETY: resource ranges belong to this worker. The caller retains their
+        // ManagedResource guards until the provider's synchronous execution returns.
+        unsafe { self.gemm.run_addresses(&spec, addresses) }
     }
 }
 
