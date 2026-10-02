@@ -1,6 +1,40 @@
 use super::{AscendRuntime, ComputeClient, Result, TensorBuffer,
     normalization::{buffer, check_for, layout_for, row, run}};
+use ruda_core::tensor::{DType, Shape};
 use rust_ascend_compiler::ascend::row_programs::RowProgram;
+
+fn reduced_shape(shape: &Shape) -> Shape {
+    let mut result=shape.to_vec();
+    *result.last_mut().expect("validated last dimension")=1;
+    Shape::from(result)
+}
+
+pub(super) fn reduce(client: &ComputeClient<AscendRuntime>, input: TensorBuffer, mean: bool)
+    -> Result<TensorBuffer> {
+    let (rows,width)=layout_for(&input.shape,&input.strides,input.dtype,"row reduction")?;
+    check_for(&input,&input.shape,"row reduction")?;
+    let output=buffer(client,reduced_shape(&input.shape),false);
+    if rows!=0 {
+        run(client,row(if mean {RowProgram::Mean} else {RowProgram::Sum},rows,width,1e-5)?,&[&input,&output])?;
+    }
+    Ok(output)
+}
+
+pub(super) fn reduce_backward(client: &ComputeClient<AscendRuntime>, shape: Shape,
+    grad: TensorBuffer, mean: bool) -> Result<TensorBuffer> {
+    // The derivative needs only the input layout, never saved input values.
+    let mut strides=vec![1;shape.len()];let mut stride=1usize;
+    for (i,&dim) in shape.iter().enumerate().rev() {
+        strides[i]=stride;stride=stride.checked_mul(dim).ok_or_else(||super::error("reduction shape overflow"))?;
+    }
+    let (rows,width)=layout_for(&shape,&strides,DType::F32,"row reduction backward")?;
+    check_for(&grad,&reduced_shape(&shape),"row reduction backward")?;
+    let output=buffer(client,shape,false);
+    if rows!=0 {
+        run(client,row(if mean {RowProgram::MeanBackward} else {RowProgram::SumBackward},rows,width,1e-5)?,&[&grad,&output])?;
+    }
+    Ok(output)
+}
 
 pub(super) fn softmax(client: &ComputeClient<AscendRuntime>, input: TensorBuffer,
     logarithmic: bool) -> Result<TensorBuffer> {

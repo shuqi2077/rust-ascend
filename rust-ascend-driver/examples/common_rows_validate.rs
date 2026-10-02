@@ -9,6 +9,7 @@ fn inputs(op: RowProgram, rows: usize, width: usize) -> Vec<Vec<f32>> {
     let dy: Vec<f32> = (0..rows*width).map(|i| (i%13) as f32/9.0-0.5).collect();
     let weight: Vec<f32> = (0..width).map(|i| 0.7+(i%7) as f32/13.0).collect();
     match op {
+        RowProgram::SumBackward | RowProgram::MeanBackward => vec![(0..rows).map(|i| i as f32*0.25-0.5).collect()],
         RowProgram::LayerNorm => vec![x, weight, (0..width).map(|i| (i%5) as f32/11.0-0.2).collect()],
         RowProgram::LayerNormInputBackward | RowProgram::LayerNormWeightContributions => {
             let mean: Vec<f32> = x.chunks(width).map(|row| (row.iter().map(|&v| v as f64).sum::<f64>()/width as f64) as f32).collect();
@@ -38,8 +39,15 @@ fn reference(op: RowProgram, rows: usize, width: usize, x: &[Vec<f32>]) -> Vec<V
     if op == RowProgram::RmsNorm { out.push(vec![0.0; rows]); }
     if op == RowProgram::LayerNorm { out.push(vec![0.0; rows]); out.push(vec![0.0; rows]); }
     for row in 0..rows {
-        let offset = row*width; let a: Vec<f64> = x[0][offset..offset+width].iter().map(|&v| v as f64).collect();
+        let offset = row*width;
+        if matches!(op, RowProgram::SumBackward | RowProgram::MeanBackward) {
+            let gradient = x[0][row] as f64/if op==RowProgram::MeanBackward {width as f64} else {1.};
+            out[0][offset..offset+width].fill(gradient as f32);
+            continue;
+        }
+        let a: Vec<f64> = x[0][offset..offset+width].iter().map(|&v| v as f64).collect();
         match op {
+            RowProgram::SumBackward | RowProgram::MeanBackward => unreachable!("handled row-scalar input"),
             RowProgram::Sum | RowProgram::Mean | RowProgram::Max => {
                 let mut v = if op == RowProgram::Max { a.iter().copied().fold(f64::NEG_INFINITY, f64::max) } else { a.iter().sum() };
                 if op == RowProgram::Mean { v /= width as f64; } out[0][row] = v as f32;

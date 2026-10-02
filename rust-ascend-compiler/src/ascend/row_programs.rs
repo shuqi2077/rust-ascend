@@ -10,17 +10,18 @@ use ruda_core::{ir::*, kernel::{KernelArg, KernelDefinition, KernelOptions, Visi
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowProgram {
-    Sum, Mean, Max, Softmax, LogSoftmax, RmsNorm,
+    Sum, Mean, Max, SumBackward, MeanBackward, Softmax, LogSoftmax, RmsNorm,
     SoftmaxBackward, LogSoftmaxBackward, RmsNormInputBackward, RmsNormWeightContributions,
     LayerNorm, LayerNormInputBackward, LayerNormWeightContributions,
 }
 impl RowProgram {
-    pub const ALL: [Self; 13] = [Self::Sum, Self::Mean, Self::Max, Self::Softmax,
+    pub const ALL: [Self; 15] = [Self::Sum, Self::Mean, Self::Max, Self::SumBackward, Self::MeanBackward, Self::Softmax,
         Self::LogSoftmax, Self::RmsNorm, Self::SoftmaxBackward,
         Self::LogSoftmaxBackward, Self::RmsNormInputBackward, Self::RmsNormWeightContributions, Self::LayerNorm,
         Self::LayerNormInputBackward, Self::LayerNormWeightContributions];
     pub fn name(self) -> &'static str { match self {
         Self::Sum => "row_sum", Self::Mean => "row_mean", Self::Max => "row_max",
+        Self::SumBackward => "row_sum_backward", Self::MeanBackward => "row_mean_backward",
         Self::Softmax => "softmax", Self::LogSoftmax => "log_softmax",
         Self::RmsNorm => "rms_norm", Self::SoftmaxBackward => "softmax_backward",
         Self::LogSoftmaxBackward => "log_softmax_backward",
@@ -116,8 +117,16 @@ pub fn definition(op: RowProgram, width: u32, epsilon: f32) -> Result<KernelDefi
     let output = b.array(true);
     let stat = if op == RowProgram::RmsNorm { Some(b.array(true)) } else { None };
     let layer_stats = if op == RowProgram::LayerNorm { Some((b.array(true), b.array(true))) } else { None };
+    if matches!(op, RowProgram::SumBackward | RowProgram::MeanBackward) {
+        let row = b.row;
+        let mut grad = b.read(input[0], row);
+        if op == RowProgram::MeanBackward {grad = b.div(grad, constant(width as f32));}
+        b.write_row(output, &vec![grad; width as usize/32]);
+        return Ok(b.k);
+    }
     let x = b.chunks(input[0], false);
     match op {
+        RowProgram::SumBackward | RowProgram::MeanBackward => unreachable!("handled scalar-row input before matrix loads"),
         RowProgram::Sum | RowProgram::Mean | RowProgram::Max => {
             let mut s = b.reduce(&x, op == RowProgram::Max);
             if op == RowProgram::Mean { s = b.div(s, constant(width as f32)); }

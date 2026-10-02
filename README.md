@@ -73,6 +73,12 @@ let dx = x.grad(&gradients).unwrap();
 
 `rust_ascend::nn::softmax` / `log_softmax` 接收 `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，原生反向接入 RUDA 的现有计算图和梯度累积。调用见 [softmax_tensor 示例](examples/softmax_tensor.rs)：`cargo run --locked --release --example softmax_tensor`。
 
+## 原生 Sum 与 Mean
+
+`AscendRuntime::sum_last` / `mean_last` 归约连续 FP32 输入的最后一维，保留该维且长度变为 1；宽度为 32～4096 且是 32 的倍数。对应反向在设备端广播每行上游梯度，Mean 再除以行宽；支持空 batch，不保存输入值，不调用 ACLNN。
+
+`rust_ascend::nn::sum_last` / `mean_last` 接收 `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，接入现有 RUDA 计算图和梯度累积。这是显式原生入口，不改变张量原有 `sum_dim` / `mean_dim` 的调度。调用见 [reduction_tensor 示例](examples/reduction_tensor.rs)：`cargo run --locked --release --example reduction_tensor`。
+
 ## 原生 LayerNorm 公共 IR
 
 `RowProgram::LayerNorm` 接收连续 FP32 的 `X[rows,width]`、`weight[width]`、`bias[width]`，输出 `Y[rows,width]`、`mean[rows]` 和 `rstd[rows]`。方差按行宽计算，使用中心化平方和。

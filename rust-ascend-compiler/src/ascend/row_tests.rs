@@ -230,6 +230,20 @@ fn eval(op: RowProgram, width: u32, input: &[Vec<f32>]) -> Vec<Vec<f32>> {
     let out = eval(RowProgram::Mean, 4096, &[vec![1000.0; 4096]]); assert_eq!(out, vec![vec![1000.0]]);
 }
 
+#[test] fn sum_and_mean_backward_broadcast_each_row_scalar_without_reducing_it() {
+    for op in [RowProgram::SumBackward,RowProgram::MeanBackward] {
+        for width in [32,96,4096] {for rows in [0,1,3] {
+            let kernel=compile(op,rows,width).unwrap();
+            assert_eq!(kernel.bindings().iter().map(|b|b.bytes).collect::<Vec<_>>(),[rows*4,rows*width as u64*4]);
+            let grad:Vec<f32>=(0..rows).map(|r|r as f32*0.25-0.5).collect();
+            let program=rows::lower(row_programs::definition(op,width,1e-5).unwrap(),rows*width as u64,width).unwrap();
+            let expected:Vec<f32>=grad.iter().flat_map(|&g|vec![g/if op==RowProgram::MeanBackward {width as f32} else {1.};width as usize]).collect();
+            assert_eq!(evaluate(&program,&[grad]),vec![expected]);
+            assert!(!kernel.source().contains("AscendC::ReduceSum("));
+        }}
+    }
+}
+
 #[test] fn rmsnorm_weight_contribution_bindings_and_empty_rows_are_exact() {
     for rows in [0, 1, 3] {
         let n = rows*96*4;

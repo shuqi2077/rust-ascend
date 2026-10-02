@@ -118,6 +118,29 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Native FP32 last-axis sum, retaining the axis with size one.
+    /// Width must be 32..4096 and divisible by 32; leading dimensions are preserved.
+    pub fn sum_last(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
+        rows::reduce(client,input,false)
+    }
+
+    /// Native FP32 last-axis mean, retaining the axis with size one.
+    pub fn mean_last(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
+        rows::reduce(client,input,true)
+    }
+
+    /// Broadcast each row's upstream derivative to the original contiguous input shape.
+    pub fn sum_last_backward(client: &ComputeClient<Self>, input_shape: Shape, grad: TensorBuffer)
+        -> Result<TensorBuffer> {
+        rows::reduce_backward(client,input_shape,grad,false)
+    }
+
+    /// Broadcast each row's upstream derivative divided by the last-axis width.
+    pub fn mean_last_backward(client: &ComputeClient<Self>, input_shape: Shape, grad: TensorBuffer)
+        -> Result<TensorBuffer> {
+        rows::reduce_backward(client,input_shape,grad,true)
+    }
+
     /// Native FP32 Softmax along the last dimension (width 32..4096, multiple of 32).
     pub fn softmax(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
         rows::softmax(client, input, false)

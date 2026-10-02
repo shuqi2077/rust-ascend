@@ -2,7 +2,7 @@
 use crate::{Ascend, Autodiff, driver::CannError, runtime::{AscendRuntime, TensorBuffer}};
 use ruda_autodiff::{checkpoint::{base::Checkpointer, strategy::CheckpointStrategy},
     grads::Gradients, ops::{Backward, Ops, OpsKind}};
-use ruda_core::tensor::Metadata;
+use ruda_core::tensor::{Metadata, Shape};
 use ruda_tensor::{Backend, TensorPrimitive, api::Tensor, tensor::FloatTensor};
 use ruda_tensor_device::RudaTensor;
 
@@ -20,6 +20,29 @@ pub trait RmsNormBackend: Backend {
 pub trait SoftmaxBackend: Backend {
     /// Forward primitive with optional log-probabilities and native first-order backward.
     fn normalized_exponential(input: FloatTensor<Self>, logarithmic: bool) -> Result<FloatTensor<Self>>;
+}
+
+/// Backend extension for native last-axis sum and mean with a retained size-one axis.
+pub trait ReductionBackend: Backend {
+    fn reduce_last(input: FloatTensor<Self>, mean: bool) -> Result<FloatTensor<Self>>;
+}
+
+/// Native FP32 last-axis sum on a RUDA tensor, including first-order autodiff.
+pub fn sum_last<B: ReductionBackend, const D: usize>(input: Tensor<B,D>) -> Result<Tensor<B,D>> {
+    reduce_last(input,false)
+}
+
+/// Native FP32 last-axis mean on a RUDA tensor, including first-order autodiff.
+pub fn mean_last<B: ReductionBackend, const D: usize>(input: Tensor<B,D>) -> Result<Tensor<B,D>> {
+    reduce_last(input,true)
+}
+
+fn reduce_last<B: ReductionBackend, const D: usize>(input: Tensor<B,D>, mean: bool) -> Result<Tensor<B,D>> {
+    let primitive=match input.into_primitive() {
+        TensorPrimitive::Float(tensor)=>tensor,
+        TensorPrimitive::QFloat(_)=>return Err(CannError::InvalidTensor("native reduction does not dequantize inputs implicitly".into())),
+    };
+    B::reduce_last(primitive,mean).map(|output|Tensor::from_primitive(TensorPrimitive::Float(output)))
 }
 
 /// Native last-axis FP32 Softmax on a RUDA tensor, including RUDA autodiff.
@@ -149,6 +172,60 @@ impl<C: CheckpointStrategy> SoftmaxBackend for Autodiff<Ascend,C> {
         Ok(match SoftmaxBackward.prepare::<C>([input.node]).compute_bound().stateful() {
             OpsKind::Tracked(prep) => prep.finish((output.clone(),logarithmic), output),
             OpsKind::UnTracked(prep) => prep.finish(output),
+        })
+    }
+}
+
+fn reduction_forward(input: Primitive, mean: bool) -> Result<Primitive> {
+    let client=input.client.clone();let device=input.device.clone();
+    let b=if mean {AscendRuntime::mean_last(&client,buffer(input))?}
+        else {AscendRuntime::sum_last(&client,buffer(input))?};
+    Ok(Primitive::new(client,b.handle,Metadata::new(b.shape,b.strides),device,b.dtype))
+}
+
+impl ReductionBackend for Ascend {
+    fn reduce_last(input: FloatTensor<Self>, mean: bool) -> Result<FloatTensor<Self>> {
+        reduction_forward(input,mean)
+    }
+}
+
+#[derive(Clone)]
+struct ReductionState {
+    shape: Shape,
+    client: crate::runtime::ComputeClient<AscendRuntime>,
+    device: crate::runtime::AscendDevice,
+    mean: bool,
+}
+impl std::fmt::Debug for ReductionState {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
+        f.debug_struct("ReductionState").field("shape",&self.shape).field("device",&self.device)
+            .field("mean",&self.mean).finish_non_exhaustive()
+    }
+}
+#[derive(Debug)]
+struct ReductionBackward;
+impl Backward<Ascend,1> for ReductionBackward {
+    type State=ReductionState;
+    fn backward(self,ops:Ops<Self::State,1>,grads:&mut Gradients,_:&mut Checkpointer) {
+        let ReductionState {shape,client,device,mean}=ops.state;
+        let grad=grads.consume::<Ascend>(&ops.node);
+        assert!(grad.device==device && grad.client.same_execution_queue(&client),"Ascend reduction gradient device or queue mismatch");
+        let dx=if mean {AscendRuntime::mean_last_backward(&client,shape,buffer(grad))}
+            else {AscendRuntime::sum_last_backward(&client,shape,buffer(grad))}
+            .expect("Ascend reduction backward failed");
+        if let Some(parent)=ops.parents[0].as_ref() {
+            grads.register::<Ascend>(parent.id,Primitive::new(client,dx.handle,Metadata::new(dx.shape,dx.strides),device,dx.dtype));
+        }
+    }
+}
+impl<C: CheckpointStrategy> ReductionBackend for Autodiff<Ascend,C> {
+    fn reduce_last(input:FloatTensor<Self>,mean:bool)->Result<FloatTensor<Self>> {
+        let state=ReductionState {shape:input.primitive.meta.shape().clone(),client:input.primitive.client.clone(),
+            device:input.primitive.device.clone(),mean};
+        let output=reduction_forward(input.primitive,mean)?;
+        Ok(match ReductionBackward.prepare::<C>([input.node]).compute_bound().stateful() {
+            OpsKind::Tracked(prep)=>prep.finish(state,output),
+            OpsKind::UnTracked(prep)=>prep.finish(output),
         })
     }
 }
