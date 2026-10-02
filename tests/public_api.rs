@@ -41,3 +41,12 @@ fn compute_client_matrix_exposes_native_gemm_and_linear_gradients() {
     let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer, TensorBuffer, TensorBuffer)
         -> Result<[TensorBuffer; 2], CannError> = AscendRuntime::linear_nt_backward;
 }
+
+#[test]
+fn native_rms_norm_accepts_ruda_tensor_and_autodiff_backends() {
+    use rust_ascend::{Ascend, Autodiff, driver::CannError, nn, tensor::api::Tensor};
+    let _: fn(Tensor<Ascend, 3>, Tensor<Ascend, 1>, f64) -> Result<Tensor<Ascend, 3>, CannError>
+        = nn::rms_norm::<Ascend, 3>;
+    let _: fn(Tensor<Autodiff<Ascend>, 3>, Tensor<Autodiff<Ascend>, 1>, f64)
+        -> Result<Tensor<Autodiff<Ascend>, 3>, CannError> = nn::rms_norm::<Autodiff<Ascend>, 3>;
+}

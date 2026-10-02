@@ -63,7 +63,9 @@ let dx = x.grad(&gradients).unwrap();
 
 `AscendRuntime::rms_norm` 通过 RUDA `ComputeClient` 接收 `TensorBuffer` 的输入和共享 weight，返回 `[Y, rstd]`。`AscendRuntime::rms_norm_backward` 接收输入、weight、`dY` 及前向保存的 `rstd`，返回 `[dX, dWeight]`。`RowProgram::RmsNormWeightContributions` 生成逐元素 weight 梯度贡献，再在设备端归约所有前导行；空 batch 的 weight 梯度为零。
 
-此接口使用公共 Rust IR 和 CCE，不调用 ACLNN RMSNorm。支持连续 FP32、最后一维宽度 32～4096 且为 32 的倍数。它是显式运行时接口，不改变现有 RUDA RMSNorm 模块的自动求导入口。完整调用见 [rms_norm_runtime 示例](examples/rms_norm_runtime.rs)：`cargo run --locked --release --example rms_norm_runtime`。
+此接口使用公共 Rust IR 和 CCE，不调用 ACLNN RMSNorm。支持连续 FP32、最后一维宽度 32～4096 且为 32 的倍数。完整运行时调用见 [rms_norm_runtime 示例](examples/rms_norm_runtime.rs)：`cargo run --locked --release --example rms_norm_runtime`。
+
+`rust_ascend::nn::rms_norm(input, weight, epsilon)` 接收现有 RUDA `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，复用 RUDA 的计算图、梯度存储和共享图梯度累积，原生计算输入与 weight 的梯度。已有 `ruda_nn::RmsNorm` 可将 `gamma.val()` 和 `epsilon` 传给此入口；不修改该模块原有的 `forward` 方法。完整调用见 [rms_norm_tensor 示例](examples/rms_norm_tensor.rs)：`cargo run --locked --release --example rms_norm_tensor`。
 
 ## 原生 LayerNorm 公共 IR
 
