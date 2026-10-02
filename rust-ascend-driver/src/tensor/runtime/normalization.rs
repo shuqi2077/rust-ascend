@@ -7,33 +7,42 @@ use rust_ascend_compiler::ascend::{AscendCompiler, AscendKernel, AscendOptions, 
 type Client = ComputeClient<AscendRuntime>;
 
 fn layout(shape: &[usize], strides: &[usize], dtype: DType) -> Result<(usize, u32)> {
+    layout_for(shape, strides, dtype, "LayerNorm")
+}
+fn layout_for(shape: &[usize], strides: &[usize], dtype: DType, operation: &str) -> Result<(usize, u32)> {
     if dtype != DType::F32 || !contiguous(shape, strides) {
-        return Err(error("native LayerNorm requires contiguous FP32 tensors"));
+        return Err(error(format!("native {operation} requires contiguous FP32 tensors")));
     }
-    let &width = shape.last().ok_or_else(|| error("LayerNorm requires a last dimension"))?;
+    let &width = shape.last().ok_or_else(|| error(format!("{operation} requires a last dimension")))?;
     if !(32..=4096).contains(&width) || width % 32 != 0 {
-        return Err(error("LayerNorm width must be 32..4096 and divisible by 32"));
+        return Err(error(format!("{operation} width must be 32..4096 and divisible by 32")));
     }
     let rows = shape[..shape.len()-1].iter().try_fold(1usize, |n, &d| n.checked_mul(d))
-        .ok_or_else(|| error("LayerNorm shape overflow"))?;
+        .ok_or_else(|| error(format!("{operation} shape overflow")))?;
     if rows.checked_mul(width).is_none_or(|n| n > u32::MAX as usize) {
-        return Err(error("LayerNorm element count exceeds u32"));
+        return Err(error(format!("{operation} element count exceeds u32")));
     }
     Ok((rows, width as u32))
 }
 fn check(t: &TensorBuffer, shape: &[usize]) -> Result<()> {
+    check_for(t, shape, "LayerNorm")
+}
+fn check_for(t: &TensorBuffer, shape: &[usize], operation: &str) -> Result<()> {
     let count = shape.iter().try_fold(1usize, |n, &d| n.checked_mul(d))
-        .and_then(|n| n.checked_mul(4)).ok_or_else(|| error("LayerNorm buffer size overflow"))?;
+        .and_then(|n| n.checked_mul(4)).ok_or_else(|| error(format!("{operation} buffer size overflow")))?;
     if t.dtype != DType::F32 || &t.shape[..] != shape || !contiguous(&t.shape, &t.strides)
         || t.handle.size_in_used() < count as u64 {
-        return Err(error("LayerNorm buffer shape, stride, dtype or byte length mismatch"));
+        return Err(error(format!("{operation} buffer shape, stride, dtype or byte length mismatch")));
     }
     Ok(())
 }
 fn epsilon(value: f64) -> Result<f32> {
+    epsilon_for(value, "LayerNorm")
+}
+fn epsilon_for(value: f64, operation: &str) -> Result<f32> {
     let v = value as f32;
     if !value.is_finite() || !v.is_finite() || v <= 0.0 {
-        return Err(error("LayerNorm epsilon must be positive and representable in FP32"));
+        return Err(error(format!("{operation} epsilon must be positive and representable in FP32")));
     }
     Ok(v)
 }
@@ -139,6 +148,39 @@ pub(super) fn backward(client: &Client, input: TensorBuffer, weight: TensorBuffe
     Ok([dx, dw, db])
 }
 
+pub(super) fn rms_forward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
+    eps: f64) -> Result<[TensorBuffer; 2]> {
+    let (rows, width) = layout_for(&input.shape, &input.strides, input.dtype, "RMSNorm")?;
+    let eps = epsilon_for(eps, "RMSNorm")?;
+    check_for(&input, &input.shape, "RMSNorm")?;
+    check_for(&weight, &[width as usize], "RMSNorm")?;
+    let out = buffer(client, input.shape.clone(), false);
+    let rstd = buffer(client, Shape::new([rows]), false);
+    if rows != 0 {
+        run(client, row(RowProgram::RmsNorm, rows, width, eps)?, &[&input, &weight, &out, &rstd])?;
+    }
+    Ok([out, rstd])
+}
+
+pub(super) fn rms_backward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
+    grad: TensorBuffer, rstd: TensorBuffer) -> Result<[TensorBuffer; 2]> {
+    let (rows, width) = layout_for(&input.shape, &input.strides, input.dtype, "RMSNorm")?;
+    check_for(&input, &input.shape, "RMSNorm")?;
+    check_for(&weight, &[width as usize], "RMSNorm")?;
+    check_for(&grad, &input.shape, "RMSNorm")?;
+    check_for(&rstd, &[rows], "RMSNorm")?;
+    let dx = buffer(client, input.shape.clone(), false);
+    if rows == 0 {
+        return Ok([dx, buffer(client, Shape::new([width as usize]), true)]);
+    }
+    // Both derivatives consume the forward's saved reciprocal RMS; epsilon is not recomputed.
+    run(client, row(RowProgram::RmsNormInputBackward, rows, width, 1e-5)?, &[&input, &grad, &weight, &rstd, &dx])?;
+    let parts = buffer(client, input.shape.clone(), false);
+    run(client, row(RowProgram::RmsNormWeightContributions, rows, width, 1e-5)?, &[&input, &grad, &rstd, &parts])?;
+    let dw = column_sum(client, parts, rows, width as usize)?;
+    Ok([dx, dw])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +195,23 @@ mod tests {
         assert!(layout(&[usize::MAX, 32], &[32, 1], DType::F32).is_err());
         for e in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX, 1e-100] { assert!(epsilon(e).is_err()); }
         assert_eq!(epsilon(1e-5).unwrap(), 1e-5f32);
+    }
+    #[test]
+    fn rms_layout_preserves_last_axis_and_checks_all_leading_dimensions() {
+        for (shape, strides, rows, width) in [
+            (vec![96], vec![1], 1, 96),
+            (vec![2, 3, 96], vec![288, 96, 1], 6, 96),
+            (vec![1, 0, 4096], vec![0, 4096, 1], 0, 4096),
+        ] {
+            assert_eq!(layout_for(&shape, &strides, DType::F32, "RMSNorm").unwrap(), (rows, width));
+        }
+        assert!(layout_for(&[], &[], DType::F32, "RMSNorm").is_err());
+        assert!(layout_for(&[3, 96], &[1, 3], DType::F32, "RMSNorm").is_err());
+        for dtype in [DType::F16, DType::BF16] {
+            assert!(layout_for(&[96], &[1], dtype, "RMSNorm").is_err());
+        }
+        for eps in [0., -1., f64::NAN, f64::INFINITY, 1e-100] {
+            assert!(epsilon_for(eps, "RMSNorm").is_err());
+        }
     }
 }

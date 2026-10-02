@@ -11,13 +11,13 @@ use ruda_core::{ir::*, kernel::{KernelArg, KernelDefinition, KernelOptions, Visi
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowProgram {
     Sum, Mean, Max, Softmax, LogSoftmax, RmsNorm,
-    SoftmaxBackward, LogSoftmaxBackward, RmsNormInputBackward,
+    SoftmaxBackward, LogSoftmaxBackward, RmsNormInputBackward, RmsNormWeightContributions,
     LayerNorm, LayerNormInputBackward, LayerNormWeightContributions,
 }
 impl RowProgram {
-    pub const ALL: [Self; 12] = [Self::Sum, Self::Mean, Self::Max, Self::Softmax,
+    pub const ALL: [Self; 13] = [Self::Sum, Self::Mean, Self::Max, Self::Softmax,
         Self::LogSoftmax, Self::RmsNorm, Self::SoftmaxBackward,
-        Self::LogSoftmaxBackward, Self::RmsNormInputBackward, Self::LayerNorm,
+        Self::LogSoftmaxBackward, Self::RmsNormInputBackward, Self::RmsNormWeightContributions, Self::LayerNorm,
         Self::LayerNormInputBackward, Self::LayerNormWeightContributions];
     pub fn name(self) -> &'static str { match self {
         Self::Sum => "row_sum", Self::Mean => "row_mean", Self::Max => "row_max",
@@ -25,6 +25,7 @@ impl RowProgram {
         Self::RmsNorm => "rms_norm", Self::SoftmaxBackward => "softmax_backward",
         Self::LogSoftmaxBackward => "log_softmax_backward",
         Self::RmsNormInputBackward => "rms_norm_input_backward",
+        Self::RmsNormWeightContributions => "rms_norm_weight_contributions",
         Self::LayerNorm => "layer_norm", Self::LayerNormInputBackward => "layer_norm_input_backward",
         Self::LayerNormWeightContributions => "layer_norm_weight_contributions",
     }}
@@ -98,6 +99,8 @@ impl Builder {
 /// Fixed FP32 row width: 32..4096 in multiples of 32. Epsilon is a finite,
 /// positive compile-time value for RMSNorm; no runtime scalar or CPU fallback.
 /// RMSNorm emits [Y, rstd]; input backward takes [X, dY, weight, rstd].
+/// Weight contributions take [X, dY, rstd] and emit dY * X * rstd per element;
+/// the caller sums the leading rows to obtain the shared weight gradient.
 /// LayerNorm takes [X, weight, bias] and emits [Y, mean, rstd]; input backward
 /// takes [X, dY, weight, mean, rstd] and emits dX. Variance uses divisor width.
 /// Affine weight gradient is deliberately not claimed by input-backward.
@@ -106,7 +109,8 @@ pub fn definition(op: RowProgram, width: u32, epsilon: f32) -> Result<KernelDefi
     if !epsilon.is_finite() || epsilon <= 0.0 { return Err(invalid("epsilon must be finite and positive")); }
     let mut b = Builder::new(format!("ruda_cann_{}", op.name()), width);
     let count = match op { RowProgram::LayerNormInputBackward => 5,
-        RowProgram::LayerNorm => 3, RowProgram::RmsNormInputBackward | RowProgram::LayerNormWeightContributions => 4,
+        RowProgram::LayerNorm | RowProgram::RmsNormWeightContributions => 3,
+        RowProgram::RmsNormInputBackward | RowProgram::LayerNormWeightContributions => 4,
         RowProgram::RmsNorm | RowProgram::SoftmaxBackward | RowProgram::LogSoftmaxBackward => 2, _ => 1 };
     let input: Vec<_> = (0..count).map(|_| b.array(false)).collect();
     let output = b.array(true);
@@ -183,6 +187,14 @@ pub fn definition(op: RowProgram, width: u32, epsilon: f32) -> Result<KernelDefi
                 let v = b.sub(centered, correction); b.mul(v, r)
             }).collect();
             b.write_row(output, &dx);
+        }
+        RowProgram::RmsNormWeightContributions => {
+            let dy = b.chunks(input[1], false);
+            let row = b.row; let r = b.read(input[2], row);
+            let dw: Vec<_> = x.iter().zip(dy).map(|(&v, g)| {
+                let normalized = b.mul(v, r); b.mul(normalized, g)
+            }).collect();
+            b.write_row(output, &dw);
         }
         RowProgram::RmsNormInputBackward => {
             let dy = b.chunks(input[1], false); let w = b.chunks(input[2], true);

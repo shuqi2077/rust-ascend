@@ -32,6 +32,7 @@ use ruda_runtime::runtime::{
     timestamp_profiler::TimestampProfiler,
 };
 pub use ruda_runtime::runtime::{client::ComputeClient, compiler::RudaTask};
+pub use ruda_runtime::runtime::normalization::TensorBuffer;
 use rust_ascend_compiler::ascend::{AscendCompiler, AscendOptions, AscendTarget};
 use std::{
     ffi::OsString,
@@ -114,6 +115,20 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Native common-IR RMSNorm on contiguous FP32 tensors. Returns [output, rstd].
+    /// The last dimension must be 32..4096 and divisible by 32.
+    pub fn rms_norm(client: &ComputeClient<Self>, input: TensorBuffer,
+        weight: TensorBuffer, epsilon: f64) -> Result<[TensorBuffer; 2]> {
+        normalization::rms_forward(client, input, weight, epsilon)
+    }
+
+    /// Native first-order [input gradient, weight gradient], using saved rstd.
+    /// The weight gradient sums all leading rows on-device; empty batches yield zeros.
+    pub fn rms_norm_backward(client: &ComputeClient<Self>, input: TensorBuffer,
+        weight: TensorBuffer, grad: TensorBuffer, rstd: TensorBuffer) -> Result<[TensorBuffer; 2]> {
+        normalization::rms_backward(client, input, weight, grad, rstd)
+    }
+
     /// Initialize one process-owned 950DT device before calling `client`.
     /// The registered worker is retained for the process lifetime.
     ///

@@ -53,6 +53,12 @@ let dx = x.grad(&gradients).unwrap();
 
 完整进程初始化与调用见 [tensor 示例](examples/tensor.rs)：`cargo run --release --example tensor`。
 
+## 原生 RMSNorm 公共 IR
+
+`AscendRuntime::rms_norm` 通过 RUDA `ComputeClient` 接收 `TensorBuffer` 的输入和共享 weight，返回 `[Y, rstd]`。`AscendRuntime::rms_norm_backward` 接收输入、weight、`dY` 及前向保存的 `rstd`，返回 `[dX, dWeight]`。`RowProgram::RmsNormWeightContributions` 生成逐元素 weight 梯度贡献，再在设备端归约所有前导行；空 batch 的 weight 梯度为零。
+
+此接口使用公共 Rust IR 和 CCE，不调用 ACLNN RMSNorm。支持连续 FP32、最后一维宽度 32～4096 且为 32 的倍数。它是显式运行时接口，不改变现有 RUDA RMSNorm 模块的自动求导入口。完整调用见 [rms_norm_runtime 示例](examples/rms_norm_runtime.rs)：`cargo run --locked --release --example rms_norm_runtime`。
+
 ## 原生 LayerNorm 公共 IR
 
 `RowProgram::LayerNorm` 接收连续 FP32 的 `X[rows,width]`、`weight[width]`、`bias[width]`，输出 `Y[rows,width]`、`mean[rows]` 和 `rstd[rows]`。方差按行宽计算，使用中心化平方和。
@@ -105,11 +111,11 @@ python tools/ascend/build_deepgemm.py --emit-only --out ./target/bf16-source
 ## 支持范围
 
 - 公共编译器：连续 FP32 逐元素程序；行宽为 32～4096、且为 32 的倍数。
-- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度。
+- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度；RMSNorm 和 LayerNorm 另提供共享 weight 梯度。
 - BF16 矩阵：direct-store Dense/Batched NN/NT/TN/TT、对齐的 MGrouped NT，BF16/FP32 输出。
 - 设备代码目标为 Ascend950DT / dav-c310；不自动推断或替换目标型号。
 - Rust 程序生成 CCE，再由 Bisheng 编译为设备机器码，不是直接 Rust → 昇腾 ISA。
-- 不包含完整 PyTorch 昇腾后端、公共 IR 中的 RMSNorm 权重梯度、通用低精度行计算或任意 stride/广播。
+- 不包含完整 PyTorch 昇腾后端、通用低精度行计算或任意 stride/广播。
 
 ## 测试入口
 

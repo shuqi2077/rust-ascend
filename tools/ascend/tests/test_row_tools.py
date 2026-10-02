@@ -66,15 +66,16 @@ def test_map_op_does_not_gain_row_semantics():
 
 def complete_log():
     return '\n'.join([f'RUDA_ASCEND_ROW_CASE op={op} rows={r} width={w} passed=true'
-        for op,r,w in sorted(validation.EXPECTED)]+['RUDA_ASCEND_ROWS_DEVICE_OK cases=60 launches=96'])
+        for op,r,w in sorted(validation.EXPECTED)]+
+        [f'RUDA_ASCEND_ROWS_DEVICE_OK cases={len(validation.EXPECTED)} launches={validation.EXPECTED_LAUNCHES}'])
 
 
 def test_strict_device_marker_parsing():validation.validate_device_log(complete_log())
 
 
 @pytest.mark.parametrize("edit",[
-    lambda t:t.replace('cases=60','cases=59'),
-    lambda t:t.replace('launches=96','launches=0'),
+    lambda t:t.replace(f'cases={len(validation.EXPECTED)}',f'cases={len(validation.EXPECTED)-1}'),
+    lambda t:t.replace(f'launches={validation.EXPECTED_LAUNCHES}','launches=0'),
     lambda t:'\n'.join(t.splitlines()[1:]),
     lambda t:t+'\n'+t.splitlines()[0],
     lambda t:t+'\nSKIPPED',
@@ -127,6 +128,7 @@ def test_layernorm_contracts_include_both_row_statistics():
 
 def test_previous_row_suite_does_not_satisfy_extended_device_suite():
     old = '\n'.join(line for line in complete_log().splitlines() if 'op=layer_norm' not in line)
-    old = old.replace('cases=60 launches=96', 'cases=45 launches=72')
+    old = old.replace(f'cases={len(validation.EXPECTED)} launches={validation.EXPECTED_LAUNCHES}',
+                      'cases=45 launches=72')
     with pytest.raises(RuntimeError):
         validation.validate_device_log(old)

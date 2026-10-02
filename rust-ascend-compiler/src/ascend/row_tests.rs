@@ -161,7 +161,8 @@ fn mutated(k: KernelDefinition) -> Result<AscendKernel> {
     #[cfg(feature = "ptx")] {
         use crate::ptx::*;
         for op in [RowProgram::RmsNorm, RowProgram::Softmax, RowProgram::RmsNormInputBackward,
-            RowProgram::LayerNorm, RowProgram::LayerNormInputBackward, RowProgram::LayerNormWeightContributions] {
+            RowProgram::RmsNormWeightContributions, RowProgram::LayerNorm,
+            RowProgram::LayerNormInputBackward, RowProgram::LayerNormWeightContributions] {
             let ir = row_programs::definition(op, 64, 1e-5).unwrap();
             let ptx = PtxCompiler.compile(ir.clone(), &PtxCompilationOptions { target: Some(PtxTarget { version: (8, 0), sm: 75 }) }, ExecutionMode::Checked, UIntKind::U64.into()).unwrap();
             assert!(ptx.source.contains(".entry")); assert!(mutated(ir).is_ok());
@@ -227,6 +228,48 @@ fn eval(op: RowProgram, width: u32, input: &[Vec<f32>]) -> Vec<Vec<f32>> {
 }
 #[test] fn mean_of_large_finite_values_has_no_early_low_precision_rounding() {
     let out = eval(RowProgram::Mean, 4096, &[vec![1000.0; 4096]]); assert_eq!(out, vec![vec![1000.0]]);
+}
+
+#[test] fn rmsnorm_weight_contribution_bindings_and_empty_rows_are_exact() {
+    for rows in [0, 1, 3] {
+        let n = rows*96*4;
+        let kernel = compile(RowProgram::RmsNormWeightContributions, rows, 96).unwrap();
+        assert_eq!(kernel.bindings().iter().map(|b| b.bytes).collect::<Vec<_>>(), [n, n, rows*4, n]);
+        assert!(kernel.source().contains("HardEvent::MTE2_S"));
+    }
+    assert_eq!(eval(RowProgram::RmsNormWeightContributions, 96,
+        &[vec![], vec![], vec![]]), vec![Vec::<f32>::new()]);
+}
+
+#[test] fn rmsnorm_weight_contributions_match_independent_parameter_derivatives() {
+    for width in [32usize, 96, 256, 4096] {
+        for rows in [1usize, 3, 7] {
+            let x: Vec<f32> = (0..rows*width).map(|i| (i%37) as f32/11.-1.5).collect();
+            let dy: Vec<f32> = (0..rows*width).map(|i| (i%13) as f32/9.-0.6).collect();
+            let weights: Vec<f32> = (0..width).map(|i| (i%7) as f32/5.-0.5).collect();
+            let forward = eval(RowProgram::RmsNorm, width as u32, &[x.clone(), weights.clone()]);
+            let parts = eval(RowProgram::RmsNormWeightContributions, width as u32,
+                &[x.clone(), dy.clone(), forward[1].clone()]);
+            for col in [0, width/2, width-1] {
+                let expected: f64 = (0..rows).map(|row| {
+                    let values = &x[row*width..(row+1)*width];
+                    let rms = (values.iter().map(|&v| (v as f64).powi(2)).sum::<f64>()/width as f64+1e-5).sqrt();
+                    x[row*width+col] as f64/rms*dy[row*width+col] as f64
+                }).sum();
+                let actual: f64 = (0..rows).map(|row| parts[0][row*width+col] as f64).sum();
+                assert!((actual-expected).abs()<1e-5, "width={width} rows={rows}: {actual} != {expected}");
+            }
+        }
+    }
+}
+
+#[test] fn rmsnorm_weight_contributions_use_saved_forward_statistics() {
+    let x = vec![2.; 96]; let dy = vec![3.; 96];
+    let out = eval(RowProgram::RmsNormWeightContributions, 32,
+        &[x, dy, vec![0.5, 0.25, 2.]]);
+    assert_eq!(&out[0][..32], &[3.; 32]);
+    assert_eq!(&out[0][32..64], &[1.5; 32]);
+    assert_eq!(&out[0][64..96], &[12.; 32]);
 }
 
 #[test] fn layernorm_binding_shapes_and_empty_rows() {

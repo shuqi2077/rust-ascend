@@ -20,9 +20,10 @@ fn inputs(op: RowProgram, rows: usize, width: usize) -> Vec<Vec<f32>> {
             else { vec![x, dy, mean, rstd] }
         }
         RowProgram::RmsNorm => vec![x, weight],
-        RowProgram::RmsNormInputBackward => {
+        RowProgram::RmsNormInputBackward | RowProgram::RmsNormWeightContributions => {
             let r: Vec<f32> = x.chunks(width).map(|row| (row.iter().map(|&v| (v as f64).powi(2)).sum::<f64>()/width as f64+1e-5).sqrt().recip() as f32).collect();
-            vec![x, dy, weight, r]
+            if op == RowProgram::RmsNormInputBackward { vec![x, dy, weight, r] }
+            else { vec![x, dy, r] }
         }
         RowProgram::SoftmaxBackward | RowProgram::LogSoftmaxBackward => {
             let forward = if op == RowProgram::SoftmaxBackward { RowProgram::Softmax } else { RowProgram::LogSoftmax };
@@ -75,6 +76,9 @@ fn reference(op: RowProgram, rows: usize, width: usize, x: &[Vec<f32>]) -> Vec<V
                 let dot: f64 = if op == RowProgram::SoftmaxBackward { a.iter().zip(&g).map(|(y,g)| y*g).sum() } else { g.iter().sum() };
                 for j in 0..width { out[0][offset+j] = (if op == RowProgram::SoftmaxBackward { a[j]*(g[j]-dot) } else { g[j]-a[j].exp()*dot }) as f32; }
             }
+            RowProgram::RmsNormWeightContributions => {
+                for j in 0..width { out[0][offset+j] = (a[j]*x[2][row] as f64*x[1][offset+j] as f64) as f32; }
+            }
             RowProgram::RmsNormInputBackward => {
                 let g: Vec<f64> = x[1][offset..offset+width].iter().zip(&x[2]).map(|(&v,&w)| v as f64*w as f64).collect();
                 let r = x[3][row] as f64; let mean: f64 = g.iter().zip(&a).map(|(g,x)| g*x).sum::<f64>()/width as f64;
@@ -89,8 +93,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opapi = std::env::var("RUDA_CANN_OPAPI").unwrap_or_else(|_| "libopapi.so".into());
     // SAFETY: isolated process, exclusive context, trusted SDK/artifact directory.
     let session = unsafe { CannSession::open_exclusive(CannDevice::new(0)?, acl, opapi)? };
+    let shapes = [(0usize, 32u32), (1, 32), (3, 96), (7, 256), (33, 4096)];
+    let expected_cases = RowProgram::ALL.len()*shapes.len();
+    let expected_launches = RowProgram::ALL.len()*shapes.iter().filter(|(rows, _)| *rows != 0).count()*2;
     let mut cases = 0; let mut launches = 0;
-    for op in RowProgram::ALL { for (rows, width) in [(0usize, 32u32), (1, 32), (3, 96), (7, 256), (33, 4096)] {
+    for op in RowProgram::ALL { for (rows, width) in shapes {
         let compiled = AscendCompiler.compile(row_programs::definition(op, width, 1e-5)?, &AscendOptions {
             target: Some(AscendTarget::Ascend950DT), elements: rows as u64*width as u64, row_width: Some(width), ..Default::default()
         }, ExecutionMode::Checked, UIntKind::U64.into())?;
@@ -117,6 +124,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         launches += program.stats().launches; cases += 1;
         println!("RUDA_ASCEND_ROW_CASE op={} rows={rows} width={width} passed=true", op.name());
     }}
-    if cases != 55 || launches != 88 { return Err("incomplete device coverage".into()); }
+    if cases != expected_cases || launches != expected_launches as u64 { return Err("incomplete device coverage".into()); }
     println!("RUDA_ASCEND_ROWS_DEVICE_OK cases={cases} launches={launches}"); Ok(())
 }
