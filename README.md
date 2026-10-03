@@ -131,6 +131,8 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 调用见 [padded_matrix_tensor 示例](examples/padded_matrix_tensor.rs)：`cargo run --locked --release --example padded_matrix_tensor`。
 
+`nn::linear_padded_bf16_fp32_nd`、`nn::lora_padded_linear_bf16_fp32_nd`、`nn::swiglu_padded_bf16_fp32_nd` 直接处理 FP32 `X[...,K]`，支持 rank 1～8 和正前导维度，包括 `[K]`、`[B,S,K]` 及更高维 token 布局，输出仅将最后一维改为 N。对应 `linear_frozen_padded_bf16_fp32_nd`、`lora_frozen_padded_linear_bf16_fp32_nd`、`swiglu_frozen_padded_bf16_fp32_nd` 使用固定 BF16 基座权重。前导 token 轴展平成矩阵 M 后复用原生 padding 路径，再恢复原输出形状；RUDA reshape 图负责恢复输入梯度，参数梯度按全部 token 累加。展平后的 M 仍受原生 GEMM 域限制；不支持空 token 轴，不隐式添加 bias、dropout、head 分组或模型配置。调用见 [projection_tensor 示例](examples/projection_tensor.rs)：`cargo run --locked --release --example projection_tensor`。
+
 `nn::scaled_dot_product_attention_padded_bf16_fp32`、`nn::causal_attention_padded_bf16_fp32`、`nn::grouped_query_attention_padded_bf16_fp32`、`nn::causal_grouped_query_attention_padded_bf16_fp32` 将这一矩阵路径接入 Attention。逻辑 M／N／D／Dv 可为任意正数，不再要求 16／32 对齐；Q／K／V、输出、Softmax 和梯度为 FP32，矩阵计算显式使用 BF16。第一次 GEMM 先裁回逻辑 score，再加 mask 和执行原生 Softmax，因此补零 key 不进入归一化；第二次 GEMM 及反向同样裁回逻辑形状。scale、完整形状的可选 additive mask、causal 绝对起始位置及 MHA／MQA／GQA 的 head 分组保持显式，支持可训练 mask 和共享图梯度累积。
 
 这些入口沿用对齐后矩阵轴、batch／`B*Hq`、原生 tile 调度和逻辑 score 总元素数的域限制。仍物化 score／probability 及 GQA 重复的 K／V，并额外分配矩阵 padding 缓冲区；不是 FlashAttention，不添加 dropout、mask 广播或 KV cache。调用见 [padded_attention_tensor 示例](examples/padded_attention_tensor.rs)：`cargo run --locked --release --example padded_attention_tensor`。

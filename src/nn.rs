@@ -10,6 +10,10 @@ mod loss;
 mod heads;
 mod frozen;
 mod padded;
+mod projection;
+pub use projection::{linear_padded_bf16_fp32_nd,linear_frozen_padded_bf16_fp32_nd,
+    lora_padded_linear_bf16_fp32_nd,lora_frozen_padded_linear_bf16_fp32_nd,
+    swiglu_padded_bf16_fp32_nd,swiglu_frozen_padded_bf16_fp32_nd};
 pub use padded::{PaddedMatmulBf16Fp32Backend,FrozenPaddedLinearBf16Fp32Backend,
     matmul_padded_bf16_fp32,linear_padded_bf16_fp32,lora_padded_linear_bf16_fp32,swiglu_padded_bf16_fp32,
     linear_frozen_padded_bf16_fp32,lora_frozen_padded_linear_bf16_fp32,swiglu_frozen_padded_bf16_fp32};
