@@ -53,6 +53,8 @@ let dx = x.grad(&gradients).unwrap();
 
 完整进程初始化与调用见 [tensor 示例](examples/tensor.rs)：`cargo run --release --example tensor`。
 
+公共 map 编译器对可严格证明的 32 字节对齐连续区间使用分段整块搬运，行广播在每段只读取一次并在设备本地展开；宽行归一化的输入块、共享 weight 和输出 patch 复用这一通路。非连续步长、无法证明的区间或不满足本地对齐的索引仍按原设备逐元素路径执行。索引边界、FP32 计算、尾部 padding 与未写输出保留语义不变。
+
 ## 整数索引 Embedding
 
 `CannSession::embedding` / `embedding_backward` 和 `AscendRuntime` 的对应接口使用 ACLNN 设备端查表与 dense 权重反向。连续权重支持 FP32／FP16／BF16；索引保留 INT32／INT64，rank 为 1～7，输出形状为索引形状追加权重宽度。索引值由调用方保证在 `[0, vocabulary_size)` 内，不搬回主机、不经 FP32 转换，也不隐式 clamp。支持空索引和非 32 对齐宽度。

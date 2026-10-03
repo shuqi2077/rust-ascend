@@ -229,8 +229,8 @@ mod tests {
                 if stage.partial() && rows!=0 {
                     assert!(compiled.requires_initialized_outputs());
                     if start!=0 || rows>1 {
-                        assert!(compiled.source().contains("HardEvent::S_MTE3"));
-                        assert!(compiled.source().contains("HardEvent::MTE3_S"));
+                        assert!(compiled.source().contains("[lane], run_copy)"));
+                        assert!(!compiled.source().contains("scatter_cell.SetValue"));
                     }
                 }
                 assert!(compiled.ub_bytes()<=131072);
@@ -247,6 +247,27 @@ mod tests {
         assert!(AscendCompiler.compile(zero_definition(65).unwrap(),&options(65),ExecutionMode::Checked,UIntKind::U64.into()).is_ok());
         assert!(AscendCompiler.compile(mean_definition(3,8224).unwrap(),&options(3),ExecutionMode::Checked,UIntKind::U64.into()).is_ok());
         assert!(AscendCompiler.compile(rstd_definition(3,8224,1e-3).unwrap(),&options(3),ExecutionMode::Checked,UIntKind::U64.into()).is_ok());
+    }
+    #[test]
+    fn aligned_row_copy_and_broadcast_use_runs_but_strided_memory_keeps_scalar_sync() {
+        let kernel=definition(WideStage::LogSoftmaxTile,3,8224,4096,4096).unwrap();
+        let compiled=AscendCompiler.compile_partial_map(kernel,&options(3*4096),ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+        assert!(compiled.source().contains("AscendC::DataCopyPad(load0[lane]"));
+        assert!(compiled.source().contains("AscendC::Duplicate(load1[lane], run_value, run_aligned)"));
+        assert!(compiled.source().contains("4096ULL - ((offset + lane) % 4096ULL)"));
+        assert!(!compiled.source().contains("load0.SetValue(lane, gather_cell.GetValue(0))"));
+        for scatter in [false,true] {
+            let sizes=if scatter {[65,130]} else {[130,65]};let mut builder=Builder::new("ruda_strided_copy".into(),&sizes);
+            let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());
+            let stride=builder.binary(Arithmetic::Mul,lane,integer(2),u());
+            let value=builder.read(0,if scatter {lane} else {stride});builder.write(if scatter {stride} else {lane},value);
+            let compiled=if scatter {AscendCompiler.compile_partial_map(builder.kernel,&options(65),ExecutionMode::Checked,UIntKind::U64.into())}
+                else {AscendCompiler.compile(builder.kernel,&options(65),ExecutionMode::Checked,UIntKind::U64.into())}.unwrap();
+            if scatter {
+                assert!(compiled.source().contains("scatter_cell.SetValue"));
+                assert!(compiled.source().contains("HardEvent::S_MTE3"));assert!(compiled.source().contains("HardEvent::MTE3_S"));
+            } else {assert!(compiled.source().contains("load0.SetValue(lane, gather_cell.GetValue(0))"));}
+        }
     }
     #[test]
     fn wide_softmax_and_backward_tiles_match_independent_fp64_equations() {

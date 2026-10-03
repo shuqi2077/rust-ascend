@@ -13,6 +13,14 @@ pub(super) enum Index {
     Mod(Rc<Index>, u64),
 }
 
+/// On each span-aligned interval, index(base+lane)=index(base)+slope*lane.
+/// Span zero denotes a globally affine expression, without interval boundaries.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(super) struct IndexRun {pub span:u64,pub slope:i128}
+fn common_span(mut a:u64,mut b:u64)->u64 {
+    while b!=0 {let remainder=a%b;a=b;b=remainder;}a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,6 +47,46 @@ mod tests {
         assert!(Index::binary('-',Rc::new(Index::Lane),c(1),65,u32::MAX as u64).is_err());
     }
     #[test]
+    fn proven_runs_match_exact_addresses_padding_and_special_value_bits() {
+        for columns in [8u64,32,96,4096] {
+            let n=7*columns-3;let width=columns+32;let lane=Rc::new(Index::Lane);
+            let row=op('/',lane.clone(),c(columns),n);let column=op('%',lane.clone(),c(columns),n);
+            let full=op('+',op('+',op('*',row.clone(),c(width),n),column.clone(),n),c(8),n);
+            let shared=op('+',column,c(8),n);
+            for (index,span,slope) in [(op('+',lane,c(3),n),0,1),(row,columns,0),(shared,columns,1),(full,columns,1)] {
+                assert_eq!(index.aligned_run(),Some(IndexRun {span,slope}));
+                let source:Vec<u32>=(0..=index.bounds(n).unwrap().1).map(|i|
+                    [0u32,0x80000000,0x7f800000,0xff800000,0x7fc01234,0x3f800000][i as usize%6]).collect();
+                for tile in [8u64,256,4096] {for offset in (0..n).step_by(tile as usize) {
+                    let count=(n-offset).min(tile);let aligned=(count+7)/8*8;let mut local=vec![0u32;aligned as usize];let mut at=0;
+                    while at<count {
+                        assert_eq!(at%8,0);let run=if span==0 {count-at} else {(span-(offset+at)%span).min(count-at)};
+                        let base=index.eval(offset+at);
+                        for j in 0..run {
+                            let address=base as i128+slope*j as i128;
+                            assert_eq!(index.eval(offset+at+j) as i128,address);
+                            local[(at+j) as usize]=source[address as usize];
+                        }
+                        at+=run;
+                    }
+                    for j in 0..count {assert_eq!(local[j as usize],source[index.eval(offset+j) as usize]);}
+                    assert!(local[count as usize..].iter().all(|&bits|bits==0));
+                }}
+            }
+        }
+    }
+    #[test]
+    fn run_proof_retains_scalar_paths_for_unaligned_and_nonlinear_indices() {
+        let lane=Rc::new(Index::Lane);let n=1024;
+        assert!(op('%',lane.clone(),c(13),n).aligned_run().is_none());
+        assert!(op('*',lane.clone(),c(2),n).aligned_run().is_none());
+        assert!(op('*',lane.clone(),lane.clone(),n).run().is_none());
+        assert!(op('/',op('+',lane.clone(),c(1),n),c(8),n).run().is_none());
+        let combined=op('+',op('*',op('/',lane.clone(),c(16),n),c(16),n),op('%',lane,c(24),n),n);
+        assert_eq!(combined.aligned_run(),Some(IndexRun {span:8,slope:1}));
+        for base in (0..n).step_by(8) {for j in 0..8 {assert_eq!(combined.eval(base+j),combined.eval(base)+j);}}
+    }
+    #[test]
     fn injective_patch_proofs_match_independent_coordinate_sets() {
         for rows in [1,2,7] {for cols in [32,96,4096] {for width in [cols,cols+32,cols*2] {
             let n=rows*cols;let lane=Rc::new(Index::Lane);
@@ -56,6 +104,38 @@ mod tests {
     }
 }
 impl Index {
+    /// Sufficient symbolic affine-run proof; never samples the launch domain.
+    pub fn run(&self)->Option<IndexRun> {
+        let make=|span,slope|Some(IndexRun {span,slope});
+        match self {
+            Self::Lane=>make(0,1),Self::Constant(_)=>make(0,0),
+            Self::Add(a,b)|Self::Sub(a,b)=>{
+                let x=a.run()?;let y=b.run()?;
+                let slope=if matches!(self,Self::Add(..)) {x.slope.checked_add(y.slope)?} else {x.slope.checked_sub(y.slope)?};
+                make(common_span(x.span,y.span),slope)
+            },
+            Self::Mul(a,b)=>{
+                if let Self::Constant(value)=a.as_ref() {let run=b.run()?;return make(run.span,run.slope.checked_mul(*value as i128)?);}
+                if let Self::Constant(value)=b.as_ref() {let run=a.run()?;return make(run.span,run.slope.checked_mul(*value as i128)?);}
+                let x=a.run()?;let y=b.run()?;
+                if x.slope==0 && y.slope==0 {make(common_span(x.span,y.span),0)} else {None}
+            },
+            Self::Div(a,d)=>{
+                if matches!(a.as_ref(),Self::Lane) {return make(*d,0);}
+                let run=a.run()?;
+                if run.slope%(*d as i128)==0 {make(run.span,run.slope/(*d as i128))} else {None}
+            },
+            Self::Mod(a,d)=>{
+                if matches!(a.as_ref(),Self::Lane) {return make(*d,1);}
+                let run=a.run()?;
+                if run.slope%(*d as i128)==0 {make(run.span,0)} else {None}
+            },
+        }
+    }
+    /// DMA/local vector starts must be 32-byte aligned: eight FP32 elements.
+    pub fn aligned_run(&self)->Option<IndexRun> {
+        self.run().filter(|run|(run.span==0 || run.span%8==0) && matches!(run.slope,0|1))
+    }
     pub fn binary(op: char, a: Rc<Self>, b: Rc<Self>, elements: u64, max: u64) -> Result<Rc<Self>> {
         let result = match (op, a.as_ref(), b.as_ref()) {
             ('-', x, y) if x == y => Rc::new(Self::Constant(0)),
