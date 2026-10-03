@@ -214,8 +214,8 @@ pub(super) fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])
         Comparison::LowerEqual,Comparison::Greater,Comparison::GreaterEqual];
     for (kind,comparison) in comparisons.into_iter().enumerate() {for elements in [0usize,1,7,63,65,257] {
         let mut kernel=definition(MapProgram::Add);let lhs=kernel.body.instructions[0].out.unwrap();let rhs=kernel.body.instructions[1].out.unwrap();
-        let mask=Variable::new(VariableKind::LocalConst{id:991},Type::new(ElemType::Bool));
-        let copied=Variable::new(VariableKind::LocalConst{id:992},Type::new(ElemType::Bool));
+        let mask=Variable::new(VariableKind::LocalConst{id:991},Type::scalar(ElemType::Bool));
+        let copied=Variable::new(VariableKind::LocalConst{id:992},Type::scalar(ElemType::Bool));
         kernel.body.instructions[2]=Instruction::new(comparison(BinaryOperator {lhs,rhs}),mask);
         kernel.body.instructions.insert(3,Instruction::new(Operation::Copy(mask),copied));
         kernel.body.instructions.insert(4,Instruction::new(Arithmetic::Add(BinaryOperator {lhs,rhs}),v(993)));
@@ -241,7 +241,7 @@ pub(super) fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])
         let mut branched=kernel.clone();let mut child=Scope::root(false);child.instructions.push(Instruction::no_out(Branch::Return));
         branched.body.instructions.insert(3,Instruction::no_out(Branch::If(Box::new(If {cond:mask,scope:child}))));
         assert!(compile(branched,elements as u64).is_err());
-        let mut global_bool=kernel;global_bool.buffers[0].ty=Type::new(ElemType::Bool);
+        let mut global_bool=kernel;global_bool.buffers[0].ty=Type::scalar(ElemType::Bool);
         assert!(compile(global_bool,elements as u64).is_err());
     }}
 }

@@ -23,7 +23,7 @@ pub fn definition(activation:PiecewiseActivation,elements:u64,backward:bool)->Re
     let read=|id|Operator::Index(IndexOperator {list:Variable::new(VariableKind::GlobalInputArray(id),f()),index:lane,vector_size:0,unroll_factor:1});
     let bits=|value:f32|Operator::Reinterpret(UnaryOperator {input:Variable::constant(ConstantValue::UInt(value.to_bits() as u64),Type::new(UIntKind::U32.into()))});
     let x=op(read(0).into(),f());let grad=if backward {Some(op(read(1).into(),f()))} else {None};
-    let zero=op(bits(0.).into(),f());let bool_type=Type::new(ElemType::Bool);
+    let zero=op(bits(0.).into(),f());let bool_type=Type::scalar(ElemType::Bool);
     let result=match activation {
         PiecewiseActivation::Relu=>{
             let mask=op(Comparison::LowerEqual(BinaryOperator {lhs:x,rhs:zero}).into(),bool_type);
