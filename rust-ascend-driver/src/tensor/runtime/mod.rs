@@ -10,6 +10,7 @@ mod conversion;
 mod descriptor;
 mod rotary;
 mod wide_rows;
+mod indexing;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -41,6 +42,7 @@ use ruda_runtime::runtime::{
 pub use ruda_runtime::runtime::{client::ComputeClient, compiler::RudaTask};
 pub use ruda_runtime::runtime::normalization::TensorBuffer;
 pub use crate::tensor::deepgemm::Transpose;
+pub use crate::tensor::EmbeddingOptions;
 pub use rust_ascend_compiler::ascend::rotary_programs::RotaryLayout;
 use rust_ascend_compiler::ascend::{AscendCompiler, AscendOptions, AscendTarget};
 use std::{
@@ -124,6 +126,20 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// ACLNN embedding with contiguous FP32/FP16/BF16 weights and INT32/INT64 IDs.
+    /// IDs have rank 1..7 and values in [0, vocabulary rows); no host index transfer.
+    pub fn embedding(client:&ComputeClient<Self>,weight:TensorBuffer,indices:TensorBuffer)->Result<TensorBuffer> {
+        indexing::embedding(client,weight,indices)
+    }
+    /// Forward plus an independent device-to-device snapshot of the IDs for autodiff.
+    pub fn embedding_with_saved_indices(client:&ComputeClient<Self>,weight:TensorBuffer,indices:TensorBuffer)->Result<[TensorBuffer;2]> {
+        indexing::embedding_with_saved_indices(client,weight,indices)
+    }
+    /// ACLNN dense weight derivative, including repeated IDs, optional padding and frequency scaling.
+    pub fn embedding_backward(client:&ComputeClient<Self>,grad:TensorBuffer,indices:TensorBuffer,num_weights:u64,
+        options:EmbeddingOptions)->Result<TensorBuffer> {
+        indexing::embedding_backward(client,grad,indices,num_weights,options)
+    }
     /// Native FP32 full last-axis rotary encoding using explicit same-row cos/sin tables.
     /// Width is positive/even; each contiguous table has the input shape with width halved.
     pub fn rotary(client: &ComputeClient<Self>, input: TensorBuffer, cos: TensorBuffer,

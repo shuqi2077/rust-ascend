@@ -53,6 +53,14 @@ let dx = x.grad(&gradients).unwrap();
 
 完整进程初始化与调用见 [tensor 示例](examples/tensor.rs)：`cargo run --release --example tensor`。
 
+## 整数索引 Embedding
+
+`CannSession::embedding` / `embedding_backward` 和 `AscendRuntime` 的对应接口使用 ACLNN 设备端查表与 dense 权重反向。连续权重支持 FP32／FP16／BF16；索引保留 INT32／INT64，rank 为 1～7，输出形状为索引形状追加权重宽度。索引值由调用方保证在 `[0, vocabulary_size)` 内，不搬回主机、不经 FP32 转换，也不隐式 clamp。支持空索引和非 32 对齐宽度。
+
+`nn::embedding(weight, indices, options)` 接收 FP32 `weight[V,H]` 与整数 `indices[B,S]`，返回 `[B,S,H]`；`embedding_nd` 提供任意上述索引 rank。`Autodiff<Ascend>` 接入 RUDA 图，反向累积重复 ID 的 dense 权重梯度；`EmbeddingOptions` 显式选择 padding 行和按频次缩放，默认两者均不启用。padding 只屏蔽该行梯度，不改写前向表值。已跟踪的前向保存独立的设备到设备整数索引快照，反向不依赖后来修改的原索引。
+
+调用见 [embedding_tensor 示例](examples/embedding_tensor.rs)：`cargo run --locked --release --example embedding_tensor`。
+
 ## 计算客户端原生 BF16 矩阵
 
 `AscendRuntime::gemm` / `gemm_into` 使用 RUDA `ComputeClient` 的 `TensorBuffer`，在设备线程按需生成、编译和缓存已有 Rust BF16 矩阵内核，无需预先准备算子目录。支持连续 BF16 输入、BF16／FP32 输出，rank-2 Dense 和 batch 数相同的 rank-3 Batched，以及 NN／NT／TN／TT 四种转置组合。M／N／K 必须为正且是 16 的倍数，不做 batch 广播。

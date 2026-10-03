@@ -2,9 +2,11 @@
 mod attention;
 mod rotary;
 mod feed_forward;
+mod embedding;
 pub use attention::scaled_dot_product_attention_bf16_fp32;
 pub use rotary::{RotaryBackend,rotary};
 pub use feed_forward::{lora_linear_bf16_fp32,swiglu_bf16_fp32};
+pub use embedding::{EmbeddingBackend,EmbeddingOptions,embedding,embedding_nd};
 pub use crate::runtime::RotaryLayout;
 use crate::{Ascend, Autodiff, driver::CannError, runtime::{AscendRuntime, TensorBuffer, Transpose}};
 use ruda_autodiff::{checkpoint::{base::Checkpointer, strategy::CheckpointStrategy},

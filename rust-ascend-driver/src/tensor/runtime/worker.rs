@@ -123,6 +123,54 @@ pub(super) struct State {
     gemm_artifacts: tempfile::TempDir,
 }
 impl State {
+    pub fn copy_embedding_indices(&mut self,layout:crate::tensor::TensorLayout,resources:[AscendResource;2])->Result<()> {
+        if resources.iter().any(|r|r.size!=layout.byte_len()) || !matches!(layout.dtype(),crate::tensor::DType::I32|crate::tensor::DType::I64) {
+            return Err(error("embedding index snapshot contract mismatch"));
+        }
+        let addresses=[self.pointer(&resources[0])? as usize,self.pointer(&resources[1])? as usize];
+        cast_ranges(addresses,&[layout.clone(),layout.clone()])?;
+        if layout.byte_len()==0 {return Ok(());}
+        self.session.bind()?;
+        // SAFETY: exact-size, disjoint device allocations retained by caller guards;
+        // synchronous device-to-device copy preserves integer bits and never visits host RAM.
+        check_status("aclrtMemcpy(embedding IDs)",unsafe {self.session.api.aclrtMemcpy(addresses[1] as *mut c_void,layout.byte_len(),
+            addresses[0] as *const c_void,layout.byte_len(),ACL_MEMCPY_DEVICE_TO_DEVICE)})
+    }
+    pub fn embedding(&mut self,layouts:[crate::tensor::TensorLayout;3],resources:[AscendResource;3],backward:Option<crate::tensor::EmbeddingOptions>)->Result<()> {
+        use crate::tensor::embedding::{forward_layout,backward_layout,EmbeddingPlan,EmbeddingGradPlan};
+        if resources.iter().zip(&layouts).any(|(r,l)|r.size!=l.byte_len()) {return Err(error("embedding layout/resource contract mismatch"));}
+        let expected=if let Some(options)=backward {
+            if layouts[2].shape().len()!=2 {return Err(error("embedding dense output must have rank two"));}
+            backward_layout(&layouts[0],&layouts[1],layouts[2].shape()[0] as u64,options)?
+        } else {forward_layout(&layouts[0],&layouts[1])?};
+        if expected!=layouts[2] {return Err(error("embedding output does not match its checked contract"));}
+        let addresses=[self.pointer(&resources[0])? as usize,self.pointer(&resources[1])? as usize,self.pointer(&resources[2])? as usize];
+        embedding_ranges(addresses,&layouts)?;self.session.bind()?;
+        if backward.is_some() && layouts[2].byte_len()!=0 {
+            type Memset=unsafe extern "C" fn(*mut c_void,usize,i32,usize)->i32;
+            // SAFETY: checked dense gradient storage is initialized on the device.
+            let memset=unsafe {self.session.api.library().symbol::<Memset>(c"aclrtMemset")?};
+            check_status("aclrtMemset(embedding gradient)",unsafe {memset(addresses[2] as *mut c_void,layouts[2].byte_len(),0,layouts[2].byte_len())})?;
+        }
+        if layouts[0].byte_len()==0 || layouts[1].byte_len()==0 || layouts[2].byte_len()==0 {return Ok(());}
+        let [a,ids,out]=layouts;
+        let rows=out.shape()[0] as u64;
+        // SAFETY: typed descriptors borrow guarded allocations until the synchronized ACLNN executor returns.
+        let a=unsafe {super::descriptor::Descriptor::new(&self.session,a,addresses[0] as *mut c_void)?};
+        let ids=unsafe {super::descriptor::Descriptor::new(&self.session,ids,addresses[1] as *mut c_void)?};
+        let out=unsafe {super::descriptor::Descriptor::new(&self.session,out,addresses[2] as *mut c_void)?};
+        unsafe {
+            if let Some(options)=backward {
+                let padding=options.padding(rows)?;
+                let plan:EmbeddingGradPlan=self.session.ops.get(c"aclnnEmbeddingDenseBackwardGetWorkspaceSize")?;
+                let run=self.session.ops.get(c"aclnnEmbeddingDenseBackward")?;
+                self.session.execute("aclnnEmbeddingDenseBackward",run,|size,executor|plan(a.handle.as_ptr(),ids.handle.as_ptr(),rows,padding,options.scale_grad_by_freq,out.handle.as_ptr(),size,executor))
+            } else {
+                let plan:EmbeddingPlan=self.session.ops.get(c"aclnnEmbeddingGetWorkspaceSize")?;let run=self.session.ops.get(c"aclnnEmbedding")?;
+                self.session.execute("aclnnEmbedding",run,|size,executor|plan(a.handle.as_ptr(),ids.handle.as_ptr(),out.handle.as_ptr(),size,executor))
+            }
+        }
+    }
     pub fn cast(&mut self,layouts:[crate::tensor::TensorLayout;2],resources:[AscendResource;2])->Result<()> {
         if layouts[0].shape()!=layouts[1].shape() || resources.iter().zip(&layouts).any(|(r,l)|r.size!=l.byte_len()) {
             return Err(error("Cast layout/resource contract mismatch"));
@@ -243,6 +291,17 @@ impl State {
     }
 }
 
+fn embedding_ranges(addresses:[usize;3],layouts:&[crate::tensor::TensorLayout;3])->Result<()> {
+    let mut ends=[0usize;3];
+    for i in 0..3 {
+        if addresses[i]==0 || addresses[i]%layouts[i].dtype().bytes()!=0 {return Err(error("embedding address is null or unaligned"));}
+        ends[i]=addresses[i].checked_add(layouts[i].byte_len()).ok_or_else(||error("embedding address range overflow"))?;
+    }
+    for input in 0..2 {if layouts[input].byte_len()!=0 && layouts[2].byte_len()!=0 && addresses[2]<ends[input] && addresses[input]<ends[2] {
+        return Err(error("embedding output overlaps readonly input"));
+    }}
+    Ok(())
+}
 fn cast_ranges(addresses:[usize;2],layouts:&[crate::tensor::TensorLayout;2])->Result<()> {
     let mut ends=[0;2];
     for i in 0..2 {
@@ -276,5 +335,18 @@ mod tests {
         assert!(cast_ranges([4096,8194],&layouts).is_err());
         assert!(cast_ranges([0,8192],&layouts).is_err());
         assert!(cast_ranges([usize::MAX-1,8192],&layouts).is_err());
+    }
+    #[test]
+    fn embedding_ranges_preserve_readonly_aliases_and_disjoint_typed_output() {
+        use crate::tensor::{DType,TensorLayout};
+        let layouts=[TensorLayout::contiguous(&[7,65],DType::F32).unwrap(),
+            TensorLayout::contiguous(&[2,3],DType::I64).unwrap(),
+            TensorLayout::contiguous(&[2,3,65],DType::F32).unwrap()];
+        assert!(embedding_ranges([4096,8192,12288],&layouts).is_ok());
+        assert!(embedding_ranges([4096,4096,12288],&layouts).is_ok());
+        for addresses in [[4096,8192,4096],[4096,8192,8192],[4096,8193,12288],
+            [4096,8192,12289],[0,8192,12288],[usize::MAX-3,8192,12288]] {
+            assert!(embedding_ranges(addresses,&layouts).is_err());
+        }
     }
 }
