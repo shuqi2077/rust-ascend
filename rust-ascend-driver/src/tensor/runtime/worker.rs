@@ -236,6 +236,23 @@ impl State {
         }
     }
 
+    pub fn resize_prefix(&mut self,layouts:[crate::tensor::TensorLayout;2],resources:[AscendResource;2])->Result<()> {
+        let padding=super::padded_matrix::prefix_padding(&layouts[0],&layouts[1])?;
+        if resources.iter().zip(&layouts).any(|(resource,layout)|resource.size!=layout.byte_len()) {
+            return Err(error("prefix padding resource size mismatch"));
+        }
+        let addresses=[self.pointer(&resources[0])? as usize,self.pointer(&resources[1])? as usize];
+        loss_ranges(&addresses,&layouts,1)?;
+        let dtype=layouts[0].dtype();let [input,output]=layouts;
+        // SAFETY: the caller retains both managed-resource guards until the
+        // worker's synchronized ACLNN call completes; output storage is disjoint.
+        unsafe {
+            let input=super::descriptor::Descriptor::new(&self.session,input,addresses[0] as *mut c_void)?;
+            let output=super::descriptor::Descriptor::new(&self.session,output,addresses[1] as *mut c_void)?;
+            self.session.constant_pad_zero(input.handle.as_ptr(),&padding,output.handle.as_ptr(),dtype)
+        }
+    }
+
     pub fn allocate(&mut self, id: StorageId, size: usize) -> Result<()> {
         self.buffers.insert(id, self.session.allocate(size)?);
         Ok(())

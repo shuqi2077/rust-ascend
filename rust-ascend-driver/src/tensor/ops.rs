@@ -103,6 +103,32 @@ impl Drop for IntArray {
 }
 
 impl CannSession {
+    /// # Safety
+    /// Tensor descriptors and their device allocations belong to this session
+    /// and remain alive through the synchronized executor call.
+    pub(super) unsafe fn constant_pad_zero(self:&Rc<Self>,input:*const AclTensor,
+        padding:&[i64],output:*mut AclTensor,dtype:DType)->Result<(),CannError> {
+        type Plan=unsafe extern "C" fn(*const AclTensor,*const AclIntArray,*const AclScalar,
+            *mut AclTensor,*mut u64,*mut *mut AclOpExecutor)->Status;
+        type Create=unsafe extern "C" fn(*mut c_void,i32)->*mut AclScalar;
+        if !matches!(dtype,DType::F32|DType::BF16) {return Err(invalid("device prefix padding requires FP32/BF16"));}
+        let padding=self.int_array(padding)?;
+        // The fill scalar has exactly the tensor dtype: positive zero in both
+        // formats. No dtype promotion, host tensor copy, or CPU padding is used.
+        let mut bits=0u64;
+        unsafe {
+            let create:Create=self.ops.get(c"aclCreateScalar")?;
+            let destroy=self.ops.get(c"aclDestroyScalar")?;
+            let handle=NonNull::new(create((&mut bits as *mut u64).cast(),dtype as i32))
+                .ok_or(CannError::NullHandle("aclCreateScalar"))?;
+            let zero=Scalar {session:self.clone(),handle,destroy};
+            let plan:Plan=self.ops.get(c"aclnnConstantPadNdGetWorkspaceSize")?;
+            let run=self.ops.get(c"aclnnConstantPadNd")?;
+            self.execute("aclnnConstantPadNd",run,|size,executor|
+                plan(input,padding.handle.as_ptr(),zero.handle.as_ptr(),output,size,executor))
+        }
+    }
+
     fn int_array(self: &Rc<Self>, values: &[i64]) -> Result<IntArray, CannError> {
         type Create = unsafe extern "C" fn(*const i64, u64) -> *mut AclIntArray;
         // SAFETY: exact SDK signatures, valid host data for the creation call.

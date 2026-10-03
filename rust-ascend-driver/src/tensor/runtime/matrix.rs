@@ -11,7 +11,7 @@ fn layout_parts(shape: &[usize], strides: &[usize], dtype: DType) -> Result<Tens
     let shape = shape.iter().map(|&d| i64::try_from(d).map_err(error)).collect::<Result<Vec<_>>>()?;
     TensorLayout::contiguous(&shape, dtype)
 }
-fn layout(tensor: &TensorBuffer) -> Result<TensorLayout> {
+pub(super) fn layout(tensor: &TensorBuffer) -> Result<TensorLayout> {
     let layout = layout_parts(&tensor.shape, &tensor.strides, tensor.dtype)?;
     if tensor.handle.size_in_used() < layout.byte_len() as u64 {
         return Err(error("native matrix buffer is shorter than its layout"));
@@ -28,7 +28,7 @@ fn allocate(client: &Client, layout: &TensorLayout) -> TensorBuffer {
         strides: Strides::from(layout.strides().iter().map(|&d| d as usize).collect::<Vec<_>>()),
         dtype: if layout.dtype()==CannDType::BF16 {DType::BF16} else {DType::F32} }
 }
-fn launch(client: &Client, spec: GemmSpec, a: &TensorBuffer, b: &TensorBuffer, out: &TensorBuffer) -> Result<()> {
+pub(super) fn launch(client: &Client, spec: GemmSpec, a: &TensorBuffer, b: &TensorBuffer, out: &TensorBuffer) -> Result<()> {
     client.flush().map_err(error)?;
     let guards = [a,b,out].iter().map(|t| client.get_resource(t.handle.clone()).map_err(error))
         .collect::<Result<Vec<_>>>()?;

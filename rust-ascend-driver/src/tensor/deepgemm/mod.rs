@@ -4,7 +4,9 @@
 mod artifact;
 pub(super) mod native;
 mod plan;
+mod padded;
 pub use plan::{GemmKind,GemmSpec,GroupEnds,Transpose};
+pub use padded::PaddedGemmSpec;
 use super::{CannSession,CannTensor,DType,layout::invalid};
 use crate::{CannError,check_status};
 use native::{Arguments,GmPtr,Epilogue,Kernel,NativeApi};

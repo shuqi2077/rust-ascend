@@ -6,6 +6,10 @@ mod embedding;
 mod loss;
 mod heads;
 mod frozen;
+mod padded;
+pub use padded::{PaddedMatmulBf16Fp32Backend,FrozenPaddedLinearBf16Fp32Backend,
+    matmul_padded_bf16_fp32,linear_padded_bf16_fp32,lora_padded_linear_bf16_fp32,swiglu_padded_bf16_fp32,
+    linear_frozen_padded_bf16_fp32,lora_frozen_padded_linear_bf16_fp32,swiglu_frozen_padded_bf16_fp32};
 pub use frozen::{FrozenLinearBf16Fp32Backend,linear_frozen_bf16_fp32,lora_frozen_linear_bf16_fp32,swiglu_frozen_bf16_fp32,
     FrozenEmbeddingBf16Fp32Backend,embedding_frozen_bf16_fp32,embedding_frozen_bf16_fp32_nd};
 pub use heads::{RepeatKvBackend,repeat_kv_heads};

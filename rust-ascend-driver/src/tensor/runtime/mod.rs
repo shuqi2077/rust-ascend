@@ -4,6 +4,7 @@ mod build;
 mod worker;
 mod normalization;
 mod matrix;
+mod padded_matrix;
 mod rows;
 mod elementwise;
 mod conversion;
@@ -132,6 +133,25 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Explicit positive matrix tails via device zero-pad, native BF16 GEMM, FP32 crop.
+    /// Returns [logical output, independent padded BF16 A snapshot, B snapshot].
+    pub fn gemm_padded_bf16_fp32(client:&ComputeClient<Self>,a:TensorBuffer,b:TensorBuffer,ta:Transpose,tb:Transpose)->Result<[TensorBuffer;3]> {
+        padded_matrix::forward(client,a,b,ta,tb)
+    }
+    /// Original physical input shapes are required to crop padded FP32 derivatives.
+    pub fn gemm_padded_bf16_fp32_backward(client:&ComputeClient<Self>,a:TensorBuffer,b:TensorBuffer,grad:TensorBuffer,
+        a_shape:Shape,b_shape:Shape,ta:Transpose,tb:Transpose)->Result<[TensorBuffer;2]> {
+        padded_matrix::backward(client,a,b,grad,a_shape,b_shape,ta,tb)
+    }
+    /// FP32 input and fixed BF16 weight; padding may allocate a BF16 weight copy.
+    /// Returns [logical output, fixed padded BF16 weight used by input backward].
+    pub fn linear_frozen_padded_bf16_fp32(client:&ComputeClient<Self>,input:TensorBuffer,weight:TensorBuffer)->Result<[TensorBuffer;2]> {
+        padded_matrix::frozen_forward(client,input,weight)
+    }
+    pub fn linear_frozen_padded_bf16_fp32_backward(client:&ComputeClient<Self>,weight:TensorBuffer,grad:TensorBuffer,
+        input_shape:Shape,weight_shape:Shape)->Result<TensorBuffer> {
+        padded_matrix::frozen_backward(client,weight,grad,input_shape,weight_shape)
+    }
     /// Native common-IR FP32 causal mask using exact unsigned absolute positions.
     pub fn causal_mask(client:&ComputeClient<Self>,spec:CausalMaskSpec)->Result<TensorBuffer> {mask::causal(client,spec)}
 

@@ -121,6 +121,16 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `nn::swiglu_bf16_fp32(input, gate, up, down)` 计算 `(SiLU(X Wgate^T) * (X Wup^T)) Wdown^T`，组合原生线性计算、FP32 SiLU 门控乘法与 RUDA 求导。gate／up 为 `[H,K]`，down 为 `[N,H]`；M／N／K／H 为正且为 16 的倍数。不推断模型维度、bias、dropout、residual 或 normalization。调用见 [swiglu_tensor 示例](examples/swiglu_tensor.rs)：`cargo run --locked --release --example swiglu_tensor`。
 
+## 显式矩阵 padding 与任意正 LoRA rank
+
+`nn::matmul_padded_bf16_fp32(a, b, ta, tb)` 与 `nn::linear_padded_bf16_fp32(input, weight)` 接收连续 FP32 参数，支持正 M／N／K 不为 16 倍数的逻辑尺寸。设备端用 ACLNN Cast 转成 BF16，再用 ACLNN ConstantPadNd 补零到 16 对齐，矩阵计算仍执行本仓库的 Rust 原生 GEMM；FP32 输出和两侧梯度裁回原始物理形状。Matmul 支持 rank-2／相同 batch 的 rank-3 和四种转置组合，不做 batch 广播；对齐后的矩阵轴不超过 INT32_MAX，batch 为 1～4096，沿用原生调度器的 tile 域限制。
+
+`nn::lora_padded_linear_bf16_fp32` 和 `nn::swiglu_padded_bf16_fp32` 复用这一入口，LoRA rank 可为任意正数，包括 1、7、8。每层先裁回逻辑激活，再为下一层补零，padding 通道不参与模型激活。输入、参数及其梯度保持 FP32 存储，计算精度仍是显式 BF16 模式。
+
+`nn::linear_frozen_padded_bf16_fp32`、`nn::lora_frozen_padded_linear_bf16_fp32`、`nn::swiglu_frozen_padded_bf16_fp32` 接收已有固定 BF16 权重、FP32 输入和 adapter；只对固定权重路径计算输入梯度。对齐权重复用原存储，不对齐权重需要额外的补零 BF16 缓冲区；不展开成 FP32，也不保存线性层输入值。调用方须保持固定权重到反向结束。可训练路径保存独立的补零 BF16 输入快照。以上入口均显式分配 padding／裁剪缓冲区，不改变原有无 padding 接口，不含 bias、dropout 或权重合并。
+
+调用见 [padded_matrix_tensor 示例](examples/padded_matrix_tensor.rs)：`cargo run --locked --release --example padded_matrix_tensor`。
+
 ## 直接使用冻结 BF16 权重
 
 `nn::embedding_frozen_bf16_fp32` / `embedding_frozen_bf16_fp32_nd` 直接使用固定 BF16 `[V,H]` 表和设备端 INT32／INT64 ID，输出 FP32 激活。二维 ID 输出 `[B,S,H]`，ND 入口支持 rank-1～7 ID 并追加 H 轴；ID 须在 `[0,V)`，支持重复 ID 与空张量。不把整张表展开为 FP32，不保存 ID 反向快照，不计算固定表或整数 ID 的梯度。
