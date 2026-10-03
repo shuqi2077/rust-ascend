@@ -3,12 +3,15 @@ use super::{Result,invalid};
 use ruda_core::{ir::*,kernel::{KernelArg,KernelDefinition,KernelOptions,Visibility},launch::RudaDim};
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum WideStage {CopyTile,ExpTile,SoftmaxTile,LogSoftmaxTile,DotTile,SoftmaxBackwardTile,LogSoftmaxBackwardTile,SumBackwardTile,MeanBackwardTile}
+pub enum WideStage {CopyTile,ExpTile,SoftmaxTile,LogSoftmaxTile,DotTile,SoftmaxBackwardTile,LogSoftmaxBackwardTile,SumBackwardTile,MeanBackwardTile,
+    SquareTile,RmsNormTile,RmsDotTile,RmsBackwardTile,RmsWeightTile}
 impl WideStage {
-    pub fn partial(self)->bool {matches!(self,Self::SoftmaxTile|Self::LogSoftmaxTile|Self::SoftmaxBackwardTile|Self::LogSoftmaxBackwardTile|Self::SumBackwardTile|Self::MeanBackwardTile)}
+    pub fn partial(self)->bool {matches!(self,Self::SoftmaxTile|Self::LogSoftmaxTile|Self::SoftmaxBackwardTile|Self::LogSoftmaxBackwardTile|Self::SumBackwardTile|Self::MeanBackwardTile
+        |Self::RmsNormTile|Self::RmsBackwardTile|Self::RmsWeightTile)}
     fn name(self)->&'static str {match self {Self::CopyTile=>"copy",Self::ExpTile=>"exp",Self::SoftmaxTile=>"softmax",
         Self::LogSoftmaxTile=>"log_softmax",Self::DotTile=>"dot",Self::SoftmaxBackwardTile=>"softmax_backward",Self::LogSoftmaxBackwardTile=>"log_softmax_backward",
-        Self::SumBackwardTile=>"sum_backward",Self::MeanBackwardTile=>"mean_backward"}}
+        Self::SumBackwardTile=>"sum_backward",Self::MeanBackwardTile=>"mean_backward",Self::SquareTile=>"square",
+        Self::RmsNormTile=>"rms_norm",Self::RmsDotTile=>"rms_dot",Self::RmsBackwardTile=>"rms_backward",Self::RmsWeightTile=>"rms_weight"}}
 }
 fn f()->Type {Type::new(FloatKind::F32.into())}
 fn u()->Type {Type::new(UIntKind::U64.into())}
@@ -44,10 +47,12 @@ pub fn definition(stage:WideStage,rows:u64,width:u32,start:u32,columns:u32)->Res
         return Err(invalid("wide tiles require aligned positive width/columns, columns<=4096, an in-row range and full domain within u32"));
     }
     let sizes=match stage {
-        WideStage::CopyTile=>vec![full,tile],WideStage::ExpTile=>vec![full,rows,tile],
+        WideStage::CopyTile|WideStage::SquareTile=>vec![full,tile],WideStage::ExpTile=>vec![full,rows,tile],
         WideStage::SoftmaxTile=>vec![tile,rows,full],WideStage::LogSoftmaxTile=>vec![full,rows,rows,full],
         WideStage::DotTile=>vec![full,full,tile],WideStage::SoftmaxBackwardTile|WideStage::LogSoftmaxBackwardTile=>vec![full,full,rows,full],
         WideStage::SumBackwardTile|WideStage::MeanBackwardTile=>vec![rows,full],
+        WideStage::RmsNormTile=>vec![full,width as u64,rows,full],WideStage::RmsDotTile=>vec![full,full,width as u64,tile],
+        WideStage::RmsBackwardTile=>vec![full,full,width as u64,rows,rows,full],WideStage::RmsWeightTile=>vec![full,full,rows,full],
     };
     let mut builder=Builder::new(format!("ruda_cann_wide_{}",stage.name()),&sizes);
     let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());
@@ -56,8 +61,29 @@ pub fn definition(stage:WideStage,rows:u64,width:u32,start:u32,columns:u32)->Res
     let base=builder.binary(Arithmetic::Mul,row,integer(width as u64),u());
     let index=builder.binary(Arithmetic::Add,base,col,u());
     let index=builder.binary(Arithmetic::Add,index,integer(start as u64),u());
+    let shared=builder.binary(Arithmetic::Add,col,integer(start as u64),u());
     let output=match stage {
         WideStage::CopyTile=>builder.read(0,index),
+        WideStage::SquareTile=>{let x=builder.read(0,index);builder.binary(Arithmetic::Mul,x,x,f())},
+        WideStage::RmsNormTile=>{
+            let x=builder.read(0,index);let weight=builder.read(1,shared);let r=builder.read(2,row);
+            let normalized=builder.binary(Arithmetic::Mul,x,r,f());builder.binary(Arithmetic::Mul,normalized,weight,f())
+        },
+        WideStage::RmsDotTile=>{
+            let x=builder.read(0,index);let grad=builder.read(1,index);let weight=builder.read(2,shared);
+            let g=builder.binary(Arithmetic::Mul,grad,weight,f());builder.binary(Arithmetic::Mul,g,x,f())
+        },
+        WideStage::RmsBackwardTile=>{
+            let x=builder.read(0,index);let grad=builder.read(1,index);let weight=builder.read(2,shared);
+            let r=builder.read(3,row);let mean=builder.read(4,row);
+            let g=builder.binary(Arithmetic::Mul,grad,weight,f());let rr=builder.binary(Arithmetic::Mul,r,r,f());
+            let correction=builder.binary(Arithmetic::Mul,mean,rr,f());let correction=builder.binary(Arithmetic::Mul,x,correction,f());
+            let centered=builder.binary(Arithmetic::Sub,g,correction,f());builder.binary(Arithmetic::Mul,centered,r,f())
+        },
+        WideStage::RmsWeightTile=>{
+            let x=builder.read(0,index);let grad=builder.read(1,index);let r=builder.read(2,row);
+            let normalized=builder.binary(Arithmetic::Mul,x,r,f());builder.binary(Arithmetic::Mul,normalized,grad,f())
+        },
         WideStage::ExpTile=>{
             let x=builder.read(0,index);let max=builder.read(1,row);
             let shifted=builder.binary(Arithmetic::Sub,x,max,f());builder.unary(Arithmetic::Exp,shifted)
@@ -113,6 +139,13 @@ pub fn mean_definition(rows:u64,width:u32)->Result<KernelDefinition> {
     let result=builder.binary(Arithmetic::Div,value,Variable::constant(ConstantValue::Float(width as f32 as f64),f()),f());
     builder.write(lane,result);Ok(builder.kernel)
 }
+pub fn rstd_definition(rows:u64,width:u32,epsilon:f32)->Result<KernelDefinition> {
+    if width==0 || rows>u32::MAX as u64 || !epsilon.is_finite() || epsilon<=0. {return Err(invalid("RMS statistics require a positive width and finite positive epsilon"));}
+    let mut builder=Builder::new("ruda_cann_wide_rstd".into(),&[rows;2]);let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());
+    let sum=builder.read(0,lane);let mean=builder.binary(Arithmetic::Div,sum,Variable::constant(ConstantValue::Float(width as f32 as f64),f()),f());
+    let shifted=builder.binary(Arithmetic::Add,mean,Variable::constant(ConstantValue::Float(epsilon as f64),f()),f());
+    let r=builder.unary(Arithmetic::InverseSqrt,shifted);builder.write(lane,r);Ok(builder.kernel)
+}
 
 #[cfg(test)]
 mod tests {
@@ -146,7 +179,8 @@ mod tests {
     #[test]
     fn every_wide_stage_compiles_with_explicit_output_contract_and_tail_bounds() {
         let stages=[WideStage::CopyTile,WideStage::ExpTile,WideStage::SoftmaxTile,WideStage::LogSoftmaxTile,
-            WideStage::DotTile,WideStage::SoftmaxBackwardTile,WideStage::LogSoftmaxBackwardTile,WideStage::SumBackwardTile,WideStage::MeanBackwardTile];
+            WideStage::DotTile,WideStage::SoftmaxBackwardTile,WideStage::LogSoftmaxBackwardTile,WideStage::SumBackwardTile,WideStage::MeanBackwardTile,
+            WideStage::SquareTile,WideStage::RmsNormTile,WideStage::RmsDotTile,WideStage::RmsBackwardTile,WideStage::RmsWeightTile];
         for width in [4128u32,8192,8224] {for rows in [0u64,1,2] {for start in (0..width).step_by(4096) {
             let columns=(width-start).min(4096);let n=rows*columns as u64;
             for stage in stages {
@@ -175,6 +209,7 @@ mod tests {
         assert!(AscendCompiler.compile(merge_definition(3,true).unwrap(),&options(3),ExecutionMode::Checked,UIntKind::U64.into()).unwrap().source().contains("AscendC::Max("));
         assert!(AscendCompiler.compile(zero_definition(65).unwrap(),&options(65),ExecutionMode::Checked,UIntKind::U64.into()).is_ok());
         assert!(AscendCompiler.compile(mean_definition(3,8224).unwrap(),&options(3),ExecutionMode::Checked,UIntKind::U64.into()).is_ok());
+        assert!(AscendCompiler.compile(rstd_definition(3,8224,1e-3).unwrap(),&options(3),ExecutionMode::Checked,UIntKind::U64.into()).is_ok());
     }
     #[test]
     fn wide_softmax_and_backward_tiles_match_independent_fp64_equations() {
@@ -255,5 +290,50 @@ mod tests {
                 }
             }
         }}
+    }
+    #[test]
+    fn wide_rms_norm_saved_statistics_and_affine_gradients_match_fp64() {
+        for width in [4128usize,8192,8224] {let rows=3;let eps=1e-3f32;
+            let x:Vec<f32>=(0..rows*width).map(|i|(i%31) as f32/7.-1.).collect();
+            let weight:Vec<f32>=(0..width).map(|i|0.5+(i%7) as f32/9.).collect();
+            let grad:Vec<f32>=(0..rows*width).map(|i|(i%11) as f32/5.-0.7).collect();
+            let accumulated=|kind,inputs:&[&[f32]]| {
+                let mut sum=vec![0.;rows];
+                for start in (0..width).step_by(4096) {
+                    let columns=(width-start).min(4096);let mut values=vec![0.;rows*columns];
+                    tile(kind,rows,width,start,columns,inputs,&mut values);
+                    for row in 0..rows {sum[row]+=values[row*columns..(row+1)*columns].iter().sum::<f32>();}
+                }
+                sum
+            };
+            let squares=accumulated(WideStage::SquareTile,&[&x]);let mut rstd=vec![0.;rows];
+            evaluate(rstd_definition(rows as u64,width as u32,eps).unwrap(),rows,&[&squares],&mut rstd,false);
+            let dots=accumulated(WideStage::RmsDotTile,&[&x,&grad,&weight]);let mut mean=vec![0.;rows];
+            evaluate(mean_definition(rows as u64,width as u32).unwrap(),rows,&[&dots],&mut mean,false);
+            let mut y=vec![f32::NAN;x.len()];let mut dx=y.clone();let mut parts=y.clone();
+            for start in (0..width).step_by(4096) {
+                let columns=(width-start).min(4096);
+                tile(WideStage::RmsNormTile,rows,width,start,columns,&[&x,&weight,&rstd],&mut y);
+                tile(WideStage::RmsBackwardTile,rows,width,start,columns,&[&x,&grad,&weight,&rstd,&mean],&mut dx);
+                tile(WideStage::RmsWeightTile,rows,width,start,columns,&[&x,&grad,&rstd],&mut parts);
+            }
+            let mut expected_dw=vec![0.;width];
+            for row in 0..rows {
+                let data=&x[row*width..(row+1)*width];let r=(data.iter().map(|&x|(x as f64).powi(2)).sum::<f64>()/width as f64+eps as f64).sqrt().recip();
+                let dot=(0..width).map(|c|grad[row*width+c] as f64*weight[c] as f64*data[c] as f64).sum::<f64>()/width as f64;
+                assert!((rstd[row] as f64-r).abs()<2e-5);
+                for c in 0..width {let i=row*width+c;let normalized=data[c] as f64*r;
+                    let expected_y=normalized*weight[c] as f64;
+                    let expected_dx=r*(grad[i] as f64*weight[c] as f64-data[c] as f64*r*r*dot);
+                    expected_dw[c]+=grad[i] as f64*normalized;
+                    assert!((y[i] as f64-expected_y).abs()<2e-4);
+                    assert!((dx[i] as f64-expected_dx).abs()<2e-4);
+                }
+            }
+            for c in 0..width {
+                let observed=(0..rows).map(|row|parts[row*width+c] as f64).sum::<f64>();
+                assert!((observed-expected_dw[c]).abs()<2e-4);
+            }
+        }
     }
 }

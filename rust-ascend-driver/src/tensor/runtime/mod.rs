@@ -257,7 +257,7 @@ impl AscendRuntime {
     }
 
     /// Native common-IR RMSNorm on contiguous FP32 tensors. Returns [output, rstd].
-    /// The last dimension must be 32..4096 and divisible by 32.
+    /// The last dimension must be positive and divisible by 32; wide rows use native tiles.
     pub fn rms_norm(client: &ComputeClient<Self>, input: TensorBuffer,
         weight: TensorBuffer, epsilon: f64) -> Result<[TensorBuffer; 2]> {
         normalization::rms_forward(client, input, weight, epsilon)

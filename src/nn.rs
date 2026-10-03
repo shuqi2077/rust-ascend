@@ -124,7 +124,8 @@ fn normalized_exponential<B: SoftmaxBackend, const D: usize>(input: Tensor<B,D>,
 }
 
 /// Normalize the last dimension of a contiguous FP32 RUDA tensor.
-/// The shared weight has rank one; width must be 32..4096 and divisible by 32.
+/// The shared weight has rank one; width must be positive and divisible by 32.
+/// Wider rows use device-side tiled statistics and the forward's saved reciprocal RMS.
 /// `Autodiff<Ascend>` tracks input and weight gradients using saved device statistics.
 pub fn rms_norm<B: RmsNormBackend, const D: usize>(input: Tensor<B, D>, weight: Tensor<B, 1>,
     epsilon: f64) -> Result<Tensor<B, D>> {

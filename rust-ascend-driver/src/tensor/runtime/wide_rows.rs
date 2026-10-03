@@ -1,5 +1,5 @@
 use super::{AscendRuntime,ComputeClient,Result,TensorBuffer,error,contiguous,
-    normalization::{buffer,check_for,row,run}};
+    normalization::{buffer,check_for,row,run,epsilon_for,column_sum}};
 use ruda_core::{compiler::Compiler,ir::UIntKind,kernel::KernelDefinition,launch::ExecutionMode,tensor::{DType,Shape,Strides}};
 use rust_ascend_compiler::ascend::{AscendCompiler,AscendOptions,AscendTarget,row_programs::RowProgram,
     programs::{self,MapProgram},wide_programs::{self,WideStage}};
@@ -63,6 +63,45 @@ pub(super) fn reduction_backward(client:&Client,shape:Shape,strides:Strides,grad
         stage(client,if mean {WideStage::MeanBackwardTile} else {WideStage::SumBackwardTile},rows,width,start as u32,columns,&[&grad,&out])?;
     }
     Ok(out)
+}
+fn tiled_sum(client:&Client,kind:WideStage,rows:usize,width:u32,inputs:&[&TensorBuffer])->Result<TensorBuffer> {
+    let mut total=None;
+    for start in (0..width as usize).step_by(TILE) {
+        let columns=(width as usize-start).min(TILE) as u32;let tile=buffer(client,Shape::new([rows,columns as usize]),false);
+        let mut bindings=inputs.to_vec();bindings.push(&tile);stage(client,kind,rows,width,start as u32,columns,&bindings)?;
+        let current=reduce(client,&tile,rows,columns,false)?;
+        total=Some(match total {Some(previous)=>merge(client,previous,current,rows,false)?,None=>current});
+    }
+    total.ok_or_else(||error("wide statistic has no tiles"))
+}
+pub(super) fn rms_forward(client:&Client,input:TensorBuffer,weight:TensorBuffer,eps:f64)->Result<[TensorBuffer;2]> {
+    let (rows,width)=layout(&input)?;let eps=epsilon_for(eps,"wide RMSNorm")?;
+    check_for(&weight,&[width as usize],"wide RMSNorm weight")?;
+    let rstd=buffer(client,Shape::new([rows]),false);
+    if rows==0 {return Ok([buffer(client,input.shape,false),rstd]);}
+    let sum=tiled_sum(client,WideStage::SquareTile,rows,width,&[&input])?;
+    run(client,compile(wide_programs::rstd_definition(rows as u64,width,eps).map_err(error)?,rows as u64,false)?,&[&sum,&rstd])?;
+    let out=output(client,input.shape.clone())?;
+    for start in (0..width as usize).step_by(TILE) {
+        let columns=(width as usize-start).min(TILE) as u32;
+        stage(client,WideStage::RmsNormTile,rows,width,start as u32,columns,&[&input,&weight,&rstd,&out])?;
+    }
+    Ok([out,rstd])
+}
+pub(super) fn rms_backward(client:&Client,input:TensorBuffer,weight:TensorBuffer,grad:TensorBuffer,rstd:TensorBuffer)->Result<[TensorBuffer;2]> {
+    let (rows,width)=layout(&input)?;check_for(&weight,&[width as usize],"wide RMSNorm weight")?;
+    check_for(&grad,&input.shape,"wide RMSNorm grad")?;check_for(&rstd,&[rows],"wide RMSNorm rstd")?;
+    if rows==0 {return Ok([buffer(client,input.shape,false),output(client,Shape::new([width as usize]))?]);}
+    let sum=tiled_sum(client,WideStage::RmsDotTile,rows,width,&[&input,&grad,&weight])?;
+    let mean=buffer(client,Shape::new([rows]),false);
+    run(client,compile(wide_programs::mean_definition(rows as u64,width).map_err(error)?,rows as u64,false)?,&[&sum,&mean])?;
+    let dx=output(client,input.shape.clone())?;let parts=output(client,input.shape.clone())?;
+    for start in (0..width as usize).step_by(TILE) {
+        let columns=(width as usize-start).min(TILE) as u32;
+        stage(client,WideStage::RmsBackwardTile,rows,width,start as u32,columns,&[&input,&grad,&weight,&rstd,&mean,&dx])?;
+        stage(client,WideStage::RmsWeightTile,rows,width,start as u32,columns,&[&input,&grad,&rstd,&parts])?;
+    }
+    let dw=column_sum(client,parts,rows,width as usize)?;Ok([dx,dw])
 }
 pub(super) fn softmax(client:&Client,input:TensorBuffer,logarithmic:bool)->Result<TensorBuffer> {
     let (rows,width)=layout(&input)?;

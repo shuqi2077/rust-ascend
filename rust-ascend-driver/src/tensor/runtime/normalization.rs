@@ -39,7 +39,7 @@ pub(super) fn check_for(t: &TensorBuffer, shape: &[usize], operation: &str) -> R
 fn epsilon(value: f64) -> Result<f32> {
     epsilon_for(value, "LayerNorm")
 }
-fn epsilon_for(value: f64, operation: &str) -> Result<f32> {
+pub(super) fn epsilon_for(value: f64, operation: &str) -> Result<f32> {
     let v = value as f32;
     if !value.is_finite() || !v.is_finite() || v <= 0.0 {
         return Err(error(format!("{operation} epsilon must be positive and representable in FP32")));
@@ -92,7 +92,7 @@ fn slice(t: &TensorBuffer, offset: usize, elements: usize) -> TensorBuffer {
 }
 
 /// Pairwise device reduction over leading rows, preserving an odd row at each level.
-fn column_sum(client: &Client, mut value: TensorBuffer, mut rows: usize, width: usize) -> Result<TensorBuffer> {
+pub(super) fn column_sum(client: &Client, mut value: TensorBuffer, mut rows: usize, width: usize) -> Result<TensorBuffer> {
     if rows == 0 { return Ok(buffer(client, Shape::new([width]), true)); }
     while rows > 1 {
         let pairs = rows/2;
@@ -150,6 +150,7 @@ pub(super) fn backward(client: &Client, input: TensorBuffer, weight: TensorBuffe
 
 pub(super) fn rms_forward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
     eps: f64) -> Result<[TensorBuffer; 2]> {
+    if input.shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::rms_forward(client,input,weight,eps);}
     let (rows, width) = layout_for(&input.shape, &input.strides, input.dtype, "RMSNorm")?;
     let eps = epsilon_for(eps, "RMSNorm")?;
     check_for(&input, &input.shape, "RMSNorm")?;
@@ -164,6 +165,7 @@ pub(super) fn rms_forward(client: &Client, input: TensorBuffer, weight: TensorBu
 
 pub(super) fn rms_backward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
     grad: TensorBuffer, rstd: TensorBuffer) -> Result<[TensorBuffer; 2]> {
+    if input.shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::rms_backward(client,input,weight,grad,rstd);}
     let (rows, width) = layout_for(&input.shape, &input.strides, input.dtype, "RMSNorm")?;
     check_for(&input, &input.shape, "RMSNorm")?;
     check_for(&weight, &[width as usize], "RMSNorm")?;

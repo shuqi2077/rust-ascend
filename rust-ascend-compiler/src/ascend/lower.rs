@@ -231,7 +231,7 @@ pub(super) fn lower_map(mut k:KernelDefinition,elements:u64,partial_stores:bool)
         if b.has_extended_meta|| (!partial_stores && b.visibility==Visibility::ReadWrite && b.size.is_some_and(|n|n as u64!=elements)){return Err(unsupported("extended metadata or contiguous output size mismatch"));}
         if b.visibility==Visibility::Read {inputs+=1}else{outputs+=1}
     }
-    if inputs>4||outputs==0||outputs>4{return Err(unsupported("at most four inputs/four outputs, and at least one output"));}
+    if inputs>7||outputs==0||outputs>4{return Err(unsupported("at most eight total buffers/four outputs, and at least one output"));}
     // Read actual scope instructions. Unused local declarations carry no effects;
     // every operation, operand and referenced special storage is checked below.
     if k.body.instructions.len()>4096{return Err(unsupported("instruction limit exceeded"));}

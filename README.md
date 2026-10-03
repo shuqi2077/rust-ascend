@@ -95,7 +95,7 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `AscendRuntime::rms_norm` 通过 RUDA `ComputeClient` 接收 `TensorBuffer` 的输入和共享 weight，返回 `[Y, rstd]`。`AscendRuntime::rms_norm_backward` 接收输入、weight、`dY` 及前向保存的 `rstd`，返回 `[dX, dWeight]`。`RowProgram::RmsNormWeightContributions` 生成逐元素 weight 梯度贡献，再在设备端归约所有前导行；空 batch 的 weight 梯度为零。
 
-此接口使用公共 Rust IR 和 CCE，不调用 ACLNN RMSNorm。支持连续 FP32、最后一维宽度 32～4096 且为 32 的倍数。完整运行时调用见 [rms_norm_runtime 示例](examples/rms_norm_runtime.rs)：`cargo run --locked --release --example rms_norm_runtime`。
+此接口使用公共 Rust IR 和 CCE，不调用 ACLNN RMSNorm。支持连续 FP32、最后一维宽度为正且为 32 的倍数，总元素数不超过 u32。宽度超过 4096 时使用设备端分块平方和及全行 reciprocal RMS；反向复用前向统计，分块计算输入梯度及共享 weight 梯度。完整运行时调用见 [rms_norm_runtime 示例](examples/rms_norm_runtime.rs)：`cargo run --locked --release --example rms_norm_runtime`。
 
 `rust_ascend::nn::rms_norm(input, weight, epsilon)` 接收现有 RUDA `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，复用 RUDA 的计算图、梯度存储和共享图梯度累积，原生计算输入与 weight 的梯度。已有 `ruda_nn::RmsNorm` 可将 `gamma.val()` 和 `epsilon` 传给此入口；不修改该模块原有的 `forward` 方法。完整调用见 [rms_norm_tensor 示例](examples/rms_norm_tensor.rs)：`cargo run --locked --release --example rms_norm_tensor`。
 
@@ -181,7 +181,7 @@ python tools/ascend/build_deepgemm.py --emit-only --out ./target/bf16-source
 ## 支持范围
 
 - 公共编译器：连续 FP32 逐元素程序；行宽为 32～4096、且为 32 的倍数。
-- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度；RMSNorm 和 LayerNorm 另提供共享 weight 梯度。运行时 Sum/Mean、Softmax/LogSoftmax 及反向另支持超过 4096 列的原生分块路径，其余行操作仍遵循 32～4096 列限制。
+- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度；RMSNorm 和 LayerNorm 另提供共享 weight 梯度。运行时 Sum/Mean、Softmax/LogSoftmax、RMSNorm 及反向另支持超过 4096 列的原生分块路径，其余行操作仍遵循 32～4096 列限制。
 - BF16 矩阵：direct-store Dense/Batched NN/NT/TN/TT、对齐的 MGrouped NT，BF16/FP32 输出。
 - 设备代码目标为 Ascend950DT / dav-c310；不自动推断或替换目标型号。
 - Rust 程序生成 CCE，再由 Bisheng 编译为设备机器码，不是直接 Rust → 昇腾 ISA。

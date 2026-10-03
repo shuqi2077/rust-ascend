@@ -24,7 +24,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // SAFETY: standalone executable; no other library owns the ACL context.
     let device=unsafe {AscendRuntime::initialize_exclusive(options)?};
-    for (rows,width) in [(0,32),(1,32),(3,96),(7,256),(33,4096)] {
+    let cases=[(0,32),(1,32),(3,96),(7,256),(33,4096),(0,4128),(1,8192),(3,8224)];
+    for (rows,width) in cases {
         let eps=1e-3;
         let weight:Vec<f32>=(0..width).map(|i|0.5+(i%7) as f32/9.).collect();
         let mut layer=RmsNormConfig::new(width).with_epsilon(eps).init::<AD>(&device);
@@ -65,6 +66,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         close(plain.as_slice::<f32>()?,&expected,"plain Y")?;
         println!("ASCEND_RMS_NORM_TENSOR_CASE rows={rows} width={width} passed=true");
     }
-    println!("ASCEND_RMS_NORM_TENSOR_DEVICE_OK cases=5");
+    println!("ASCEND_RMS_NORM_TENSOR_DEVICE_OK cases={}",cases.len());
     Ok(())
 }
