@@ -184,7 +184,7 @@ fn evaluate(p: &rows::Program, input: &[Vec<f32>]) -> Vec<Vec<f32>> {
                 },
                 Node::Constant(bits) => vec![f32::from_bits(bits); 32],
                 Node::Unary(op, x) => values[x].iter().map(|&x| match op { Unary::Neg => -x, Unary::Abs => x.abs(),
-                    Unary::Exp => x.exp(), Unary::Log => x.ln(), Unary::Sqrt => x.sqrt(), Unary::Rsqrt => x.sqrt().recip(), Unary::Recip => x.recip(), Unary::Erf => super::tests::erf_reference(x), Unary::Tanh => x.tanh() }).collect(),
+                    Unary::Exp => x.exp(), Unary::Log => x.ln(), Unary::Sqrt => x.sqrt(), Unary::Rsqrt => x.sqrt().recip(), Unary::Recip => x.recip() }).collect(),
                 Node::Binary(op, x, y) => values[x].iter().zip(&values[y]).map(|(&x, &y)| match op {
                     Binary::Add => x+y, Binary::Sub => x-y, Binary::Mul => x*y, Binary::Div => x/y, Binary::Max => x.max(y) }).collect(),
                 Node::Reduce(op, x) => { let v = match op { Reduction::Sum => values[x].iter().sum(),
