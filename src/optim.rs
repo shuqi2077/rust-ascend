@@ -4,6 +4,7 @@ use crate::{compiler::AscendCompiler, driver::CannError,
         portable::{id::KernelId, kernel::{KernelMetadata, KernelTask, RudaKernel}, server::{KernelArguments, RudaCount}}}};
 use ruda_core::{ir::{FloatKind, StorageType, Type, UIntKind}, kernel::KernelDefinition, tensor::DType};
 use ruda_kernel::dsl::{InfoBuilder, prelude::{AddressType, KernelBuilder, KernelSettings, NativeExpand, RudaDim, Tensor}};
+use ruda_tensor::{TensorPrimitive,api::Tensor as ApiTensor};
 
 type Result<T> = std::result::Result<T, CannError>;
 fn error(reason: impl std::fmt::Display) -> CannError {CannError::InvalidTensor(reason.to_string())}
@@ -125,6 +126,30 @@ pub fn adamw_step(client: &ComputeClient<AscendRuntime>, parameter: &TensorBuffe
         KernelArguments::new().with_buffer(binding(parameter)).with_buffer(binding(gradient))
             .with_buffer(binding(first)).with_buffer(binding(second)));
     client.flush().map_err(error)
+}
+
+/// Update existing RUDA FP32 parameter/moment tensors after autodiff completes.
+/// The gradient is an inner `Ascend` tensor; no optimizer graph is registered.
+/// All four tensors must share a device and execution queue. Parameter and moments
+/// mutate their existing storage, including external aliases, without replacement.
+pub fn adamw_tensor_step<const D:usize>(parameter:&mut ApiTensor<crate::Ascend,D>,
+    gradient:&ApiTensor<crate::Ascend,D>,first:&mut ApiTensor<crate::Ascend,D>,
+    second:&mut ApiTensor<crate::Ascend,D>,step:AdamWStorageStep)->Result<()> {
+    let primitive=|tensor:&ApiTensor<crate::Ascend,D>|match tensor.clone().into_primitive() {
+        TensorPrimitive::Float(tensor)=>Ok(tensor),
+        TensorPrimitive::QFloat(_)=>Err(error("AdamW does not dequantize parameter, gradient or state implicitly")),
+    };
+    let p=primitive(parameter)?;let g=primitive(gradient)?;let m=primitive(first)?;let v=primitive(second)?;
+    for other in [&g,&m,&v] {
+        if p.device!=other.device || !p.client.same_execution_queue(&other.client) {
+            return Err(error("AdamW tensor device or execution queue mismatch"));
+        }
+    }
+    let buffer=|tensor:ruda_tensor_device::RudaTensor<AscendRuntime>|TensorBuffer {
+        handle:tensor.handle,shape:tensor.meta.shape().clone(),strides:tensor.meta.strides().clone(),dtype:tensor.dtype,
+    };
+    let client=p.client.clone();
+    adamw_step(&client,&buffer(p),&buffer(g),&buffer(m),&buffer(v),step)
 }
 
 #[cfg(test)]

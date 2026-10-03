@@ -111,6 +111,8 @@ cargo run --locked --release --example layer_norm -- ./target/layernorm-forward 
 
 调用见 [adamw_storage 示例](examples/adamw_storage.rs)：`cargo run --locked --release --example adamw_storage`。
 
+`optim::adamw_tensor_step` 可直接更新现有 `Tensor<Ascend, D>` 参数与 FP32 矩；梯度可使用 `Autodiff<Ascend>` 返回的 inner tensor，不需要将梯度搬回主机。它原位修改已有存储及其外部别名，不构建优化器求导图。原生 RMSNorm → Mean loss → 自动求导 → AdamW 的训练调用见 [training 示例](examples/training.rs)：`cargo run --locked --release --example training`。
+
 ## 生成与执行
 
 ```bash
