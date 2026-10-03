@@ -74,21 +74,21 @@ impl std::fmt::Debug for PiecewiseState {
 }
 #[derive(Debug)]
 struct PiecewiseBackward;
-impl Backward<Ascend,1> for PiecewiseBackward {
+impl<B: crate::backend::AscendTensorBackend> Backward<B,1> for PiecewiseBackward {
     type State=PiecewiseState;
     fn backward(self,ops:Ops<Self::State,1>,grads:&mut Gradients,_:&mut Checkpointer) {
-        let PiecewiseState {input,activation,client,device}=ops.state;let grad=grads.consume::<Ascend>(&ops.node);
+        let PiecewiseState {input,activation,client,device}=ops.state;let grad=grads.consume::<B>(&ops.node);
         assert!(grad.device==device && grad.client.same_execution_queue(&client),"piecewise gradient device/queue mismatch");
         if let Some(parent)=ops.parents[0].as_ref() {
             let out=AscendRuntime::piecewise_activation_backward(&client,input,buffer(grad),activation).expect("Ascend piecewise gradient failed");
-            grads.register::<Ascend>(parent.id,Primitive::new(client,out.handle,Metadata::new(out.shape,out.strides),device,out.dtype));
+            grads.register::<B>(parent.id,Primitive::new(client,out.handle,Metadata::new(out.shape,out.strides),device,out.dtype));
         }
     }
 }
-impl<C:CheckpointStrategy> PiecewiseBackend for Autodiff<Ascend,C> {
+impl<B: crate::backend::AscendTensorBackend, C: CheckpointStrategy> PiecewiseBackend for Autodiff<B,C> {
     fn piecewise_activation(input:FloatTensor<Self>,activation:PiecewiseActivation)->Result<FloatTensor<Self>> {
         let output=forward(input.primitive.clone(),activation)?;
-        Ok(match PiecewiseBackward.prepare::<C>([input.node]).compute_bound().stateful() {
+        Ok(match <PiecewiseBackward as Backward<B,1>>::prepare::<C>(PiecewiseBackward,[input.node]).compute_bound().stateful() {
             OpsKind::Tracked(prep)=>{
                 let client=input.primitive.client.clone();let device=input.primitive.device.clone();
                 // A tracked graph owns an independent on-device input snapshot, not a mutable alias.
@@ -97,4 +97,7 @@ impl<C:CheckpointStrategy> PiecewiseBackend for Autodiff<Ascend,C> {
             },OpsKind::UnTracked(prep)=>prep.finish(output),
         })
     }
+}
+impl PiecewiseBackend for crate::RudaAscend {
+    fn piecewise_activation(input:FloatTensor<Self>,activation:PiecewiseActivation)->Result<FloatTensor<Self>> {forward(input,activation)}
 }

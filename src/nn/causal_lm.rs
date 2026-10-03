@@ -18,6 +18,23 @@ pub trait CausalLanguageModel<B: Backend> {
     fn project(&self, hidden: Tensor<B, 2>) -> Result<Tensor<B, 2>>;
 }
 
+/// Borrow an original RUDA causal model without copying its parameters or records.
+/// Its forward/projection use the selected backend; this does not turn packed or
+/// paged kernels unsupported by that backend into supported kernels.
+pub struct RudaCausalModel<'a, M>(pub &'a M);
+impl<B: Backend, M: ruda_nn::loss::CausalLanguageModel<B>> CausalLanguageModel<B>
+    for RudaCausalModel<'_, M>
+{
+    fn forward_hidden(&self, tokens: Tensor<B, 2, Int>) -> Result<Tensor<B, 3>> {
+        Ok(ruda_nn::loss::CausalLanguageModel::forward_hidden(
+            self.0, tokens,
+        ))
+    }
+    fn project(&self, hidden: Tensor<B, 2>) -> Result<Tensor<B, 2>> {
+        Ok(ruda_nn::loss::CausalLanguageModel::project(self.0, hidden))
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct CausalCrossEntropyConfig {
     pub token_chunk_size: usize,

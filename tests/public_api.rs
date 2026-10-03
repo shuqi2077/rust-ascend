@@ -5,6 +5,40 @@ use rust_ascend::{
 };
 
 #[test]
+fn generic_ruda_modules_and_training_contracts_share_ascend_primitives() {
+    use rust_ascend::{RudaAscend, Ascend, Autodiff, nn,
+        tensor::{Backend, backend::AutodiffBackend, api::Tensor}};
+    fn assert_backend<B: Backend>() {}
+    fn assert_autodiff<B: AutodiffBackend>() {}
+    fn assert_chunk_loss<B: nn::TokenWindowBackend + nn::NllLossBackend +
+        nn::SoftmaxBackend + nn::PiecewiseBackend>() {}
+    assert_backend::<RudaAscend>();
+    assert_autodiff::<Autodiff<RudaAscend>>();
+    assert_chunk_loss::<RudaAscend>();
+    assert_chunk_loss::<Autodiff<RudaAscend>>();
+    let _: fn(Tensor<RudaAscend,3>, nn::TokenWindow) -> Result<Tensor<RudaAscend,2>, rust_ascend::driver::CannError>
+        = nn::token_window::<RudaAscend>;
+    let _: Option<rust_ascend::data_parallel::DataParallel<Autodiff<RudaAscend>>> = None;
+    let _: Option<rust_ascend::data_parallel::DataParallel<Autodiff<Ascend>>> = None;
+    let _: Option<nn::modules::Mhc<Autodiff<RudaAscend>>> = None;
+    let _: Option<rust_ascend::collective::tensor_device::TensorDevice<RudaAscend>> = None;
+}
+
+#[cfg(feature = "models")]
+#[test]
+fn original_model_loader_and_causal_adapter_are_available() {
+    use rust_ascend::{RudaAscend, Autodiff, models, nn, tensor::api::{Tensor,Int}};
+    type B = Autodiff<RudaAscend>;
+    fn forward(model: &models::LlamaForCausalLm<B>, tokens: Tensor<B,2,Int>, labels: Tensor<B,2,Int>)
+        -> Result<nn::CausalLoss<B>, rust_ascend::driver::CannError> {
+        nn::CausalCrossEntropyConfig::default().forward_model(&nn::RudaCausalModel(model), tokens, labels)
+    }
+    let _ = forward;
+    let _loader = |path: &std::path::Path, device: &rust_ascend::runtime::AscendDevice|
+        models::load_huggingface_llama::<RudaAscend>(path, device);
+}
+
+#[test]
 fn causal_training_exposes_device_windows_loss_sum_and_total_weight() {
     use rust_ascend::{Ascend,Autodiff,nn,driver::CannError,
         tensor::api::{Tensor,Int},runtime::{AscendRuntime,ComputeClient,TensorBuffer}};

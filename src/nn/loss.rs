@@ -89,22 +89,22 @@ impl NllLossBackend for Ascend {
 }
 #[derive(Debug)]
 struct NllBackward;
-impl Backward<Ascend,1> for NllBackward {
+impl<B: crate::backend::AscendTensorBackend> Backward<B,1> for NllBackward {
     type State=(Primitive,Primitive,Primitive,Primitive,NllLossOptions);
     fn backward(self,ops:Ops<Self::State,1>,grads:&mut Gradients,_:&mut Checkpointer) {
-        let (input,target,weight,total,options)=ops.state;let grad=grads.consume::<Ascend>(&ops.node);
+        let (input,target,weight,total,options)=ops.state;let grad=grads.consume::<B>(&ops.node);
         check_queue(&grad,&[&input,&target,&weight,&total],"NLLLoss backward").expect("Ascend NLLLoss gradient queue mismatch");
         let client=grad.client.clone();let device=grad.device.clone();
         let dx=AscendRuntime::nll_loss_backward(&client,buffer(grad),buffer(input),buffer(target),buffer(weight),buffer(total),options)
             .expect("Ascend NLLLoss backward failed");
-        if let Some(parent)=ops.parents[0].as_ref() {grads.register::<Ascend>(parent.id,primitive(&client,&device,dx));}
+        if let Some(parent)=ops.parents[0].as_ref() {grads.register::<B>(parent.id,primitive(&client,&device,dx));}
     }
 }
-impl<C:CheckpointStrategy> NllLossBackend for Autodiff<Ascend,C> {
+impl<B: crate::backend::AscendTensorBackend, C: CheckpointStrategy> NllLossBackend for Autodiff<B,C> {
     fn nll_loss(input:FloatTensor<Self>,target:IntTensor<Self>,weight:FloatTensor<Ascend>,options:NllLossOptions)
         ->Result<FloatTensor<Self>> {
         validate(&input.primitive,&target,&weight)?;
-        Ok(match NllBackward.prepare::<C>([input.node]).compute_bound().stateful() {
+        Ok(match <NllBackward as Backward<B,1>>::prepare::<C>(NllBackward,[input.node]).compute_bound().stateful() {
             OpsKind::Tracked(prep)=>{
                 let client=input.primitive.client.clone();let device=input.primitive.device.clone();
                 let [out,total,target,weight]=AscendRuntime::nll_loss_with_saved_inputs(&client,
@@ -120,7 +120,7 @@ impl<C:CheckpointStrategy> NllLossBackend for Autodiff<Ascend,C> {
         validate_total_weight(options)?;
         validate(&input.primitive,&target,&weight)?;
         let client=input.primitive.client.clone();let device=input.primitive.device.clone();
-        let (out,total)=match NllBackward.prepare::<C>([input.node]).compute_bound().stateful() {
+        let (out,total)=match <NllBackward as Backward<B,1>>::prepare::<C>(NllBackward,[input.node]).compute_bound().stateful() {
             OpsKind::Tracked(prep)=>{
                 let [out,total,target,weight]=AscendRuntime::nll_loss_with_saved_inputs(&client,
                     buffer(input.primitive.clone()),buffer(target),buffer(weight),options)?;
@@ -133,7 +133,15 @@ impl<C:CheckpointStrategy> NllLossBackend for Autodiff<Ascend,C> {
                 (prep.finish(primitive(&client,&device,out)),primitive(&client,&device,total))
             },
         };
-        let total=Tensor::<Autodiff<Ascend,C>,1>::from_inner(Tensor::<Ascend,1>::from_primitive(TensorPrimitive::Float(total)));
+        let total=Tensor::<Autodiff<B,C>,1>::from_inner(Tensor::<B,1>::from_primitive(TensorPrimitive::Float(total)));
         Ok((out,unquantized(total.into_primitive())?))
+    }
+}
+impl NllLossBackend for crate::RudaAscend {
+    fn nll_loss(input:FloatTensor<Self>,target:IntTensor<Self>,weight:FloatTensor<Ascend>,options:NllLossOptions)
+        ->Result<FloatTensor<Self>> { <Ascend as NllLossBackend>::nll_loss(input,target,weight,options) }
+    fn nll_loss_with_total_weight(input:FloatTensor<Self>,target:IntTensor<Self>,weight:FloatTensor<Ascend>,options:NllLossOptions)
+        ->Result<(FloatTensor<Self>,FloatTensor<Self>)> {
+        <Ascend as NllLossBackend>::nll_loss_with_total_weight(input,target,weight,options)
     }
 }

@@ -192,6 +192,23 @@ pub(super) fn softmax(client:&Client,input:TensorBuffer,logarithmic:bool)->Resul
     }
     Ok(out)
 }
+
+pub(super) fn maximum(client:&Client,input:TensorBuffer)->Result<TensorBuffer> {
+    let (rows,width)=layout(&input)?;
+    let mut shape=input.shape.clone();*shape.last_mut().expect("validated last axis")=1;
+    let out=buffer(client,shape,false);if rows==0 {return Ok(out);}
+    let mut maximum=None;
+    for start in (0..width as usize).step_by(TILE) {
+        let columns=(width as usize-start).min(TILE) as u32;
+        let tile=buffer(client,Shape::new([rows,columns as usize]),false);
+        stage(client,WideStage::CopyTile,rows,width,start as u32,columns,&[&input,&tile])?;
+        let current=reduce(client,&tile,rows,columns,true)?;
+        maximum=Some(match maximum {Some(previous)=>merge(client,previous,current,rows,true)?,None=>current});
+    }
+    run(client,compile(programs::definition(MapProgram::Copy),rows as u64,false)?,
+        &[&maximum.ok_or_else(||error("wide maximum has no tiles"))?,&out])?;
+    Ok(out)
+}
 pub(super) fn backward(client:&Client,saved:TensorBuffer,grad:TensorBuffer,logarithmic:bool)->Result<TensorBuffer> {
     let (rows,width)=layout(&saved)?;check_for(&grad,&saved.shape,"wide Softmax backward")?;
     if rows==0 {return Ok(buffer(client,saved.shape,false));}

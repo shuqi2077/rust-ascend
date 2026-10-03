@@ -1,4 +1,5 @@
 //! Native Ascend operations on RUDA tensors and RUDA's existing autodiff graph.
+pub use ruda_nn as modules;
 mod attention;
 mod affine;
 pub use affine::{BiasAddBackend,bias_add,residual_bias_add};
@@ -33,7 +34,7 @@ mod mask;
 mod window;
 mod causal_lm;
 pub use window::{TokenWindow,TokenWindowBackend,token_window,token_window_int};
-pub use causal_lm::{CausalCrossEntropyConfig,CausalLoss,CausalLanguageModel};
+pub use causal_lm::{CausalCrossEntropyConfig,CausalLoss,CausalLanguageModel,RudaCausalModel};
 pub use mask::{CausalMaskBackend,causal_mask};
 pub use rotary::{RotaryBackend,rotary,RotaryPrefixBackend,rotary_prefix};
 pub use feed_forward::{lora_linear_bf16_fp32,swiglu_bf16_fp32};
@@ -251,22 +252,28 @@ impl SoftmaxBackend for Ascend {
 
 #[derive(Debug)]
 struct SoftmaxBackward;
-impl Backward<Ascend, 1> for SoftmaxBackward {
+impl<B: crate::backend::AscendTensorBackend> Backward<B,1> for SoftmaxBackward {
     type State = (Primitive, bool);
     fn backward(self, ops: Ops<Self::State, 1>, grads: &mut Gradients, _: &mut Checkpointer) {
         let (output, logarithmic) = ops.state;
-        let grad = grads.consume::<Ascend>(&ops.node);
+        let grad = grads.consume::<B>(&ops.node);
         let dx = softmax_backward(output, grad, logarithmic).expect("Ascend Softmax backward failed");
-        if let Some(parent) = ops.parents[0].as_ref() { grads.register::<Ascend>(parent.id, dx); }
+        if let Some(parent) = ops.parents[0].as_ref() { grads.register::<B>(parent.id, dx); }
     }
 }
-impl<C: CheckpointStrategy> SoftmaxBackend for Autodiff<Ascend,C> {
+impl<B: crate::backend::AscendTensorBackend, C: CheckpointStrategy> SoftmaxBackend for Autodiff<B,C> {
     fn normalized_exponential(input: FloatTensor<Self>, logarithmic: bool) -> Result<FloatTensor<Self>> {
         let output = softmax_forward(input.primitive, logarithmic)?;
-        Ok(match SoftmaxBackward.prepare::<C>([input.node]).compute_bound().stateful() {
+        Ok(match <SoftmaxBackward as Backward<B,1>>::prepare::<C>(SoftmaxBackward,[input.node]).compute_bound().stateful() {
             OpsKind::Tracked(prep) => prep.finish((output.clone(),logarithmic), output),
             OpsKind::UnTracked(prep) => prep.finish(output),
         })
+    }
+}
+
+impl SoftmaxBackend for crate::RudaAscend {
+    fn normalized_exponential(input: FloatTensor<Self>, logarithmic: bool) -> Result<FloatTensor<Self>> {
+        softmax_forward(input, logarithmic)
     }
 }
 

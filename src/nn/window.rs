@@ -96,7 +96,7 @@ impl std::fmt::Debug for WindowState {
 }
 #[derive(Debug)]
 struct WindowBackward;
-impl Backward<Ascend, 1> for WindowBackward {
+impl<B: crate::backend::AscendTensorBackend> Backward<B, 1> for WindowBackward {
     type State = WindowState;
     fn backward(self, ops: Ops<Self::State, 1>, grads: &mut Gradients, _: &mut Checkpointer) {
         let WindowState {
@@ -105,7 +105,7 @@ impl Backward<Ascend, 1> for WindowBackward {
             client,
             device,
         } = ops.state;
-        let grad = grads.consume::<Ascend>(&ops.node);
+        let grad = grads.consume::<B>(&ops.node);
         assert!(
             grad.device == device && grad.client.same_execution_queue(&client),
             "token window gradient device/queue mismatch"
@@ -113,7 +113,7 @@ impl Backward<Ascend, 1> for WindowBackward {
         let out = AscendRuntime::token_window_backward(&client, shape, buffer(grad), window)
             .expect("Ascend token window backward failed");
         if let Some(parent) = ops.parents[0].as_ref() {
-            grads.register::<Ascend>(
+            grads.register::<B>(
                 parent.id,
                 Primitive::new(
                     client,
@@ -126,7 +126,9 @@ impl Backward<Ascend, 1> for WindowBackward {
         }
     }
 }
-impl<C: CheckpointStrategy> TokenWindowBackend for Autodiff<Ascend, C> {
+impl<B: crate::backend::AscendTensorBackend, C: CheckpointStrategy> TokenWindowBackend
+    for Autodiff<B, C>
+{
     fn token_window(input: FloatTensor<Self>, window: TokenWindow) -> Result<FloatTensor<Self>> {
         let state = WindowState {
             shape: input.primitive.meta.shape().clone(),
@@ -137,7 +139,7 @@ impl<C: CheckpointStrategy> TokenWindowBackend for Autodiff<Ascend, C> {
         let output = float_forward(input.primitive, window)?;
         Ok(
             match WindowBackward
-                .prepare::<C>([input.node])
+                .prepare::<C>(WindowBackward, [input.node])
                 .compute_bound()
                 .stateful()
             {
@@ -145,6 +147,14 @@ impl<C: CheckpointStrategy> TokenWindowBackend for Autodiff<Ascend, C> {
                 OpsKind::UnTracked(prep) => prep.finish(output),
             },
         )
+    }
+    fn token_window_int(input: IntTensor<Self>, window: TokenWindow) -> Result<IntTensor<Self>> {
+        forward(input, window)
+    }
+}
+impl TokenWindowBackend for crate::RudaAscend {
+    fn token_window(input: FloatTensor<Self>, window: TokenWindow) -> Result<FloatTensor<Self>> {
+        float_forward(input, window)
     }
     fn token_window_int(input: IntTensor<Self>, window: TokenWindow) -> Result<IntTensor<Self>> {
         forward(input, window)

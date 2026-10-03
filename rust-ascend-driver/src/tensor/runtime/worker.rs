@@ -123,6 +123,41 @@ pub(super) struct State {
     gemm_artifacts: tempfile::TempDir,
 }
 impl State {
+    pub fn matmul_fp32(&mut self, layouts: [crate::tensor::TensorLayout; 3], resources: [AscendResource; 3]) -> Result<()> {
+        if super::generic_matrix::output_layout(&layouts[0], &layouts[1])? != layouts[2]
+            || resources.iter().zip(&layouts).any(|(r, l)| r.size != l.byte_len()) {
+            return Err(error("FP32 matmul resource/layout contract mismatch"));
+        }
+        let addresses = [self.pointer(&resources[0])? as usize, self.pointer(&resources[1])? as usize,
+            self.pointer(&resources[2])? as usize];
+        embedding_ranges(addresses, &layouts)?;
+        self.session.bind()?;
+        if layouts[2].byte_len() == 0 { return Ok(()); }
+        if layouts[0].shape().last() == Some(&0) {
+            type Memset = unsafe extern "C" fn(*mut c_void, usize, i32, usize) -> i32;
+            // SAFETY: guarded, disjoint output with exact checked byte length.
+            let memset = unsafe { self.session.api.library().symbol::<Memset>(c"aclrtMemset")? };
+            return check_status("aclrtMemset(zero-inner matmul)", unsafe {
+                memset(addresses[2] as *mut c_void, layouts[2].byte_len(), 0, layouts[2].byte_len())
+            });
+        }
+        let descriptors = layouts.into_iter().zip(addresses).map(|(layout, address)| {
+            // SAFETY: allocation guards stay alive until the synchronized executor completes.
+            unsafe { super::descriptor::Descriptor::new(&self.session, layout, address as *mut c_void) }
+        }).collect::<Result<Vec<_>>>()?;
+        type Plan = unsafe extern "C" fn(*const crate::tensor::ffi::AclTensor,
+            *const crate::tensor::ffi::AclTensor, *mut crate::tensor::ffi::AclTensor, i8,
+            *mut u64, *mut *mut crate::tensor::ffi::AclOpExecutor) -> i32;
+        // SAFETY: documented ACLNN ABI; zero is KEEP_DTYPE, not down-precision mode.
+        unsafe {
+            let plan: Plan = self.session.ops.get(c"aclnnMatmulGetWorkspaceSize")?;
+            let run = self.session.ops.get(c"aclnnMatmul")?;
+            self.session.execute("aclnnMatmul(FP32 KEEP_DTYPE)", run, |size, executor| {
+                plan(descriptors[0].handle.as_ptr(), descriptors[1].handle.as_ptr(),
+                    descriptors[2].handle.as_ptr(), 0, size, executor)
+            })
+        }
+    }
     pub fn token_window(&mut self, plan: crate::tensor::window::WindowPlan,
         resources: [AscendResource; 2], backward: bool) -> Result<()> {
         let layouts = if backward { [plan.output.clone(), plan.source.clone()] }

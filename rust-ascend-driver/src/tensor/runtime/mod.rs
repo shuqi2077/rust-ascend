@@ -18,6 +18,7 @@ mod heads;
 mod affine;
 mod piecewise;
 mod window;
+mod generic_matrix;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -138,6 +139,11 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// FP32 ND matrix multiplication, with CANN KEEP_DTYPE and no BF16/HF32 cast.
+    /// Inputs are contiguous rank 2..6; singleton batch axes broadcast.
+    pub fn matmul_fp32(client: &ComputeClient<Self>, a: TensorBuffer, b: TensorBuffer) -> Result<TensorBuffer> {
+        generic_matrix::matmul(client, a, b)
+    }
     /// Bit-preserving device token selection from contiguous [B,T,H] into [count,H].
     pub fn token_window(client: &ComputeClient<Self>, input: TensorBuffer, window: TokenWindow) -> Result<TensorBuffer> {
         window::forward(client, input, window)
@@ -280,6 +286,11 @@ impl AscendRuntime {
     /// Native FP32 last-axis mean, retaining the axis with size one.
     pub fn mean_last(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
         rows::reduce(client,input,true)
+    }
+
+    /// Native FP32 last-axis maximum; intended also for detached softmax shifts.
+    pub fn max_last(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
+        rows::maximum(client,input)
     }
 
     /// Broadcast each row's upstream derivative to the original contiguous input shape.

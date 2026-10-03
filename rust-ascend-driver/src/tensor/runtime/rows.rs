@@ -9,6 +9,17 @@ fn reduced_shape(shape: &Shape) -> Shape {
     Shape::from(result)
 }
 
+pub(super) fn maximum(client: &ComputeClient<AscendRuntime>, input: TensorBuffer) -> Result<TensorBuffer> {
+    if input.shape.last().is_some_and(|&width|super::wide_rows::needs_tiles(width)) {
+        return super::wide_rows::maximum(client,input);
+    }
+    let (rows,width)=layout_for(&input.shape,&input.strides,input.dtype,"row maximum")?;
+    check_for(&input,&input.shape,"row maximum")?;
+    let output=buffer(client,reduced_shape(&input.shape),false);
+    if rows!=0 {run(client,row(RowProgram::Max,rows,width,1e-5)?,&[&input,&output])?;}
+    Ok(output)
+}
+
 pub(super) fn reduce(client: &ComputeClient<AscendRuntime>, input: TensorBuffer, mean: bool)
     -> Result<TensorBuffer> {
     if input.shape.last().is_some_and(|&width|super::wide_rows::needs_tiles(width)) {return super::wide_rows::reduction(client,input,mean);}
