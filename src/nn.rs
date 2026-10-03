@@ -4,7 +4,10 @@ mod rotary;
 mod feed_forward;
 mod embedding;
 mod loss;
-pub use attention::{scaled_dot_product_attention_bf16_fp32,causal_attention_bf16_fp32};
+mod heads;
+pub use heads::{RepeatKvBackend,repeat_kv_heads};
+pub use attention::{scaled_dot_product_attention_bf16_fp32,causal_attention_bf16_fp32,
+    grouped_query_attention_bf16_fp32,causal_grouped_query_attention_bf16_fp32};
 mod mask;
 pub use mask::{CausalMaskBackend,causal_mask};
 pub use rotary::{RotaryBackend,rotary};

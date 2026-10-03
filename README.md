@@ -97,6 +97,14 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 调用见 [causal_attention_tensor 示例](examples/causal_attention_tensor.rs)：`cargo run --locked --release --example causal_attention_tensor`。
 
+## GQA 与 KV 头梯度归并
+
+`nn::repeat_kv_heads(input, query_heads)` 将连续 FP32 `[B,Hkv,N,D]` 变为 `[B,Hq,N,D]`，每个 KV 头连续重复 `Hq/Hkv` 次；Hq／Hkv 为正且可整除，支持 MHA、MQA、GQA、奇数重复次数和空张量。公共 IR 使用整数索引复制，保留 FP32 位模式；反向在设备端按 KV 头分组逐级成对求和，奇数末组原样传递，不使用原子累加，不保存输入值或将梯度搬回主机。完整输入／输出元素数不超过 u32。运行时对应 `AscendRuntime::repeat_kv_heads` / `repeat_kv_heads_backward`。
+
+`nn::grouped_query_attention_bf16_fp32` 接收 `Q[B,Hq,M,D]`、`K[B,Hkv,N,D]`、`V[B,Hkv,N,Dv]`，接入上述原生头重复与梯度归并，再复用 BF16 计算／FP32 存储的 Attention。可选同设备 FP32 additive mask 必须为 `[B,Hq,M,N]`，其梯度也接入 RUDA 图；不做 mask 广播。`nn::causal_grouped_query_attention_bf16_fp32` 另提供显式 query／key 绝对起始位置，使用固定的设备端因果 mask。
+
+这些组合入口沿用 Attention 的矩阵对齐和域限制，且展平后的 `B*Hq` 不超过 4096；物化重复的 K／V、score 和 probability，不是融合 FlashAttention，不自动维护 KV cache、添加 dropout 或 padding。调用见 [grouped_attention_tensor 示例](examples/grouped_attention_tensor.rs)：`cargo run --locked --release --example grouped_attention_tensor`。
+
 ## 原生旋转位置编码
 
 `nn::rotary(input, cos, sin, RotaryLayout)` 使用公共 Rust IR 执行 FP32 全末轴旋转，支持 `Interleaved` 相邻配对与 `SplitHalf` 前后半轴配对。输入为连续 rank-1～8，末轴宽度为正偶数；cos／sin 是同设备固定 `Tensor<Ascend, D>`，前导维度与输入一致，末轴宽度减半。频率、位置、base 与缩放策略由调用方明确提供，不隐式生成或广播表；支持空前导 batch。

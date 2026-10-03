@@ -13,6 +13,7 @@ mod wide_rows;
 mod indexing;
 mod loss;
 mod mask;
+mod heads;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -47,6 +48,7 @@ pub use crate::tensor::deepgemm::Transpose;
 pub use crate::tensor::EmbeddingOptions;
 pub use crate::tensor::{LossReduction,NllLossOptions};
 pub use rust_ascend_compiler::ascend::mask_programs::CausalMaskSpec;
+pub use rust_ascend_compiler::ascend::heads_programs::RepeatKvSpec;
 pub use rust_ascend_compiler::ascend::rotary_programs::RotaryLayout;
 use rust_ascend_compiler::ascend::{AscendCompiler, AscendOptions, AscendTarget};
 use std::{
@@ -132,6 +134,13 @@ pub struct AscendRuntime;
 impl AscendRuntime {
     /// Native common-IR FP32 causal mask using exact unsigned absolute positions.
     pub fn causal_mask(client:&ComputeClient<Self>,spec:CausalMaskSpec)->Result<TensorBuffer> {mask::causal(client,spec)}
+
+    /// Repeat each contiguous FP32 KV head into consecutive query heads, without host data.
+    pub fn repeat_kv_heads(client:&ComputeClient<Self>,input:TensorBuffer,query_heads:u32)->Result<TensorBuffer> {heads::repeat(client,input,query_heads)}
+    /// Sum the replicas' FP32 derivatives with batched device pair/tail reductions.
+    pub fn repeat_kv_heads_backward(client:&ComputeClient<Self>,input_shape:Shape,query_heads:u32,grad:TensorBuffer)->Result<TensorBuffer> {
+        heads::backward(client,input_shape,query_heads,grad)
+    }
     /// Independent contiguous FP32/FP16/BF16/INT32/INT64 device-to-device snapshot.
     pub fn copy_contiguous(client:&ComputeClient<Self>,input:TensorBuffer)->Result<TensorBuffer> {
         indexing::copy_contiguous(client,input)
