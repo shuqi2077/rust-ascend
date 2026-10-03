@@ -123,7 +123,7 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `RowProgram::LayerNormInputBackward` 接收 `X`、`dY`、`weight`、保存的 `mean`、`rstd`，返回 `dX`。`LayerNormWeightContributions` 计算逐元素权重梯度贡献，再通过设备端逐级成对求和生成 weight 梯度；bias 梯度由 `dY` 按同样方式求和。前向统计量保留在设备端传给反向。上述路径使用公共 Rust IR 和 CCE 向量指令，不调用 ACLNN LayerNorm。
 
-RUDA 的现有 `ruda_nn::LayerNorm` 已接入 `Ascend` 和 `Autodiff<Ascend>`，包括输入、weight、可选 bias 的梯度及共享计算图梯度累积。输入为连续 FP32，归一化最后一维，宽度为 32～4096 且是 32 的倍数；支持任意数量的前导维度和空 batch。不支持的 dtype／布局直接报错。
+RUDA 的现有 `ruda_nn::LayerNorm` 已接入 `Ascend` 和 `Autodiff<Ascend>`，包括输入、weight、可选 bias 的梯度及共享计算图梯度累积。输入为连续 FP32，归一化最后一维，宽度为正且是 32 的倍数，总元素数不超过 u32；支持任意数量的前导维度和空 batch。宽度超过 4096 时在设备端分块计算全行均值，再以中心化平方和计算方差，反向复用保存的 mean／rstd 并合并全行梯度统计。不支持的 dtype／布局直接报错。
 
 当前接入使用 Cargo.toml 中固定 Git 提交的 RUDA 依赖，尚不包含在已发布的 crates.io 0.1.0 中。从本仓库运行完整张量／自动求导示例：
 
@@ -181,7 +181,7 @@ python tools/ascend/build_deepgemm.py --emit-only --out ./target/bf16-source
 ## 支持范围
 
 - 公共编译器：连续 FP32 逐元素程序；行宽为 32～4096、且为 32 的倍数。
-- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度；RMSNorm 和 LayerNorm 另提供共享 weight 梯度。运行时 Sum/Mean、Softmax/LogSoftmax、RMSNorm 及反向另支持超过 4096 列的原生分块路径，其余行操作仍遵循 32～4096 列限制。
+- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度；RMSNorm 和 LayerNorm 另提供共享 weight 梯度。运行时 Sum/Mean、Softmax/LogSoftmax、RMSNorm、LayerNorm 及反向另支持超过 4096 列的原生分块路径；直接调用完整行编译模式仍遵循 32～4096 列限制。
 - BF16 矩阵：direct-store Dense/Batched NN/NT/TN/TT、对齐的 MGrouped NT，BF16/FP32 输出。
 - 设备代码目标为 Ascend950DT / dav-c310；不自动推断或替换目标型号。
 - Rust 程序生成 CCE，再由 Bisheng 编译为设备机器码，不是直接 Rust → 昇腾 ISA。

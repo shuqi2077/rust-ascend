@@ -115,6 +115,7 @@ pub(super) fn column_sum(client: &Client, mut value: TensorBuffer, mut rows: usi
 
 pub(super) fn forward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
     bias: Option<TensorBuffer>, eps: f64) -> Result<[TensorBuffer; 3]> {
+    if input.shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::layer_forward(client,input,weight,bias,eps);}
     let (rows, width) = layout(&input.shape, &input.strides, input.dtype)?;
     let eps = epsilon(eps)?;
     check(&input, &input.shape)?;
@@ -131,6 +132,7 @@ pub(super) fn forward(client: &Client, input: TensorBuffer, weight: TensorBuffer
 }
 pub(super) fn backward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
     grad: TensorBuffer, mean: TensorBuffer, rstd: TensorBuffer) -> Result<[TensorBuffer; 3]> {
+    if input.shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::layer_backward(client,input,weight,grad,mean,rstd);}
     let (rows, width) = layout(&input.shape, &input.strides, input.dtype)?;
     check(&input, &input.shape)?;
     check(&grad, &input.shape)?;

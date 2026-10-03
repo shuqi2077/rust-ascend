@@ -23,7 +23,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options.operator_libraries = std::env::split_paths(&paths).map(|p| p.into_os_string()).collect();
     }
     let device = unsafe { AscendRuntime::initialize_exclusive(options)? };
-    for (rows, width) in [(0, 32), (1, 32), (3, 96), (8, 256), (3, 4096)] {
+    let cases=[(0,32),(1,32),(3,96),(8,256),(3,4096),(0,4128),(1,8192),(3,8224)];
+    for (rows, width) in cases {
         for bias in [false, true] {
             let eps = 1e-3;
             let mut layer = LayerNormConfig::new(width).with_epsilon(eps).with_bias(bias).init::<AD>(&device);
@@ -71,6 +72,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("ASCEND_LAYER_NORM_TENSOR_CASE rows={rows} width={width} bias={bias} passed=true");
         }
     }
-    println!("ASCEND_LAYER_NORM_TENSOR_DEVICE_OK cases=10");
+    println!("ASCEND_LAYER_NORM_TENSOR_DEVICE_OK cases={}",cases.len()*2);
     Ok(())
 }

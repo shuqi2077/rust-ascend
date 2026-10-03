@@ -74,6 +74,42 @@ fn tiled_sum(client:&Client,kind:WideStage,rows:usize,width:u32,inputs:&[&Tensor
     }
     total.ok_or_else(||error("wide statistic has no tiles"))
 }
+fn average(client:&Client,sum:TensorBuffer,rows:usize,width:u32)->Result<TensorBuffer> {
+    let value=buffer(client,Shape::new([rows]),false);
+    run(client,compile(wide_programs::mean_definition(rows as u64,width).map_err(error)?,rows as u64,false)?,&[&sum,&value])?;Ok(value)
+}
+pub(super) fn layer_forward(client:&Client,input:TensorBuffer,weight:TensorBuffer,bias:Option<TensorBuffer>,eps:f64)->Result<[TensorBuffer;3]> {
+    let (rows,width)=layout(&input)?;let eps=epsilon_for(eps,"wide LayerNorm")?;
+    check_for(&weight,&[width as usize],"wide LayerNorm weight")?;
+    if let Some(bias)=&bias {check_for(bias,&[width as usize],"wide LayerNorm bias")?;}
+    if rows==0 {return Ok([buffer(client,input.shape,false),buffer(client,Shape::new([rows]),false),buffer(client,Shape::new([rows]),false)]);}
+    let sum=tiled_sum(client,WideStage::CopyTile,rows,width,&[&input])?;let mean=average(client,sum,rows,width)?;
+    // Center before squaring, preserving the original variance formula and divisor width.
+    let squares=tiled_sum(client,WideStage::CenteredSquareTile,rows,width,&[&input,&mean])?;
+    let rstd=buffer(client,Shape::new([rows]),false);
+    run(client,compile(wide_programs::rstd_definition(rows as u64,width,eps).map_err(error)?,rows as u64,false)?,&[&squares,&rstd])?;
+    let bias=match bias {Some(value)=>value,None=>output(client,Shape::new([width as usize]))?};
+    let out=output(client,input.shape.clone())?;
+    for start in (0..width as usize).step_by(TILE) {
+        let columns=(width as usize-start).min(TILE) as u32;
+        stage(client,WideStage::LayerNormTile,rows,width,start as u32,columns,&[&input,&weight,&bias,&mean,&rstd,&out])?;
+    }
+    Ok([out,mean,rstd])
+}
+pub(super) fn layer_backward(client:&Client,input:TensorBuffer,weight:TensorBuffer,grad:TensorBuffer,mean:TensorBuffer,rstd:TensorBuffer)->Result<[TensorBuffer;3]> {
+    let (rows,width)=layout(&input)?;check_for(&weight,&[width as usize],"wide LayerNorm weight")?;
+    check_for(&grad,&input.shape,"wide LayerNorm grad")?;check_for(&mean,&[rows],"wide LayerNorm mean")?;check_for(&rstd,&[rows],"wide LayerNorm rstd")?;
+    if rows==0 {return Ok([buffer(client,input.shape,false),output(client,Shape::new([width as usize]))?,output(client,Shape::new([width as usize]))?]);}
+    let sum_g=tiled_sum(client,WideStage::LayerGTile,rows,width,&[&grad,&weight])?;let mean_g=average(client,sum_g,rows,width)?;
+    let sum_gy=tiled_sum(client,WideStage::LayerGYTile,rows,width,&[&input,&grad,&weight,&mean,&rstd])?;let mean_gy=average(client,sum_gy,rows,width)?;
+    let dx=output(client,input.shape.clone())?;let parts=output(client,input.shape.clone())?;
+    for start in (0..width as usize).step_by(TILE) {
+        let columns=(width as usize-start).min(TILE) as u32;
+        stage(client,WideStage::LayerBackwardTile,rows,width,start as u32,columns,&[&input,&grad,&weight,&mean,&rstd,&mean_g,&mean_gy,&dx])?;
+        stage(client,WideStage::LayerWeightTile,rows,width,start as u32,columns,&[&input,&grad,&mean,&rstd,&parts])?;
+    }
+    let dw=column_sum(client,parts,rows,width as usize)?;let db=column_sum(client,grad,rows,width as usize)?;Ok([dx,dw,db])
+}
 pub(super) fn rms_forward(client:&Client,input:TensorBuffer,weight:TensorBuffer,eps:f64)->Result<[TensorBuffer;2]> {
     let (rows,width)=layout(&input)?;let eps=epsilon_for(eps,"wide RMSNorm")?;
     check_for(&weight,&[width as usize],"wide RMSNorm weight")?;
