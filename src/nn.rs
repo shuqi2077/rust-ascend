@@ -5,6 +5,9 @@ mod feed_forward;
 mod embedding;
 mod loss;
 mod heads;
+mod frozen;
+pub use frozen::{FrozenLinearBf16Fp32Backend,linear_frozen_bf16_fp32,lora_frozen_linear_bf16_fp32,swiglu_frozen_bf16_fp32,
+    FrozenEmbeddingBf16Fp32Backend,embedding_frozen_bf16_fp32,embedding_frozen_bf16_fp32_nd};
 pub use heads::{RepeatKvBackend,repeat_kv_heads};
 pub use attention::{scaled_dot_product_attention_bf16_fp32,causal_attention_bf16_fp32,
     grouped_query_attention_bf16_fp32,causal_grouped_query_attention_bf16_fp32};

@@ -121,6 +121,16 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `nn::swiglu_bf16_fp32(input, gate, up, down)` 计算 `(SiLU(X Wgate^T) * (X Wup^T)) Wdown^T`，组合原生线性计算、FP32 SiLU 门控乘法与 RUDA 求导。gate／up 为 `[H,K]`，down 为 `[N,H]`；M／N／K／H 为正且为 16 的倍数。不推断模型维度、bias、dropout、residual 或 normalization。调用见 [swiglu_tensor 示例](examples/swiglu_tensor.rs)：`cargo run --locked --release --example swiglu_tensor`。
 
+## 直接使用冻结 BF16 权重
+
+`nn::embedding_frozen_bf16_fp32` / `embedding_frozen_bf16_fp32_nd` 直接使用固定 BF16 `[V,H]` 表和设备端 INT32／INT64 ID，输出 FP32 激活。二维 ID 输出 `[B,S,H]`，ND 入口支持 rank-1～7 ID 并追加 H 轴；ID 须在 `[0,V)`，支持重复 ID 与空张量。不把整张表展开为 FP32，不保存 ID 反向快照，不计算固定表或整数 ID 的梯度。
+
+`nn::linear_frozen_bf16_fp32(input, weight)` 接收 FP32 `Tensor<B,2>` 的 `[M,K]` 输入与固定 BF16 `Tensor<Ascend,2>` 的 `[N,K]` 权重。X 与上游 dY 在设备端转为 BF16，原生矩阵内核输出 FP32 Y 和 dX；M／N／K 为正且为 16 的倍数。权重直接以每元素 2 字节的现有存储参与 GEMM，不转为 FP32，不另存一份完整权重或输入快照。反向只需要原输入形状与同一份固定 BF16 权重，调用方须保持该权重在反向完成前不变；不计算权重梯度。
+
+`nn::lora_frozen_linear_bf16_fp32` 将同一份固定 BF16 基座与 FP32 A／B adapter 组合，支持 X、A、B 的梯度及已有 FP32 AdamW 更新。`nn::swiglu_frozen_bf16_fp32` 则使用固定 BF16 gate／up／down 权重、FP32 激活和输入梯度。上述入口显式选择固定权重类型，不改变原有 `linear_bf16_fp32`、LoRA、SwiGLU 的可训练权重行为，也不全局冻结模块、合并 adapter、添加 bias／dropout 或 padding。
+
+运行时对应 `linear_frozen_bf16_fp32` / `linear_frozen_bf16_fp32_backward`。完整调用见 [frozen_bf16_tensor 示例](examples/frozen_bf16_tensor.rs)：`cargo run --locked --release --example frozen_bf16_tensor`。
+
 ## 原生 RMSNorm 公共 IR
 
 `AscendRuntime::rms_norm` 通过 RUDA `ComputeClient` 接收 `TensorBuffer` 的输入和共享 weight，返回 `[Y, rstd]`。`AscendRuntime::rms_norm_backward` 接收输入、weight、`dY` 及前向保存的 `rstd`，返回 `[dX, dWeight]`。`RowProgram::RmsNormWeightContributions` 生成逐元素 weight 梯度贡献，再在设备端归约所有前导行；空 batch 的 weight 梯度为零。

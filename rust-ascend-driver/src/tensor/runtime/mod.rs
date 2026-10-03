@@ -169,6 +169,12 @@ impl AscendRuntime {
     pub fn embedding(client:&ComputeClient<Self>,weight:TensorBuffer,indices:TensorBuffer)->Result<TensorBuffer> {
         indexing::embedding(client,weight,indices)
     }
+    /// Fixed BF16 table lookup with device integer IDs and FP32 activations; no table expansion.
+    pub fn embedding_frozen_bf16_fp32(client:&ComputeClient<Self>,weight:TensorBuffer,indices:TensorBuffer)->Result<TensorBuffer> {
+        if weight.dtype!=ruda_core::tensor::DType::BF16 {return Err(error("frozen BF16 embedding requires BF16 table storage"));}
+        let out=indexing::embedding(client,weight,indices)?;
+        conversion::cast(client,out,ruda_core::tensor::DType::F32)
+    }
     /// Forward plus an independent device-to-device snapshot of the IDs for autodiff.
     pub fn embedding_with_saved_indices(client:&ComputeClient<Self>,weight:TensorBuffer,indices:TensorBuffer)->Result<[TensorBuffer;2]> {
         indexing::embedding_with_saved_indices(client,weight,indices)
@@ -293,6 +299,15 @@ impl AscendRuntime {
     pub fn linear_bf16_fp32_backward(client: &ComputeClient<Self>, input: TensorBuffer,
         weight: TensorBuffer, grad: TensorBuffer) -> Result<[TensorBuffer;2]> {
         matrix::linear_bf16_fp32_backward(client,input,weight,grad)
+    }
+
+    /// FP32 X @ fixed BF16 W^T, with native BF16 GEMM and FP32 output; no weight expansion.
+    pub fn linear_frozen_bf16_fp32(client:&ComputeClient<Self>,input:TensorBuffer,weight:TensorBuffer)->Result<TensorBuffer> {
+        matrix::linear_frozen_bf16_fp32(client,input,weight)
+    }
+    /// Input-only FP32 gradient; uses the same immutable BF16 W and BF16-rounded dY.
+    pub fn linear_frozen_bf16_fp32_backward(client:&ComputeClient<Self>,input_shape:Shape,weight:TensorBuffer,grad:TensorBuffer)->Result<TensorBuffer> {
+        matrix::linear_frozen_bf16_fp32_backward(client,input_shape,weight,grad)
     }
 
     /// Explicit BF16-compute GEMM with contiguous FP32 rank-2 or equal-batch rank-3 inputs.

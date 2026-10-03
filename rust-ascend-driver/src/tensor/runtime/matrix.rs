@@ -144,6 +144,34 @@ pub(super) fn linear_bf16_fp32_backward(client: &Client, input: TensorBuffer, we
     gemm_bf16_fp32_backward(client,input,weight,grad,Transpose::No,Transpose::Yes)
 }
 
+fn frozen_linear_spec(input:&TensorLayout,weight:&TensorLayout)->Result<GemmSpec> {
+    if input.shape().len()!=2 || weight.shape().len()!=2 || input.dtype()!=CannDType::F32 || weight.dtype()!=CannDType::BF16 {
+        return Err(error("frozen BF16 linear requires rank-2 FP32 input and fixed BF16 weight"));
+    }
+    let input=TensorLayout::contiguous(input.shape(),CannDType::BF16)?;
+    GemmSpec::new(&input,weight,Transpose::No,Transpose::Yes,CannDType::F32)
+}
+/// The fixed weight is used directly, without a cast or independent full-weight copy.
+pub(super) fn linear_frozen_bf16_fp32(client:&Client,input:TensorBuffer,weight:TensorBuffer)->Result<TensorBuffer> {
+    let spec=frozen_linear_spec(&layout(&input)?,&layout(&weight)?)?;
+    let input=super::conversion::cast(client,input,DType::BF16)?;
+    let out=allocate(client,spec.output_layout());launch(client,spec,&input,&weight,&out)?;Ok(out)
+}
+fn frozen_linear_backward_spec(input:&TensorLayout,weight:&TensorLayout,grad:&TensorLayout)->Result<GemmSpec> {
+    let forward=frozen_linear_spec(input,weight)?;
+    if grad!=forward.output_layout() {return Err(error("frozen BF16 linear backward requires matching FP32 dY"));}
+    let grad=TensorLayout::contiguous(grad.shape(),CannDType::BF16)?;
+    let backward=GemmSpec::new(&grad,weight,Transpose::No,Transpose::No,CannDType::F32)?;
+    if backward.output_layout()!=input {return Err(error("frozen BF16 linear input gradient shape mismatch"));}Ok(backward)
+}
+pub(super) fn linear_frozen_bf16_fp32_backward(client:&Client,input_shape:Shape,weight:TensorBuffer,grad:TensorBuffer)->Result<TensorBuffer> {
+    let shape=input_shape.iter().map(|&d|i64::try_from(d).map_err(error)).collect::<Result<Vec<_>>>()?;
+    let input=TensorLayout::contiguous(&shape,CannDType::F32)?;
+    let spec=frozen_linear_backward_spec(&input,&layout(&weight)?,&layout(&grad)?)?;
+    let grad=super::conversion::cast(client,grad,DType::BF16)?;
+    let out=allocate(client,spec.output_layout());launch(client,spec,&grad,&weight,&out)?;Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +216,21 @@ mod tests {
         }}}
         let t=|shape:&[i64]|TensorLayout::contiguous(shape,CannDType::F32).unwrap();
         assert!(mixed_gemm_spec(&t(&[2,32,16]),&t(&[1,16,48]),Transpose::No,Transpose::No).is_err());
+    }
+    #[test]
+    fn frozen_bf16_linear_keeps_two_byte_weights_and_only_an_fp32_input_gradient() {
+        let t=|shape:&[i64],dtype|TensorLayout::contiguous(shape,dtype).unwrap();
+        let x=t(&[32,16],CannDType::F32);let w=t(&[48,16],CannDType::BF16);
+        let forward=frozen_linear_spec(&x,&w).unwrap();
+        assert_eq!(forward.b,w);assert_eq!(forward.b.byte_len(),48*16*2);
+        assert_eq!(forward.a.byte_len(),32*16*2);assert_eq!(forward.output_layout(),&t(&[32,48],CannDType::F32));
+        let backward=frozen_linear_backward_spec(&x,&w,forward.output_layout()).unwrap();
+        assert_eq!(backward.b,w);assert_eq!(backward.a.dtype(),CannDType::BF16);assert_eq!(backward.output_layout(),&x);
+        for (input,weight) in [(t(&[32,16],CannDType::BF16),w.clone()),(x.clone(),t(&[48,16],CannDType::F32)),
+            (t(&[2,32,16],CannDType::F32),w.clone()),(t(&[31,16],CannDType::F32),w.clone()),(x.clone(),t(&[48,32],CannDType::BF16))] {
+            assert!(frozen_linear_spec(&input,&weight).is_err());
+        }
+        assert!(frozen_linear_backward_spec(&x,&w,&t(&[32,48],CannDType::BF16)).is_err());
+        assert!(frozen_linear_backward_spec(&x,&w,&t(&[48,32],CannDType::F32)).is_err());
     }
 }
