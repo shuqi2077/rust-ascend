@@ -85,6 +85,12 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `Autodiff<Ascend>` 保存 cos／sin，不保存输入值，通过原生转置 Jacobian 计算输入梯度；不计算固定表的梯度。运行时对应 `AscendRuntime::rotary` / `rotary_backward`。调用见 [rotary_tensor 示例](examples/rotary_tensor.rs)：`cargo run --locked --release --example rotary_tensor`。
 
+## LoRA 与 SwiGLU 组合
+
+`nn::lora_linear_bf16_fp32(input, weight, down, up, scale)` 计算 `X W^T + scale * (X A^T) B^T`，使用 FP32 参数／输出和显式 BF16 线性计算，复用 RUDA 自动求导及共享输入梯度累积。权重形状为 `W[N,K]`、`A[R,K]`、`B[N,R]`；M／N／K／R 为正且为 16 的倍数。scale 显式提供，base 或 adapter 是否冻结由调用方的 `require_grad` 决定，不自动修改权重、合并 adapter、添加 dropout 或 padding。原生前向 → 两个 adapter 梯度 → FP32 AdamW 调用见 [lora_tensor 示例](examples/lora_tensor.rs)：`cargo run --locked --release --example lora_tensor`。
+
+`nn::swiglu_bf16_fp32(input, gate, up, down)` 计算 `(SiLU(X Wgate^T) * (X Wup^T)) Wdown^T`，组合原生线性计算、FP32 SiLU 门控乘法与 RUDA 求导。gate／up 为 `[H,K]`，down 为 `[N,H]`；M／N／K／H 为正且为 16 的倍数。不推断模型维度、bias、dropout、residual 或 normalization。调用见 [swiglu_tensor 示例](examples/swiglu_tensor.rs)：`cargo run --locked --release --example swiglu_tensor`。
+
 ## 原生 RMSNorm 公共 IR
 
 `AscendRuntime::rms_norm` 通过 RUDA `ComputeClient` 接收 `TensorBuffer` 的输入和共享 weight，返回 `[Y, rstd]`。`AscendRuntime::rms_norm_backward` 接收输入、weight、`dY` 及前向保存的 `rstd`，返回 `[dX, dWeight]`。`RowProgram::RmsNormWeightContributions` 生成逐元素 weight 梯度贡献，再在设备端归约所有前导行；空 batch 的 weight 梯度为零。
