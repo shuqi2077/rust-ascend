@@ -138,8 +138,7 @@ impl<B: crate::backend::AscendTensorBackend, C: CheckpointStrategy> TokenWindowB
         };
         let output = float_forward(input.primitive, window)?;
         Ok(
-            match WindowBackward
-                .prepare::<C>(WindowBackward, [input.node])
+            match <WindowBackward as Backward<B, 1>>::prepare::<C>(WindowBackward, [input.node])
                 .compute_bound()
                 .stateful()
             {
