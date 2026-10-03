@@ -1,4 +1,6 @@
 //! Native Ascend operations on RUDA tensors and RUDA's existing autodiff graph.
+mod attention;
+pub use attention::scaled_dot_product_attention_bf16_fp32;
 use crate::{Ascend, Autodiff, driver::CannError, runtime::{AscendRuntime, TensorBuffer, Transpose}};
 use ruda_autodiff::{checkpoint::{base::Checkpointer, strategy::CheckpointStrategy},
     grads::Gradients, ops::{Backward, Ops, OpsKind}};

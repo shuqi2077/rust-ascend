@@ -73,6 +73,12 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `nn::matmul_bf16_fp32(a, b, ta, tb)` 将相同显式精度模式扩展到 rank-2 Dense 与 batch 数相同的 rank-3 Batched，支持 NN／NT／TN／TT。反向保持两个输入各自的物理形状，不创建完整转置副本；FP32 梯度通过 RUDA 图累积。对应运行时接口为 `gemm_bf16_fp32` / `gemm_bf16_fp32_backward`，仍要求 M／N／K 为正且为 16 的倍数，不做 batch 广播。调用见 [matmul_tensor 示例](examples/matmul_tensor.rs)：`cargo run --locked --release --example matmul_tensor`。
 
+## 显式组合 Attention
+
+`nn::scaled_dot_product_attention_bf16_fp32(q, k, v, scale, additive_mask)` 接收 FP32 `Q[B,M,D]`、`K[B,N,D]`、`V[B,N,Dv]`，组合原生 BF16 矩阵乘、FP32 scale／可选加性 mask、原生 FP32 Softmax 与第二次原生矩阵乘；输出及 Q／K／V／可训练 mask 的梯度接入 RUDA 自动求导。scale 显式提供，mask 为同设备 FP32 `[B,M,N]`，可用负无穷屏蔽 key，不做 mask 广播。
+
+该入口物化 score 和 probability 矩阵，不是 FlashAttention；没有隐式 causal mask、dropout、GQA head 重复或 padding。各 batch 数必须相同，M／D／Dv 为正且为 16 的倍数，N 为 32～4096 且为 32 的倍数；矩阵计算与反向使用前述显式 BF16 精度模式。调用见 [attention_tensor 示例](examples/attention_tensor.rs)：`cargo run --locked --release --example attention_tensor`。
+
 ## 原生 RMSNorm 公共 IR
 
 `AscendRuntime::rms_norm` 通过 RUDA `ComputeClient` 接收 `TensorBuffer` 的输入和共享 weight，返回 `[Y, rstd]`。`AscendRuntime::rms_norm_backward` 接收输入、weight、`dY` 及前向保存的 `rstd`，返回 `[dX, dWeight]`。`RowProgram::RmsNormWeightContributions` 生成逐元素 weight 梯度贡献，再在设备端归约所有前导行；空 batch 的 weight 梯度为零。
