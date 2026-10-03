@@ -5,6 +5,65 @@ fn opt(n:u64)->AscendOptions{AscendOptions{target:Some(AscendTarget::Ascend950DT
 fn compile(k:KernelDefinition,n:u64)->Result<AscendKernel>{AscendCompiler.compile(k,&opt(n),ExecutionMode::Checked,UIntKind::U64.into())}
 fn f()->Type{Type::scalar(ElemType::Float(FloatKind::F32))}
 fn v(id:u32)->Variable{Variable::new(VariableKind::LocalMut{id},f())}
+#[cfg_attr(unix,link(name="m"))]
+unsafe extern "C" {#[link_name="erf"] fn c_erf(x:f64)->f64;}
+pub(super) fn erf_reference(x:f32)->f32 {unsafe {c_erf(x as f64) as f32}}
+fn activation_kernel(make:impl FnOnce(Variable)->Arithmetic)->KernelDefinition {
+    let mut kernel=definition(MapProgram::Copy);let input=kernel.body.instructions[0].out.unwrap();let output=v(999);
+    kernel.body.instructions.insert(1,Instruction::new(make(input),output));
+    if let Operation::Operator(Operator::IndexAssign(store))=&mut kernel.body.instructions[2].operation {store.value=output;}
+    kernel
+}
+#[test]fn native_math_workspace_is_distinct_budgeted_and_reused() {
+    for (kind,factor) in [(0,3),(1,1)] {
+        let mut kernel=activation_kernel(|input|if kind==0 {Arithmetic::Erf(UnaryOperator{input})} else {Arithmetic::Tanh(UnaryOperator{input})});
+        for tile in [8,64,256,4096] {
+            let mut options=opt(65);options.tile_elements=tile;
+            let compiled=AscendCompiler.compile(kernel.clone(),&options,ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+            let p=lower::lower(kernel.clone(),65).unwrap();let a=plan::allocate(&p,true).unwrap();
+            let workspace=factor*(tile as usize*4).max(256);
+            assert_eq!(compiled.ub_bytes() as usize,(p.bindings.len()+a.slots)*tile as usize*4+workspace);
+            assert!(compiled.source().contains(&format!("pipe.InitBuffer(math_workspace, {workspace}U)")));
+            assert!(compiled.source().contains(if kind==0 {"Erf<float, false, ruda_erf_config>"} else {"Tanh<float, false, ruda_tanh_config>"}));
+            assert!(compiled.source().contains(if kind==0 {"SUBSECTION_POLYNOMIAL_APPROXIMATION"} else {"SUBSECTION_COMPENSATION"}));
+            options.ub_limit_bytes=compiled.ub_bytes()-1;
+            assert!(AscendCompiler.compile(kernel.clone(),&options,ExecutionMode::Checked,UIntKind::U64.into()).is_err());
+        }
+        if kind==0 {
+            kernel.body.instructions.insert(2,Instruction::new(Arithmetic::Tanh(UnaryOperator{input:v(999)}),v(998)));
+            if let Operation::Operator(Operator::IndexAssign(store))=&mut kernel.body.instructions[3].operation {store.value=v(998);}
+            assert_eq!(plan::math_workspace(&lower::lower(kernel,65).unwrap(),8).unwrap(),768);
+        }
+    }
+    assert_eq!(plan::math_workspace(&lower::lower(definition(MapProgram::Copy),65).unwrap(),8).unwrap(),0);
+}
+#[test]fn specialized_integer_powers_preserve_parity_and_inverse_first() {
+    let input=[-2.,-1.,-0.,0.,0.5,2.,1e20,f32::INFINITY,f32::NEG_INFINITY,f32::NAN];
+    for exponent in [-3i64,-2,-1,0,1,2,3,7] {
+        let rhs=Variable::constant(ConstantValue::Int(exponent),Type::scalar(ElemType::Int(IntKind::I64)));
+        let kernel=activation_kernel(|lhs|Arithmetic::Powi(BinaryOperator{lhs,rhs}));
+        compile(kernel.clone(),input.len() as u64).unwrap();
+        let actual=evaluate(kernel,input.len(),[&input,&[],&[]]);
+        for (&a,&x) in actual[0].iter().zip(&input) {
+            let expected=if exponent<0 {x.recip().powi(-exponent as i32)} else {x.powi(exponent as i32)};
+            assert!(a.to_bits()==expected.to_bits() || a.is_nan() && expected.is_nan() || (a-expected).abs()<=expected.abs()*2e-6);
+        }
+        if exponent==-2 {assert!(actual[0][6]>0.);}
+    }
+    for rhs in [Variable::constant(ConstantValue::Int(i64::MIN),Type::scalar(ElemType::Int(IntKind::I64))),
+        Variable::constant(ConstantValue::UInt(u64::MAX),Type::scalar(ElemType::UInt(UIntKind::U64)))] {
+        let kernel=activation_kernel(|lhs|Arithmetic::Powi(BinaryOperator{lhs,rhs}));
+        assert!(lower::lower(kernel.clone(),3).unwrap().nodes.len()<=130);
+        let result=evaluate(kernel.clone(),3,[&[-1.,1.,0.],&[],&[]]);
+        assert_eq!(result[0],if matches!(rhs.kind,VariableKind::Constant(ConstantValue::Int(_))) {vec![1.,1.,f32::INFINITY]} else {vec![-1.,1.,0.]});
+        compile(kernel,3).unwrap();
+    }
+}
+#[test]fn integer_power_does_not_guess_dynamic_or_float_exponents() {
+    for rhs in [v(999),Variable::constant(ConstantValue::Float(3.),f())] {
+        assert!(compile(activation_kernel(|lhs|Arithmetic::Powi(BinaryOperator{lhs,rhs})),1).is_err());
+    }
+}
 #[test]fn real_common_ir_generates_vector_primitives(){let k=compile(definition(MapProgram::Add),1025).unwrap();assert!(k.source().contains("AscendC::Add("));assert!(k.source().contains("DataCopyPad"));assert!(k.source().contains("count * uint32_t(sizeof(float))"));assert!(!k.source().contains("aclnn"));assert!(!k.source().contains("deep_gemm"));assert_eq!(k.bindings().len(),3);assert_eq!(k.bindings()[2].bytes,4100);}
 #[test]fn every_algorithm_is_a_common_kernel(){for p in [MapProgram::Copy,MapProgram::Add,MapProgram::Mul,MapProgram::Silu,MapProgram::SiluMul,MapProgram::SiluBackward,MapProgram::SiluMulBackward]{let k=compile(definition(p),513).unwrap();assert_eq!(k.bindings().len(),p.input_count()+p.output_count());assert!(k.ub_bytes()<=131072);}}
 #[test]fn missing_target_is_not_guessed(){assert!(AscendCompiler.compile(definition(MapProgram::Add),&AscendOptions::default(),ExecutionMode::Checked,UIntKind::U64.into()).is_err());}
@@ -76,7 +135,7 @@ fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])->Vec<Vec<f
         Node::Constant(bits)=>vec![f32::from_bits(bits);elements],
         Node::IndexFloat(i)=>(0..elements as u64).map(|lane|p.index_values[i].eval(lane) as f32).collect(),
         Node::IndexSelect(i,a,b)=>(0..elements).map(|lane|if p.predicates[i].eval(lane as u64) {nodes[a][lane]} else {nodes[b][lane]}).collect(),
-        Node::Unary(u,a)=>nodes[a].iter().map(|&v|match u{Unary::Neg=>-v,Unary::Abs=>v.abs(),Unary::Exp=>v.exp(),Unary::Log=>v.ln(),Unary::Sqrt=>v.sqrt(),Unary::Rsqrt=>1.0/v.sqrt(),Unary::Recip=>1.0/v}).collect(),
+        Node::Unary(u,a)=>nodes[a].iter().map(|&v|match u{Unary::Neg=>-v,Unary::Abs=>v.abs(),Unary::Exp=>v.exp(),Unary::Log=>v.ln(),Unary::Sqrt=>v.sqrt(),Unary::Rsqrt=>1.0/v.sqrt(),Unary::Recip=>1.0/v,Unary::Erf=>erf_reference(v),Unary::Tanh=>v.tanh()}).collect(),
         Node::Binary(b,a,c)=>nodes[a].iter().zip(&nodes[c]).map(|(&v,&w)|match b{Binary::Add=>v+w,Binary::Sub=>v-w,Binary::Mul=>v*w,Binary::Div=>v/w,Binary::Max=>v.max(w)}).collect()};nodes.push(z);}
     p.stores.iter().map(|&(_,v)|nodes[v].clone()).collect()
 }

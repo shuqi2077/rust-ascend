@@ -175,6 +175,8 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 ## 原生 SiLU 门控乘法
 
+公共逐元素编译支持 FP32 `Erf`、`Tanh` 和标量常量整数幂 `Powi`。Erf／Tanh 使用独立、计入 UB 预算的数学库 workspace；整数幂使用乘法平方展开，负指数先取倒数，保留负底数的整数奇偶语义。现有 `Tensor::erf()`、`tanh()`、整数 `powf_scalar()` 以及 `ruda_nn::Gelu::new()`／`new_approximate()` 直接复用 RUDA 张量与求导定义，不另建模型专用接口。调用见 [activation_tensor 示例](examples/activation_tensor.rs)：`cargo run --locked --release --example activation_tensor`。
+
 `AscendRuntime::silu_mul` / `silu_mul_backward` 使用已有公共逐元素 IR，计算 `SiLU(gate) * up` 与两路输入梯度。输入为形状相同的连续 FP32 缓冲区，支持任意元素数、非对齐尾部与空张量；不做隐式广播或低精度转换。
 
 `rust_ascend::nn::silu_mul` 接收 `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，接入 RUDA 求导图与共享节点梯度累积。调用见 [silu_mul_tensor 示例](examples/silu_mul_tensor.rs)：`cargo run --locked --release --example silu_mul_tensor`。

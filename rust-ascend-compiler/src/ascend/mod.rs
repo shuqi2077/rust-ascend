@@ -164,11 +164,13 @@ fn compile_kernel(kernel:KernelDefinition,o:&AscendOptions,mode:ExecutionMode,ad
         let gather = p.load_indices.values().any(|index| **index != index::Index::Lane)
             || p.nodes.iter().any(|node|matches!(node,lower::Node::UniformInput(..)));
         let scatter=p.store_indices.values().any(|index| **index!=index::Index::Lane);
+        let math_workspace=plan::math_workspace(&p,o.tile_elements)?;
         let ub = vectors.checked_mul(o.tile_elements as usize).and_then(|n| n.checked_mul(4))
             .and_then(|n|n.checked_add(if gather {32}else{0})).and_then(|n|n.checked_add(if scatter {32}else{0}))
+            .and_then(|n|n.checked_add(math_workspace))
             .ok_or_else(|| invalid("UB byte count overflow"))?;
         if ub > o.ub_limit_bytes as usize { return Err(unsupported(format!("kernel requires {ub} UB bytes, limit is {}", o.ub_limit_bytes))); }
-        let source = emit::emit(&p, &alloc, o);
+        let source = emit::emit(&p, &alloc, o, math_workspace);
         Ok(AscendKernel { source, entrypoint: p.name, target, elements: o.elements, row_width: None,
             block_dim: o.vector_cores, tile_elements: o.tile_elements, ub_bytes: ub as u32,
             temporary_slots: alloc.slots, initialized_outputs:inplace!=0 || p.bindings.iter().any(|b|

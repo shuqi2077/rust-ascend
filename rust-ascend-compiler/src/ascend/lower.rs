@@ -6,7 +6,7 @@ use std::rc::Rc;
 use super::index::Index;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip }
+pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip, Erf, Tanh }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Binary { Add, Sub, Mul, Div, Max }
 #[derive(Clone, Copy, Debug)]
@@ -235,7 +235,26 @@ impl Lower {
                 }
                 let binary=match a { Arithmetic::Add(op)=>Some((Binary::Add,op)),Arithmetic::Sub(op)=>Some((Binary::Sub,op)),Arithmetic::Mul(op)=>Some((Binary::Mul,op)),Arithmetic::Div(op)=>Some((Binary::Div,op)),Arithmetic::Max(op)=>Some((Binary::Max,op)),_=>None };
                 if let Some((kind,op))=binary {let lhs=self.vector(op.lhs)?;let rhs=self.vector(op.rhs)?;return self.add(dst,Node::Binary(kind,lhs,rhs));}
-                let (kind,op)=match a { Arithmetic::Neg(op)=>(Unary::Neg,op),Arithmetic::Abs(op)=>(Unary::Abs,op),Arithmetic::Exp(op)=>(Unary::Exp,op),Arithmetic::Log(op)=>(Unary::Log,op),Arithmetic::Sqrt(op)=>(Unary::Sqrt,op),Arithmetic::InverseSqrt(op)=>(Unary::Rsqrt,op),Arithmetic::Recip(op)=>(Unary::Recip,op),_=>return Err(unsupported(format!("arithmetic {a:?}"))) };
+                if let Arithmetic::Powi(op)=a {
+                    let (negative,mut exponent)=match op.rhs.kind {
+                        VariableKind::Constant(ConstantValue::Int(n)) if matches!(op.rhs.ty,Type::Scalar(StorageType::Scalar(ElemType::Int(IntKind::I32|IntKind::I64))))=>(n<0,n.unsigned_abs()),
+                        VariableKind::Constant(ConstantValue::UInt(n)) if is_index(op.rhs.ty)=>(false,n),
+                        _=>return Err(unsupported("FP32 Powi requires a specialized constant signed/unsigned integer exponent")),
+                    };
+                    let mut base=self.vector(op.lhs)?;
+                    if negative {let node=self.p.nodes.len();self.p.nodes.push(Node::Unary(Unary::Recip,base));base=node;}
+                    let mut result=None;
+                    while exponent!=0 {
+                        if exponent&1!=0 {result=Some(if let Some(previous)=result {
+                            let node=self.p.nodes.len();self.p.nodes.push(Node::Binary(Binary::Mul,previous,base));node
+                        } else {base});}
+                        exponent>>=1;
+                        if exponent!=0 {let node=self.p.nodes.len();self.p.nodes.push(Node::Binary(Binary::Mul,base,base));base=node;}
+                    }
+                    let result=match result {Some(node)=>node,None=>self.vector(Variable::constant(ConstantValue::Float(1.),f32_type()))?};
+                    return self.assign(dst,Value::Vector(result));
+                }
+                let (kind,op)=match a { Arithmetic::Neg(op)=>(Unary::Neg,op),Arithmetic::Abs(op)=>(Unary::Abs,op),Arithmetic::Exp(op)=>(Unary::Exp,op),Arithmetic::Log(op)=>(Unary::Log,op),Arithmetic::Sqrt(op)=>(Unary::Sqrt,op),Arithmetic::InverseSqrt(op)=>(Unary::Rsqrt,op),Arithmetic::Recip(op)=>(Unary::Recip,op),Arithmetic::Erf(op)=>(Unary::Erf,op),Arithmetic::Tanh(op)=>(Unary::Tanh,op),_=>return Err(unsupported(format!("arithmetic {a:?}"))) };
                 let input=self.vector(op.input)?;self.add(dst,Node::Unary(kind,input))
             },
             other=>Err(unsupported(format!("operation {other:?}; no fallback to another kernel/compiler"))),

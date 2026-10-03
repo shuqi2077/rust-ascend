@@ -227,7 +227,7 @@ mod tests {
                 Node::Binary(op,a,b)=>values[a].iter().zip(&values[b]).map(|(&a,&b)|match op {
                     Binary::Add=>a+b,Binary::Sub=>a-b,Binary::Mul=>a*b,Binary::Div=>a/b,Binary::Max=>a.max(b)}).collect(),
                 Node::Unary(op,a)=>values[a].iter().map(|&a|match op {Unary::Neg=>-a,Unary::Abs=>a.abs(),
-                    Unary::Exp=>a.exp(),Unary::Log=>a.ln(),Unary::Sqrt=>a.sqrt(),Unary::Rsqrt=>a.sqrt().recip(),Unary::Recip=>a.recip()}).collect(),
+                    Unary::Exp=>a.exp(),Unary::Log=>a.ln(),Unary::Sqrt=>a.sqrt(),Unary::Rsqrt=>a.sqrt().recip(),Unary::Recip=>a.recip(),Unary::Erf=>super::super::tests::erf_reference(a),Unary::Tanh=>a.tanh()}).collect(),
             });
         }
         for &(binding,value) in &p.stores {for lane in 0..n {

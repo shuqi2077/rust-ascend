@@ -72,7 +72,7 @@ __aicore__ inline void ruda_row_sync(AscendC::TPipe& pipe) {\n\
                 let x = value(p, a, x);
                 if op == Unary::Neg { format!("AscendC::Muls({d}, {x}, -1.0f, 32);") }
                 else { let fun = match op { Unary::Abs => "Abs", Unary::Exp => "Exp", Unary::Log => "Ln",
-                    Unary::Sqrt => "Sqrt", Unary::Rsqrt => "Rsqrt", Unary::Recip => "Reciprocal", Unary::Neg => unreachable!() };
+                    Unary::Sqrt => "Sqrt", Unary::Rsqrt => "Rsqrt", Unary::Recip => "Reciprocal", Unary::Neg|Unary::Erf|Unary::Tanh => unreachable!() };
                     format!("AscendC::{fun}({d}, {x}, 32);") }
             }
             Node::Binary(op, x, y) => {

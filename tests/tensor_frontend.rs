@@ -11,6 +11,29 @@ use rust_ascend::{
 
 type E = Vector<f32, Const<1>>;
 
+#[test]
+fn actual_ruprim_signed_integer_scalar_power_compiles() {
+    use rust_ascend::core::ir::IntKind;
+    for exponent in [-3i32,3,7] {
+        let mut builder=KernelBuilder::default();let address=AddressType::U32;address.register(&mut builder.scope);
+        let mut info=InfoBuilder::default();let input=plain_input(&mut builder,&mut info,address);
+        let scalar=<InputScalar as LaunchArg>::expand(&InputScalarCompilationArg::new(IntKind::I32.into()),&mut builder);
+        info.scalars.push(exponent);
+        let output:NativeExpand<Array<E>>=builder.inplace_output(0).into();
+        let len=layout_scalar(&mut builder,&mut info,address,65);
+        let layout=PlainLayout::__expand_new(&mut builder.scope,len);
+        let output=output.__expand_view_mut_method(&mut builder.scope,layout.into());
+        ruprim::elementwise::binary::integer_power::scalar_kernel::expand::<f32,i32,Const<1>>(
+            &mut builder.scope,input,scalar,output,[FloatKind::F32.into(),IntKind::I32.into()]);
+        let definition=builder.build(KernelSettings::default().address_type(address).ruda_dim(RudaDim::new_1d(64)).kernel_name("integer_power"));
+        let packed=info.finish(address);
+        let definition=arguments::specialize(definition,&packed.data,packed.dynamic_metadata_offset,address.unsigned_type()).unwrap();
+        let compiled=AscendCompiler.compile(definition,&AscendOptions{target:Some(AscendTarget::Ascend950DT),elements:65,..Default::default()},ExecutionMode::Unchecked,address.unsigned_type()).unwrap();
+        assert!(compiled.source().contains("AscendC::Mul("));
+        assert_eq!(compiled.source().contains("AscendC::Reciprocal("),exponent<0);
+    }
+}
+
 fn layout_scalar(builder: &mut KernelBuilder, info: &mut InfoBuilder, address: AddressType, value: u64) -> NativeExpand<usize> {
     if address == AddressType::U32 { info.scalars.push(value as u32); } else { info.scalars.push(value); }
     builder.scalar(address.unsigned_type()).into()
