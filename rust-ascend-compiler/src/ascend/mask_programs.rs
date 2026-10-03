@@ -32,7 +32,7 @@ pub fn definition(spec:CausalMaskSpec)->Result<KernelDefinition> {
     let column=emit(Arithmetic::Modulo(BinaryOperator {lhs:lane,rhs:constant(spec.keys as u64)}).into(),u);
     let query=emit(Arithmetic::Add(BinaryOperator {lhs:row,rhs:constant(spec.query_start)}).into(),u);
     let key=emit(Arithmetic::Add(BinaryOperator {lhs:column,rhs:constant(spec.key_start)}).into(),u);
-    let cond=emit(Comparison::Greater(BinaryOperator {lhs:key,rhs:query}).into(),Type::new(ElemType::Bool));
+    let cond=emit(Comparison::Greater(BinaryOperator {lhs:key,rhs:query}).into(),Type::scalar(ElemType::Bool));
     let negative_infinity=emit(Operator::Reinterpret(UnaryOperator {input:Variable::constant(ConstantValue::UInt(0xff800000),Type::new(UIntKind::U32.into()))}).into(),f);
     let mask=emit(Operator::Select(Select {cond,then:negative_infinity,or_else:Variable::constant(ConstantValue::Float(0.),f)}).into(),f);
     kernel.body.instructions.push(Instruction::new(Operator::IndexAssign(IndexAssignOperator {index:lane,value:mask,vector_size:0,unroll_factor:1}),
