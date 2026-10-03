@@ -113,6 +113,14 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `rust_ascend::nn::softmax` / `log_softmax` 接收 `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，原生反向接入 RUDA 的现有计算图和梯度累积。调用见 [softmax_tensor 示例](examples/softmax_tensor.rs)：`cargo run --locked --release --example softmax_tensor`。
 
+## 分类损失与整数标签
+
+`CannSession::nll_loss` / `nll_loss_backward` 与 `AscendRuntime` 的对应接口使用 ACLNN NLLLoss，接收连续 FP32／FP16／BF16 的 `[N,C]` log-probabilities、INT32／INT64 `[N]` 标签及同精度 `[C]` class weight。前向返回 loss 和设备端 total weight；反向复用前向 total weight。`NllLossOptions` 要求显式选择 None／Mean／Sum 和可选 ignore index，标签须为有效类别或该 ignore 值。None 返回 `[N]`，Mean／Sum 返回 `[1]`；加权 Mean 除以未忽略标签的权重和。
+
+`nn::nll_loss` 把 FP32 输入反向接入 RUDA 图，class weight 为固定的 inner-backend 张量。已跟踪的前向独立保存设备端整数标签与 class weight 快照，不将标签或归约计数搬回主机。`nn::cross_entropy` / `weighted_cross_entropy` 将原生 FP32 LogSoftmax 与这一 NLLLoss 路径组合，支持 logits 梯度及共享图累积；类别数沿用原生 LogSoftmax 的正数、32 对齐要求。调用方自行决定标签位移，不隐式 shift、label smoothing 或 soft targets。
+
+调用见 [cross_entropy_tensor 示例](examples/cross_entropy_tensor.rs)：`cargo run --locked --release --example cross_entropy_tensor`。`AscendRuntime::copy_contiguous` 也可独立保存连续 FP32／FP16／BF16／INT32／INT64 设备张量，保留原存储位模式。
+
 ## 原生 SiLU 门控乘法
 
 `AscendRuntime::silu_mul` / `silu_mul_backward` 使用已有公共逐元素 IR，计算 `SiLU(gate) * up` 与两路输入梯度。输入为形状相同的连续 FP32 缓冲区，支持任意元素数、非对齐尾部与空张量；不做隐式广播或低精度转换。

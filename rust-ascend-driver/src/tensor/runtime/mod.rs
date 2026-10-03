@@ -11,6 +11,7 @@ mod descriptor;
 mod rotary;
 mod wide_rows;
 mod indexing;
+mod loss;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -43,6 +44,7 @@ pub use ruda_runtime::runtime::{client::ComputeClient, compiler::RudaTask};
 pub use ruda_runtime::runtime::normalization::TensorBuffer;
 pub use crate::tensor::deepgemm::Transpose;
 pub use crate::tensor::EmbeddingOptions;
+pub use crate::tensor::{LossReduction,NllLossOptions};
 pub use rust_ascend_compiler::ascend::rotary_programs::RotaryLayout;
 use rust_ascend_compiler::ascend::{AscendCompiler, AscendOptions, AscendTarget};
 use std::{
@@ -126,6 +128,21 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Independent contiguous FP32/FP16/BF16/INT32/INT64 device-to-device snapshot.
+    pub fn copy_contiguous(client:&ComputeClient<Self>,input:TensorBuffer)->Result<TensorBuffer> {
+        indexing::copy_contiguous(client,input)
+    }
+    /// ACLNN NLLLoss with explicit device class weights; returns [loss, total weight].
+    pub fn nll_loss(client:&ComputeClient<Self>,input:TensorBuffer,target:TensorBuffer,weight:TensorBuffer,
+        options:NllLossOptions)->Result<[TensorBuffer;2]> {loss::forward(client,input,target,weight,options)}
+    /// Forward plus independent device snapshots of labels and fixed class weights.
+    pub fn nll_loss_with_saved_inputs(client:&ComputeClient<Self>,input:TensorBuffer,target:TensorBuffer,weight:TensorBuffer,
+        options:NllLossOptions)->Result<[TensorBuffer;4]> {loss::saved_forward(client,input,target,weight,options)}
+    /// ACLNN dense input derivative using saved forward total weight and explicit reduction/ignore label.
+    pub fn nll_loss_backward(client:&ComputeClient<Self>,grad:TensorBuffer,input:TensorBuffer,target:TensorBuffer,
+        weight:TensorBuffer,total_weight:TensorBuffer,options:NllLossOptions)->Result<TensorBuffer> {
+        loss::backward(client,grad,input,target,weight,total_weight,options)
+    }
     /// ACLNN embedding with contiguous FP32/FP16/BF16 weights and INT32/INT64 IDs.
     /// IDs have rank 1..7 and values in [0, vocabulary rows); no host index transfer.
     pub fn embedding(client:&ComputeClient<Self>,weight:TensorBuffer,indices:TensorBuffer)->Result<TensorBuffer> {

@@ -3,20 +3,20 @@ use crate::tensor::{DType as CannDType,TensorLayout,embedding::{forward_layout,b
 use ruda_core::tensor::{DType,Shape,Strides};
 type Client=ComputeClient<AscendRuntime>;
 fn layout_parts(shape:&[usize],strides:&[usize],dtype:DType)->Result<TensorLayout> {
-    if !contiguous(shape,strides) {return Err(error("embedding requires contiguous storage"));}
+    if !contiguous(shape,strides) {return Err(error("typed tensor operation requires contiguous storage"));}
     let dtype=match dtype {DType::F32=>CannDType::F32,DType::F16=>CannDType::F16,DType::BF16=>CannDType::BF16,
-        DType::I32=>CannDType::I32,DType::I64=>CannDType::I64,_=>return Err(error("embedding storage dtype is unsupported"))};
+        DType::I32=>CannDType::I32,DType::I64=>CannDType::I64,_=>return Err(error("typed tensor storage dtype is unsupported"))};
     let shape=shape.iter().map(|&d|i64::try_from(d).map_err(error)).collect::<Result<Vec<_>>>()?;
     TensorLayout::contiguous(&shape,dtype)
 }
-fn layout(value:&TensorBuffer)->Result<TensorLayout> {
+pub(super) fn layout(value:&TensorBuffer)->Result<TensorLayout> {
     let layout=layout_parts(&value.shape,&value.strides,value.dtype)?;
-    if value.handle.size_in_used()<layout.byte_len() as u64 {return Err(error("embedding buffer is shorter than its layout"));}
+    if value.handle.size_in_used()<layout.byte_len() as u64 {return Err(error("typed tensor buffer is shorter than its layout"));}
     Ok(layout)
 }
-fn allocate(client:&Client,layout:&TensorLayout)->TensorBuffer {
+pub(super) fn allocate(client:&Client,layout:&TensorLayout)->TensorBuffer {
     let dtype=match layout.dtype() {CannDType::F32=>DType::F32,CannDType::F16=>DType::F16,CannDType::BF16=>DType::BF16,
-        CannDType::I32=>DType::I32,CannDType::I64=>DType::I64,_=>unreachable!("checked embedding dtype")};
+        CannDType::I32=>DType::I32,CannDType::I64=>DType::I64,_=>unreachable!("checked storage dtype")};
     TensorBuffer {handle:client.empty(layout.byte_len()),shape:Shape::from(layout.shape().iter().map(|&n|n as usize).collect::<Vec<_>>()),
         strides:Strides::from(layout.strides().iter().map(|&n|n as usize).collect::<Vec<_>>()),dtype}
 }
@@ -39,16 +39,23 @@ pub(super) fn embedding_with_saved_indices(client:&Client,weight:TensorBuffer,in
     let indices_layout=layout(&indices)?;
     // Validate the full lookup before allocating or submitting its saved-index copy.
     forward_layout(&layout(&weight)?,&indices_layout)?;
-    let saved=allocate(client,&indices_layout);client.flush().map_err(error)?;
-    if indices_layout.byte_len()!=0 {
-        let guards=[&indices,&saved].iter().map(|value|client.get_resource(value.handle.clone()).map_err(error)).collect::<Result<Vec<_>>>()?;
-        let resources=guards.iter().map(|guard| {
-            let mut resource=guard.resource().clone();resource.size=indices_layout.byte_len();resource
-        }).collect::<Vec<_>>().try_into().map_err(|_|error("embedding index snapshot binding count mismatch"))?;
-        let worker=&WORKER.get().ok_or_else(||error("Ascend runtime is not initialized"))?.1;
-        let result=worker.call(move|state|state.copy_embedding_indices(indices_layout,resources));drop(guards);result?;
-    }
+    let saved=copy_contiguous(client,indices)?;
     let output=embedding(client,weight,saved.clone())?;Ok([output,saved])
+}
+pub(super) fn copy_contiguous(client:&Client,input:TensorBuffer)->Result<TensorBuffer> {
+    let input_layout=layout(&input)?;
+    let saved=allocate(client,&input_layout);client.flush().map_err(error)?;
+    if input_layout.byte_len()!=0 {
+        let guards=[&input,&saved].iter().map(|value|client.get_resource(value.handle.clone()).map_err(error)).collect::<Result<Vec<_>>>()?;
+        let resources=guards.iter().map(|guard| {
+            let mut resource=guard.resource().clone();
+            if resource.byte_len()<input_layout.byte_len() {return Err(error("snapshot resource is too short"));}
+            resource.size=input_layout.byte_len();Ok(resource)
+        }).collect::<Result<Vec<_>>>()?.try_into().map_err(|_|error("snapshot binding count mismatch"))?;
+        let worker=&WORKER.get().ok_or_else(||error("Ascend runtime is not initialized"))?.1;
+        let result=worker.call(move|state|state.copy_contiguous(input_layout,resources));drop(guards);result?;
+    }
+    Ok(saved)
 }
 pub(super) fn embedding_backward(client:&Client,grad:TensorBuffer,indices:TensorBuffer,num_weights:u64,options:EmbeddingOptions)->Result<TensorBuffer> {
     let grad_layout=layout(&grad)?;let indices_layout=layout(&indices)?;

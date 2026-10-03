@@ -123,17 +123,59 @@ pub(super) struct State {
     gemm_artifacts: tempfile::TempDir,
 }
 impl State {
-    pub fn copy_embedding_indices(&mut self,layout:crate::tensor::TensorLayout,resources:[AscendResource;2])->Result<()> {
-        if resources.iter().any(|r|r.size!=layout.byte_len()) || !matches!(layout.dtype(),crate::tensor::DType::I32|crate::tensor::DType::I64) {
-            return Err(error("embedding index snapshot contract mismatch"));
+    pub fn nll_loss(&mut self,layouts:Vec<crate::tensor::TensorLayout>,resources:Vec<AscendResource>,
+        options:crate::tensor::NllLossOptions,backward:bool)->Result<()> {
+        use crate::tensor::loss::{forward_layouts,backward_layout,NllPlan,NllGradPlan};
+        let count=if backward {6} else {5};let first_output=if backward {5} else {3};
+        if layouts.len()!=count || resources.len()!=count || resources.iter().zip(&layouts).any(|(r,l)|r.size!=l.byte_len()) {
+            return Err(error("NLLLoss layout/resource contract mismatch"));
+        }
+        if backward {
+            let expected=backward_layout(&layouts[0],&layouts[1],&layouts[2],&layouts[3],&layouts[4],options)?;
+            if expected!=layouts[5] {return Err(error("NLLLoss dense derivative layout mismatch"));}
+        } else {
+            let expected=forward_layouts(&layouts[0],&layouts[1],&layouts[2],options)?;
+            if expected[0]!=layouts[3] || expected[1]!=layouts[4] {return Err(error("NLLLoss output layout mismatch"));}
+        }
+        let addresses=resources.iter().map(|r|self.pointer(r).map(|p|p as usize)).collect::<Result<Vec<_>>>()?;
+        loss_ranges(&addresses,&layouts,first_output)?;self.session.bind()?;
+        type Memset=unsafe extern "C" fn(*mut c_void,usize,i32,usize)->i32;
+        // SAFETY: checked dense outputs are initialized in their own disjoint device allocations.
+        let memset=unsafe {self.session.api.library().symbol::<Memset>(c"aclrtMemset")?};
+        for i in first_output..count {if layouts[i].byte_len()!=0 {
+            check_status("aclrtMemset(NLLLoss)",unsafe {memset(addresses[i] as *mut c_void,layouts[i].byte_len(),0,layouts[i].byte_len())})?;
+        }}
+        if backward && layouts[5].byte_len()==0 {return Ok(());}
+        let descriptors=layouts.into_iter().zip(addresses).map(|(layout,address)| {
+            // SAFETY: managed storage guards remain alive through the synchronized executor.
+            unsafe {super::descriptor::Descriptor::new(&self.session,layout,address as *mut c_void)}
+        }).collect::<Result<Vec<_>>>()?;
+        let handle=|i:usize|descriptors[i].handle.as_ptr();
+        unsafe {
+            if backward {
+                let plan:NllGradPlan=self.session.ops.get(c"aclnnNLLLossBackwardGetWorkspaceSize")?;
+                let run=self.session.ops.get(c"aclnnNLLLossBackward")?;
+                self.session.execute("aclnnNLLLossBackward",run,|size,executor|plan(handle(0),handle(1),handle(2),handle(3),
+                    options.reduction as i64,options.ignore(),handle(4),handle(5),size,executor))
+            } else {
+                let plan:NllPlan=self.session.ops.get(c"aclnnNLLLossGetWorkspaceSize")?;let run=self.session.ops.get(c"aclnnNLLLoss")?;
+                self.session.execute("aclnnNLLLoss",run,|size,executor|plan(handle(0),handle(1),handle(2),
+                    options.reduction as i64,options.ignore(),handle(3),handle(4),size,executor))
+            }
+        }
+    }
+    pub fn copy_contiguous(&mut self,layout:crate::tensor::TensorLayout,resources:[AscendResource;2])->Result<()> {
+        use crate::tensor::DType;
+        if resources.iter().any(|r|r.size!=layout.byte_len()) || !matches!(layout.dtype(),DType::F32|DType::F16|DType::BF16|DType::I32|DType::I64) {
+            return Err(error("contiguous snapshot contract mismatch"));
         }
         let addresses=[self.pointer(&resources[0])? as usize,self.pointer(&resources[1])? as usize];
         cast_ranges(addresses,&[layout.clone(),layout.clone()])?;
         if layout.byte_len()==0 {return Ok(());}
         self.session.bind()?;
         // SAFETY: exact-size, disjoint device allocations retained by caller guards;
-        // synchronous device-to-device copy preserves integer bits and never visits host RAM.
-        check_status("aclrtMemcpy(embedding IDs)",unsafe {self.session.api.aclrtMemcpy(addresses[1] as *mut c_void,layout.byte_len(),
+        // synchronous device-to-device copy preserves storage bits and never visits host RAM.
+        check_status("aclrtMemcpy(snapshot)",unsafe {self.session.api.aclrtMemcpy(addresses[1] as *mut c_void,layout.byte_len(),
             addresses[0] as *const c_void,layout.byte_len(),ACL_MEMCPY_DEVICE_TO_DEVICE)})
     }
     pub fn embedding(&mut self,layouts:[crate::tensor::TensorLayout;3],resources:[AscendResource;3],backward:Option<crate::tensor::EmbeddingOptions>)->Result<()> {
@@ -291,6 +333,20 @@ impl State {
     }
 }
 
+fn loss_ranges(addresses:&[usize],layouts:&[crate::tensor::TensorLayout],first_output:usize)->Result<()> {
+    if addresses.len()!=layouts.len() || first_output>=layouts.len() {return Err(error("loss binding count mismatch"));}
+    let mut ends=Vec::with_capacity(layouts.len());
+    for (&address,layout) in addresses.iter().zip(layouts) {
+        if address==0 || address%layout.dtype().bytes()!=0 {return Err(error("loss address is null or unaligned"));}
+        ends.push(address.checked_add(layout.byte_len()).ok_or_else(||error("loss address range overflow"))?);
+    }
+    for output in first_output..layouts.len() {for other in 0..output {
+        if layouts[output].byte_len()!=0 && layouts[other].byte_len()!=0 && addresses[output]<ends[other] && addresses[other]<ends[output] {
+            return Err(error("loss output overlaps an input or another output"));
+        }
+    }}
+    Ok(())
+}
 fn embedding_ranges(addresses:[usize;3],layouts:&[crate::tensor::TensorLayout;3])->Result<()> {
     let mut ends=[0usize;3];
     for i in 0..3 {
@@ -348,5 +404,18 @@ mod tests {
             [4096,8192,12289],[0,8192,12288],[usize::MAX-3,8192,12288]] {
             assert!(embedding_ranges(addresses,&layouts).is_err());
         }
+    }
+    #[test]
+    fn loss_bindings_keep_dense_output_and_total_weight_disjoint() {
+        use crate::tensor::{DType,TensorLayout};
+        let layouts=[TensorLayout::contiguous(&[3,65],DType::F32).unwrap(),
+            TensorLayout::contiguous(&[3],DType::I64).unwrap(),TensorLayout::contiguous(&[65],DType::F32).unwrap(),
+            TensorLayout::contiguous(&[3],DType::F32).unwrap(),TensorLayout::contiguous(&[1],DType::F32).unwrap()];
+        assert!(loss_ranges(&[4096,8192,12288,16384,20480],&layouts,3).is_ok());
+        assert!(loss_ranges(&[4096,4096,4096,16384,20480],&layouts,3).is_ok());
+        assert!(loss_ranges(&[4096,8192,12288,16384,16388],&layouts,3).is_err());
+        assert!(loss_ranges(&[4096,8192,12288,16384,8192],&layouts,3).is_err());
+        assert!(loss_ranges(&[4096,8194,12288,16384,20480],&layouts,3).is_err());
+        assert!(loss_ranges(&[4096],&layouts,3).is_err());
     }
 }
