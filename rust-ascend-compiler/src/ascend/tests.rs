@@ -245,4 +245,50 @@ pub(super) fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])
         assert!(compile(global_bool,elements as u64).is_err());
     }}
 }
+#[test]fn local_boolean_composition_retains_nan_truth_tables_and_index_precision() {
+    let pairs=[(-1.,1.),(-1.,-1.),(1.,1.),(1.,-1.),(-0.,0.),(f32::NEG_INFINITY,f32::INFINITY),
+        (f32::from_bits(0x7fc12345),1.),(-1.,f32::from_bits(0x7fc23456))];
+    for elements in [0usize,1,7,63,65,257] {for kind in 0..8 {
+        let mut kernel=definition(MapProgram::Add);let lhs=kernel.body.instructions[0].out.unwrap();let rhs=kernel.body.instructions[1].out.unwrap();
+        let local=|id|Variable::new(VariableKind::LocalConst {id},Type::scalar(ElemType::Bool));
+        let p=local(991);let q=local(992);let negated=local(993);let condition=local(994);let index=local(995);
+        let zero=Variable::constant(ConstantValue::Float(0.),f());
+        let truth=Variable::constant(ConstantValue::Bool(true),Type::scalar(ElemType::Bool));
+        let falsity=Variable::constant(ConstantValue::Bool(false),Type::scalar(ElemType::Bool));
+        kernel.body.instructions.truncate(2);
+        kernel.body.instructions.push(Instruction::new(Comparison::Lower(BinaryOperator {lhs,rhs:zero}),p));
+        kernel.body.instructions.push(Instruction::new(Comparison::Greater(BinaryOperator {lhs:rhs,rhs:zero}),q));
+        kernel.body.instructions.push(Instruction::new(Operator::Not(UnaryOperator {input:p}),negated));
+        let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());
+        let offset=Variable::constant(ConstantValue::UInt((1u64<<40)+11),UIntKind::U64.into());
+        let shifted=Variable::new(VariableKind::LocalConst {id:996},Type::new(UIntKind::U64.into()));
+        kernel.body.instructions.push(Instruction::new(Arithmetic::Add(BinaryOperator {lhs:lane,rhs:offset}),shifted));
+        let bound=Variable::constant(ConstantValue::UInt((1u64<<40)+11+(elements/2) as u64),UIntKind::U64.into());
+        kernel.body.instructions.push(Instruction::new(Comparison::Lower(BinaryOperator {lhs:shifted,rhs:bound}),index));
+        let operation=match kind {
+            0=>Operator::Not(UnaryOperator {input:p}),1=>Operator::And(BinaryOperator {lhs:p,rhs:q}),
+            2=>Operator::Or(BinaryOperator {lhs:p,rhs:q}),3=>Operator::Or(BinaryOperator {lhs:negated,rhs:q}),
+            4=>Operator::And(BinaryOperator {lhs:p,rhs:index}),5=>Operator::Or(BinaryOperator {lhs:index,rhs:q}),
+            6=>Operator::And(BinaryOperator {lhs:p,rhs:truth}),_=>Operator::Or(BinaryOperator {lhs:q,rhs:falsity}),
+        };
+        kernel.body.instructions.push(Instruction::new(operation,condition));
+        kernel.body.instructions.push(Instruction::new(Operator::Select(Select {cond:condition,then:lhs,or_else:rhs}),v(997)));
+        let output=Variable::new(VariableKind::GlobalOutputArray(2),f());
+        kernel.body.instructions.push(Instruction::new(Operator::IndexAssign(IndexAssignOperator {index:lane,value:v(997),vector_size:0,unroll_factor:1}),output));
+        let a:Vec<f32>=(0..elements).map(|i|pairs[i%pairs.len()].0).collect();let b:Vec<f32>=(0..elements).map(|i|pairs[i%pairs.len()].1).collect();
+        let actual=evaluate(kernel.clone(),elements,[&a,&b,&[]]);
+        for i in 0..elements {let p=a[i]<0.;let q=b[i]>0.;let index=i<elements/2;
+            let select=match kind {0=>!p,1=>p&&q,2=>p||q,3=>!p||q,4=>p&&index,5=>index||q,6=>p,_=>q};
+            assert_eq!(actual[0][i].to_bits(),(if select {a[i]} else {b[i]}).to_bits());
+        }
+        for tile in [8,64,256] {let mut options=opt(elements as u64);options.tile_elements=tile;
+            let compiled=AscendCompiler.compile(kernel.clone(),&options,ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+            assert!(compiled.source().contains("AscendC::Compare("));assert!(compiled.source().contains("AscendC::Select("));
+            if matches!(kind,4|5) {assert!(compiled.source().contains("1099511627787ULL"));}
+        }
+        let mut child=Scope::root(false);child.instructions.push(Instruction::no_out(Branch::Return));
+        kernel.body.instructions.push(Instruction::no_out(Branch::If(Box::new(If {cond:condition,scope:child}))));
+        assert!(compile(kernel,elements as u64).is_err());
+    }}
+}
 #[test]fn backward_equations_match_finite_differences(){let x=[-2.0,-0.3,0.2,1.7];let up=[1.2,0.7,-0.9,2.0];let dy=[0.5,-1.0,0.2,0.8];let grads=reference(MapProgram::SiluMulBackward,&x,&up,&dy);let h=0.001;for j in 0..4{let mut hi=x;let mut lo=x;hi[j]+=h;lo[j]-=h;let a=reference(MapProgram::SiluMul,&hi,&up,&[]);let b=reference(MapProgram::SiluMul,&lo,&up,&[]);let finite=(a[0][j]-b[0][j])/(2.0*h)*dy[j];assert!((grads[0][j]-finite).abs()<0.001);let expected=dy[j]*x[j]/(1.0+(-x[j]).exp());assert!((grads[1][j]-expected).abs()<1e-6);}}

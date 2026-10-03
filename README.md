@@ -187,6 +187,8 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `nn::log_sigmoid(input)` 原生执行 RUDA 的 max-shift LogSigmoid 与专用反向：以局部 `-X < 0` 条件生成 `max(-X, 0)`，保持两项 shifted Exp 相加、Log 及原始反向中的 Recip／乘减顺序，不改成 `log(sigmoid(X))`，也不依赖全局 Bool 张量。它沿用上述 FP32、rank 1～8、空轴／尾部域及已跟踪输入快照；调用同见 [exp_piecewise_tensor 示例](examples/exp_piecewise_tensor.rs)。
 
+逐元素 common IR 的局部 Bool 比较结果支持 `Not`、`And`、`Or`、Bool 常量及与无符号索引比较的复合条件，可继续交给 `Select`。条件通过精确的设备端 0／1 flags 和 Compare／Select 组合，保留 NaN 的比较真值与高位索引精度；不会把 `!(X < Y)` 改成 NaN 下不等价的 `X >= Y`。该能力不启用全局 Bool 缓冲区或数据依赖分支。
+
 公共逐元素编译支持 FP32 `Erf`、`Tanh` 和标量常量整数幂 `Powi`。Erf／Tanh 使用独立、计入 UB 预算的数学库 workspace；整数幂使用乘法平方展开，负指数先取倒数，保留负底数的整数奇偶语义。现有 `Tensor::erf()`、`tanh()`、整数 `powf_scalar()` 以及 `ruda_nn::Gelu::new()`／`new_approximate()` 直接复用 RUDA 张量与求导定义，不另建模型专用接口。调用见 [activation_tensor 示例](examples/activation_tensor.rs)：`cargo run --locked --release --example activation_tensor`。
 
 `AscendRuntime::silu_mul` / `silu_mul_backward` 使用已有公共逐元素 IR，计算 `SiLU(gate) * up` 与两路输入梯度。输入为形状相同的连续 FP32 缓冲区，支持任意元素数、非对齐尾部与空张量；不做隐式广播或低精度转换。

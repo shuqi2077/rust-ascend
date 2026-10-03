@@ -55,6 +55,9 @@ struct Lower { p: Program, elements:u64, partial_stores:bool, values: HashMap<Va
 impl Lower {
     fn resolve(&self, v: Variable) -> Result<Value> {
         if matches!(v.kind, VariableKind::Builtin(Builtin::AbsolutePosX | Builtin::AbsolutePos)) && is_index(v.ty) { return Ok(Value::Lane); }
+        if let VariableKind::Constant(ConstantValue::Bool(value))=v.kind {
+            if v.ty==Type::scalar(ElemType::Bool) {return Ok(if value {Value::Inside} else {Value::Outside});}
+        }
         if let VariableKind::Constant(ConstantValue::UInt(n))=v.kind {
             if is_index(v.ty) { return Ok(if n==self.elements {Value::Length}else{Value::Index(n)}); }
         }
@@ -99,6 +102,39 @@ impl Lower {
         match v.kind { VariableKind::GlobalInputArray(_)=>{self.array(v,false)?;},VariableKind::GlobalOutputArray(_)=>{self.array(v,true)?;},_=>return Err(unsupported("length of non-global array")) }; Ok(())
     }
     fn add(&mut self,out:Variable,node:Node)->Result<()> { let n=self.p.nodes.len();self.p.nodes.push(node);self.assign(out,Value::Vector(n)) }
+    fn predicate_flags(&mut self,value:Value)->Result<usize> {
+        let zero=self.vector(Variable::constant(ConstantValue::Float(0.),f32_type()))?;
+        let one=self.vector(Variable::constant(ConstantValue::Float(1.),f32_type()))?;
+        let node=match value {
+            Value::Inside=>return Ok(one),Value::Outside=>return Ok(zero),
+            Value::Predicate(id)=>Node::IndexSelect(id,one,zero),
+            Value::DataPredicate(mask)=>Node::DataSelect(mask,one,zero),
+            _=>return Err(unsupported("logical operation requires local Bool predicates")),
+        };
+        let id=self.p.nodes.len();self.p.nodes.push(node);Ok(id)
+    }
+    fn logical_binary(&mut self,out:Variable,lhs:Value,rhs:Value,and:bool)->Result<()> {
+        let boolean=|value:&Value|matches!(value,Value::Inside|Value::Outside|Value::Predicate(_)|Value::DataPredicate(_));
+        if !boolean(&lhs)||!boolean(&rhs) {return Err(unsupported("logical operation requires local Bool predicates"));}
+        // Preserve checked-domain guards and constant identities without introducing data branches.
+        let value=if and {match (lhs,rhs) {
+            (Value::Outside,_)|(_,Value::Outside)=>Value::Outside,
+            (Value::Inside,value)|(value,Value::Inside)=>value,
+            (lhs,rhs)=>return self.combine_flags(out,lhs,rhs,Binary::Mul),
+        }} else {match (lhs,rhs) {
+            (Value::Inside,_)|(_,Value::Inside)=>Value::Inside,
+            (Value::Outside,value)|(value,Value::Outside)=>value,
+            (lhs,rhs)=>return self.combine_flags(out,lhs,rhs,Binary::Max),
+        }};
+        self.assign(out,value)
+    }
+    fn combine_flags(&mut self,out:Variable,lhs:Value,rhs:Value,operation:Binary)->Result<()> {
+        let lhs=self.predicate_flags(lhs)?;let rhs=self.predicate_flags(rhs)?;
+        let flags=self.p.nodes.len();self.p.nodes.push(Node::Binary(operation,lhs,rhs));
+        let one=self.vector(Variable::constant(ConstantValue::Float(1.),f32_type()))?;
+        let mask=self.p.nodes.len();self.p.nodes.push(Node::Compare(IndexCompare::Eq,flags,one));
+        self.assign(out,Value::DataPredicate(mask))
+    }
     fn instruction(&mut self,i:&Instruction)->Result<()> {
         if !i.modes.fp_math_mode.is_empty() { return Err(unsupported("fast-math modes must be lowered explicitly, not silently dropped")); }
         let out=i.out;
@@ -148,16 +184,20 @@ impl Lower {
                 }
             },
             Operation::Operator(Operator::Not(op))=>{
-                let value=match self.resolve(op.input)?{Value::Inside=>Value::Outside,Value::Outside=>Value::Inside,_=>return Err(unsupported("non-domain boolean negation"))};
+                let value=match self.resolve(op.input)?{
+                    Value::Inside=>Value::Outside,Value::Outside=>Value::Inside,
+                    value@ (Value::Predicate(_)|Value::DataPredicate(_))=>{
+                        let flags=self.predicate_flags(value)?;let zero=self.vector(Variable::constant(ConstantValue::Float(0.),f32_type()))?;
+                        let mask=self.p.nodes.len();self.p.nodes.push(Node::Compare(IndexCompare::Eq,flags,zero));Value::DataPredicate(mask)
+                    },_=>return Err(unsupported("logical negation requires a local Bool predicate")),
+                };
                 self.assign(out.ok_or_else(||invalid("not output missing"))?,value)
             },
             Operation::Operator(Operator::And(op))=>{
-                let value=match (self.resolve(op.lhs)?,self.resolve(op.rhs)?){
-                    (Value::Inside,Value::Inside)=>Value::Inside,
-                    (Value::Outside,Value::Outside)=>Value::Outside,
-                    _=>return Err(unsupported("conjunction requires identical domain predicates")),
-                };
-                self.assign(out.ok_or_else(||invalid("and output missing"))?,value)
+                self.logical_binary(out.ok_or_else(||invalid("and output missing"))?,self.resolve(op.lhs)?,self.resolve(op.rhs)?,true)
+            },
+            Operation::Operator(Operator::Or(op))=>{
+                self.logical_binary(out.ok_or_else(||invalid("or output missing"))?,self.resolve(op.lhs)?,self.resolve(op.rhs)?,false)
             },
             Operation::Operator(Operator::Cast(op))=>{
                 let dst=out.ok_or_else(||invalid("cast output missing"))?;
