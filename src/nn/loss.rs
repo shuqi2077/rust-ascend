@@ -4,10 +4,10 @@ pub use crate::runtime::{LossReduction,NllLossOptions};
 use ruda_autodiff::{checkpoint::{base::Checkpointer,strategy::CheckpointStrategy},
     grads::Gradients,ops::{Backward,Ops,OpsKind}};
 use ruda_core::tensor::Metadata;
-use ruda_tensor::{Backend,TensorPrimitive,api::{Tensor,Int},tensor::{FloatTensor,IntTensor}};
+use ruda_tensor::{Backend,TensorPrimitive,api::{Tensor,Int},tensor::{FloatTensor,IntTensor,Device}};
 
 /// Explicit input-only loss autodiff; class weights are fixed inner-backend tensors.
-pub trait NllLossBackend:Backend<Device=<Ascend as Backend>::Device> {
+pub trait NllLossBackend:Backend<Device=Device<Ascend>> {
     fn nll_loss(input:FloatTensor<Self>,target:IntTensor<Self>,weight:FloatTensor<Ascend>,
         options:NllLossOptions)->Result<FloatTensor<Self>>;
 }
@@ -50,7 +50,7 @@ fn validate(input:&Primitive,target:&Primitive,weight:&Primitive)->Result<()> {
     }
     Ok(())
 }
-fn primitive(client:&crate::runtime::ComputeClient<AscendRuntime>,device:&<Ascend as Backend>::Device,
+fn primitive(client:&crate::runtime::ComputeClient<AscendRuntime>,device:&Device<Ascend>,
     out:crate::runtime::TensorBuffer)->Primitive {
     Primitive::new(client.clone(),out.handle,Metadata::new(out.shape,out.strides),device.clone(),out.dtype)
 }
