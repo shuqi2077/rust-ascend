@@ -291,4 +291,28 @@ pub(super) fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])
         assert!(compile(kernel,elements as u64).is_err());
     }}
 }
+#[test]fn local_bool_to_fp32_casts_keep_exact_zero_one_and_nan_comparison_truth() {
+    let values=[f32::NEG_INFINITY,-1.,-0.,0.,f32::from_bits(1),1.,f32::INFINITY,f32::from_bits(0x7fc12345)];
+    for elements in [0usize,1,7,65,257] {for kind in 0..5 {
+        let mut kernel=definition(MapProgram::Copy);let input=kernel.body.instructions[0].out.unwrap();
+        let condition=Variable::new(VariableKind::LocalConst {id:990},Type::scalar(ElemType::Bool));
+        let mask=Variable::new(VariableKind::LocalConst {id:991},Type::scalar(ElemType::Bool));
+        let zero=Variable::constant(ConstantValue::Float(0.),f());
+        let comparison=if kind==1 {Comparison::NotEqual(BinaryOperator {lhs:input,rhs:zero})} else {Comparison::Lower(BinaryOperator {lhs:input,rhs:zero})};
+        kernel.body.instructions.insert(1,Instruction::new(comparison,condition));
+        let source=match kind {
+            2|3=>Variable::constant(ConstantValue::Bool(kind==3),Type::scalar(ElemType::Bool)),
+            4=>{kernel.body.instructions.insert(2,Instruction::new(Operator::Not(UnaryOperator {input:condition}),mask));mask},
+            _=>condition,
+        };
+        let insertion=kernel.body.instructions.len()-1;
+        kernel.body.instructions.insert(insertion,Instruction::new(Operator::Cast(UnaryOperator {input:source}),v(992)));
+        if let Operation::Operator(Operator::IndexAssign(store))=&mut kernel.body.instructions.last_mut().unwrap().operation {store.value=v(992);}
+        let x:Vec<f32>=(0..elements).map(|i|values[i%values.len()]).collect();
+        let actual=evaluate(kernel.clone(),elements,[&x,&[],&[]]);
+        for i in 0..elements {let truth=match kind {0=>x[i]<0.,1=>x[i]!=0.,2=>false,3=>true,_=>!(x[i]<0.)};
+            assert_eq!(actual[0][i].to_bits(),if truth {1f32.to_bits()} else {0f32.to_bits()});}
+        compile(kernel,elements as u64).unwrap();
+    }}
+}
 #[test]fn backward_equations_match_finite_differences(){let x=[-2.0,-0.3,0.2,1.7];let up=[1.2,0.7,-0.9,2.0];let dy=[0.5,-1.0,0.2,0.8];let grads=reference(MapProgram::SiluMulBackward,&x,&up,&dy);let h=0.001;for j in 0..4{let mut hi=x;let mut lo=x;hi[j]+=h;lo[j]-=h;let a=reference(MapProgram::SiluMul,&hi,&up,&[]);let b=reference(MapProgram::SiluMul,&lo,&up,&[]);let finite=(a[0][j]-b[0][j])/(2.0*h)*dy[j];assert!((grads[0][j]-finite).abs()<0.001);let expected=dy[j]*x[j]/(1.0+(-x[j]).exp());assert!((grads[1][j]-expected).abs()<1e-6);}}

@@ -202,6 +202,9 @@ impl Lower {
             Operation::Operator(Operator::Cast(op))=>{
                 let dst=out.ok_or_else(||invalid("cast output missing"))?;
                 if dst.ty==op.input.ty {let value=if dst.ty==f32_type(){Value::Vector(self.vector(op.input)?)}else{self.resolve(op.input)?};return self.assign(dst,value);}
+                if dst.ty==f32_type() && op.input.ty==Type::scalar(ElemType::Bool) {
+                    let flags=self.predicate_flags(self.resolve(op.input)?)?;return self.assign(dst,Value::Vector(flags));
+                }
                 if is_index(dst.ty)&&is_index(op.input.ty){
                     let mut value=self.resolve(op.input)?;
                     if let Value::Mapped(index)=&value {if dst.ty==Type::new(UIntKind::U32.into()) && index.bounds(self.elements)?.1>u32::MAX as u64{return Err(unsupported("narrowing layout index may wrap"));}}

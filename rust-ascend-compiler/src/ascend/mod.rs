@@ -120,7 +120,7 @@ impl fmt::Display for AscendKernel {
 #[derive(Clone, Debug, Default)]
 pub struct AscendCompiler;
 impl AscendCompiler {
-    pub const CACHE_VERSION: u32 = 12;
+    pub const CACHE_VERSION: u32 = 13;
     /// Explicit map compilation permitting partial, provably injective output patches.
     /// Unwritten output values are retained; callers provide initialized output storage.
     /// Ordinary `Compiler::compile` retains the complete contiguous-output contract.
