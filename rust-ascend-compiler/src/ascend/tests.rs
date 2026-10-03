@@ -260,10 +260,10 @@ pub(super) fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])
         kernel.body.instructions.push(Instruction::new(Comparison::Greater(BinaryOperator {lhs:rhs,rhs:zero}),q));
         kernel.body.instructions.push(Instruction::new(Operator::Not(UnaryOperator {input:p}),negated));
         let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());
-        let offset=Variable::constant(ConstantValue::UInt((1u64<<40)+11),UIntKind::U64.into());
+        let offset=Variable::constant(ConstantValue::UInt((1u64<<40)+11),Type::new(UIntKind::U64.into()));
         let shifted=Variable::new(VariableKind::LocalConst {id:996},Type::new(UIntKind::U64.into()));
         kernel.body.instructions.push(Instruction::new(Arithmetic::Add(BinaryOperator {lhs:lane,rhs:offset}),shifted));
-        let bound=Variable::constant(ConstantValue::UInt((1u64<<40)+11+(elements/2) as u64),UIntKind::U64.into());
+        let bound=Variable::constant(ConstantValue::UInt((1u64<<40)+11+(elements/2) as u64),Type::new(UIntKind::U64.into()));
         kernel.body.instructions.push(Instruction::new(Comparison::Lower(BinaryOperator {lhs:shifted,rhs:bound}),index));
         let operation=match kind {
             0=>Operator::Not(UnaryOperator {input:p}),1=>Operator::And(BinaryOperator {lhs:p,rhs:q}),
