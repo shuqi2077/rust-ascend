@@ -17,6 +17,7 @@ mod mask;
 mod heads;
 mod affine;
 mod piecewise;
+mod window;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -50,6 +51,7 @@ pub use ruda_runtime::runtime::normalization::TensorBuffer;
 pub use crate::tensor::deepgemm::Transpose;
 pub use crate::tensor::EmbeddingOptions;
 pub use crate::tensor::{LossReduction,NllLossOptions};
+pub use crate::tensor::TokenWindow;
 pub use rust_ascend_compiler::ascend::mask_programs::CausalMaskSpec;
 pub use rust_ascend_compiler::ascend::heads_programs::RepeatKvSpec;
 pub use rust_ascend_compiler::ascend::piecewise_programs::PiecewiseActivation;
@@ -136,6 +138,14 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Bit-preserving device token selection from contiguous [B,T,H] into [count,H].
+    pub fn token_window(client: &ComputeClient<Self>, input: TensorBuffer, window: TokenWindow) -> Result<TensorBuffer> {
+        window::forward(client, input, window)
+    }
+    /// Scatter a selected FP32 derivative into zero-initialized [B,T,H].
+    pub fn token_window_backward(client: &ComputeClient<Self>, shape: Shape, grad: TensorBuffer, window: TokenWindow) -> Result<TensorBuffer> {
+        window::backward(client, shape, grad, window)
+    }
     /// Explicit native rank 1..8 contiguous FP32 piecewise activations, including ELU/CELU/SELU.
     /// Empty axes and logical tails are retained; bounds are specialized from their exact FP32 bits.
     pub fn piecewise_activation(client:&ComputeClient<Self>,input:TensorBuffer,activation:PiecewiseActivation)->Result<TensorBuffer> {

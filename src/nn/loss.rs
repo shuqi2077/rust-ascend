@@ -10,6 +10,23 @@ use ruda_tensor::{Backend,TensorPrimitive,api::{Tensor,Int},tensor::{FloatTensor
 pub trait NllLossBackend:Backend<Device=Device<Ascend>> {
     fn nll_loss(input:FloatTensor<Self>,target:IntTensor<Self>,weight:FloatTensor<Ascend>,
         options:NllLossOptions)->Result<FloatTensor<Self>>;
+    fn nll_loss_with_total_weight(input:FloatTensor<Self>,target:IntTensor<Self>,weight:FloatTensor<Ascend>,
+        options:NllLossOptions)->Result<(FloatTensor<Self>,FloatTensor<Self>)>;
+}
+
+/// Sum/Mean NLLLoss and its non-trainable device weight sum. None has no valid weight sum.
+pub fn nll_loss_with_total_weight<B:NllLossBackend>(input:Tensor<B,2>,target:Tensor<B,1,Int>,weight:Tensor<Ascend,1>,
+    options:NllLossOptions)->Result<(Tensor<B,1>,Tensor<B,1>)> {
+    validate_total_weight(options)?;
+    let (loss,total)=B::nll_loss_with_total_weight(unquantized(input.into_primitive())?,target.into_primitive(),
+        unquantized(weight.into_primitive())?,options)?;
+    Ok((Tensor::from_primitive(TensorPrimitive::Float(loss)),Tensor::from_primitive(TensorPrimitive::Float(total))))
+}
+fn validate_total_weight(options:NllLossOptions)->Result<()> {
+    if options.reduction==LossReduction::None {
+        return Err(CannError::InvalidTensor("NLLLoss total weight requires Sum or Mean reduction".into()));
+    }
+    Ok(())
 }
 fn unquantized<B:Backend>(input:TensorPrimitive<B>)->Result<FloatTensor<B>> {
     match input {TensorPrimitive::Float(input)=>Ok(input),TensorPrimitive::QFloat(_)=>
@@ -62,6 +79,13 @@ fn forward(input:Primitive,target:Primitive,weight:Primitive,options:NllLossOpti
 impl NllLossBackend for Ascend {
     fn nll_loss(input:FloatTensor<Self>,target:IntTensor<Self>,weight:FloatTensor<Ascend>,options:NllLossOptions)
         ->Result<FloatTensor<Self>> {forward(input,target,weight,options)}
+    fn nll_loss_with_total_weight(input:FloatTensor<Self>,target:IntTensor<Self>,weight:FloatTensor<Ascend>,options:NllLossOptions)
+        ->Result<(FloatTensor<Self>,FloatTensor<Self>)> {
+        validate_total_weight(options)?;
+        validate(&input,&target,&weight)?;let client=input.client.clone();let device=input.device.clone();
+        let [out,total]=AscendRuntime::nll_loss(&client,buffer(input),buffer(target),buffer(weight),options)?;
+        Ok((primitive(&client,&device,out),primitive(&client,&device,total)))
+    }
 }
 #[derive(Debug)]
 struct NllBackward;
@@ -90,5 +114,26 @@ impl<C:CheckpointStrategy> NllLossBackend for Autodiff<Ascend,C> {
             },
             OpsKind::UnTracked(prep)=>prep.finish(forward(input.primitive,target,weight,options)?),
         })
+    }
+    fn nll_loss_with_total_weight(input:FloatTensor<Self>,target:IntTensor<Self>,weight:FloatTensor<Ascend>,options:NllLossOptions)
+        ->Result<(FloatTensor<Self>,FloatTensor<Self>)> {
+        validate_total_weight(options)?;
+        validate(&input.primitive,&target,&weight)?;
+        let client=input.primitive.client.clone();let device=input.primitive.device.clone();
+        let (out,total)=match NllBackward.prepare::<C>([input.node]).compute_bound().stateful() {
+            OpsKind::Tracked(prep)=>{
+                let [out,total,target,weight]=AscendRuntime::nll_loss_with_saved_inputs(&client,
+                    buffer(input.primitive.clone()),buffer(target),buffer(weight),options)?;
+                let total=primitive(&client,&device,total);
+                (prep.finish((input.primitive,primitive(&client,&device,target),primitive(&client,&device,weight),total.clone(),options),
+                    primitive(&client,&device,out)),total)
+            },
+            OpsKind::UnTracked(prep)=>{
+                let [out,total]=AscendRuntime::nll_loss(&client,buffer(input.primitive),buffer(target),buffer(weight),options)?;
+                (prep.finish(primitive(&client,&device,out)),primitive(&client,&device,total))
+            },
+        };
+        let total=Tensor::<Autodiff<Ascend,C>,1>::from_inner(Tensor::<Ascend,1>::from_primitive(TensorPrimitive::Float(total)));
+        Ok((out,unquantized(total.into_primitive())?))
     }
 }

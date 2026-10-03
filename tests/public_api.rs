@@ -5,6 +5,21 @@ use rust_ascend::{
 };
 
 #[test]
+fn causal_training_exposes_device_windows_loss_sum_and_total_weight() {
+    use rust_ascend::{Ascend,Autodiff,nn,driver::CannError,
+        tensor::api::{Tensor,Int},runtime::{AscendRuntime,ComputeClient,TensorBuffer}};
+    let _:fn(Tensor<Ascend,3>,nn::TokenWindow)->Result<Tensor<Ascend,2>,CannError>=nn::token_window::<Ascend>;
+    let _:fn(Tensor<Autodiff<Ascend>,3>,nn::TokenWindow)->Result<Tensor<Autodiff<Ascend>,2>,CannError>
+        =nn::token_window::<Autodiff<Ascend>>;
+    let _:fn(Tensor<Autodiff<Ascend>,3,Int>,nn::TokenWindow)->Result<Tensor<Autodiff<Ascend>,2,Int>,CannError>
+        =nn::token_window_int::<Autodiff<Ascend>>;
+    let _:fn(&ComputeClient<AscendRuntime>,TensorBuffer,nn::TokenWindow)->Result<TensorBuffer,CannError>
+        =AscendRuntime::token_window;
+    let config=nn::CausalCrossEntropyConfig::default();
+    assert_eq!(config.token_chunk_size,32);assert_eq!(config.ignore_index,-100);assert!(config.shift);
+}
+
+#[test]
 fn root_entry_exposes_compiler_driver_and_kernels() {
     let ir = row_programs::definition(RowProgram::RmsNorm, 64, 1e-5).unwrap();
     let compiled = AscendCompiler.compile(ir, &AscendOptions {

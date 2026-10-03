@@ -123,6 +123,34 @@ pub(super) struct State {
     gemm_artifacts: tempfile::TempDir,
 }
 impl State {
+    pub fn token_window(&mut self, plan: crate::tensor::window::WindowPlan,
+        resources: [AscendResource; 2], backward: bool) -> Result<()> {
+        let layouts = if backward { [plan.output.clone(), plan.source.clone()] }
+            else { [plan.source.clone(), plan.output.clone()] };
+        if resources.iter().zip(&layouts).any(|(r, l)| r.size != l.byte_len())
+            || (backward && plan.source.dtype() != crate::tensor::DType::F32) {
+            return Err(error("token window resource/dtype contract mismatch"));
+        }
+        let addresses = [self.pointer(&resources[0])? as usize, self.pointer(&resources[1])? as usize];
+        cast_ranges(addresses, &layouts)?;
+        self.session.bind()?;
+        if backward && layouts[1].byte_len() != 0 {
+            type Memset = unsafe extern "C" fn(*mut c_void, usize, i32, usize) -> i32;
+            // SAFETY: checked disjoint managed FP32 output; caller retains both guards.
+            let memset = unsafe { self.session.api.library().symbol::<Memset>(c"aclrtMemset")? };
+            check_status("aclrtMemset(token window)", unsafe { memset(addresses[1] as *mut c_void,
+                layouts[1].byte_len(), 0, layouts[1].byte_len()) })?;
+        }
+        for (source, target, bytes) in plan.spans() {
+            let (from, to) = if backward { (target, source) } else { (source, target) };
+            // SAFETY: the validated plan emits disjoint, in-bounds contiguous device spans.
+            // No labels/activations are copied to host or converted to floating indices.
+            check_status("aclrtMemcpy(token window)", unsafe { self.session.api.aclrtMemcpy(
+                (addresses[1] + to) as *mut c_void, bytes, (addresses[0] + from) as *const c_void,
+                bytes, ACL_MEMCPY_DEVICE_TO_DEVICE) })?;
+        }
+        Ok(())
+    }
     pub fn nll_loss(&mut self,layouts:Vec<crate::tensor::TensorLayout>,resources:Vec<AscendResource>,
         options:crate::tensor::NllLossOptions,backward:bool)->Result<()> {
         use crate::tensor::loss::{forward_layouts,backward_layout,NllPlan,NllGradPlan};

@@ -30,11 +30,15 @@ pub use heads::{RepeatKvBackend,repeat_kv_heads};
 pub use attention::{scaled_dot_product_attention_bf16_fp32,causal_attention_bf16_fp32,
     grouped_query_attention_bf16_fp32,causal_grouped_query_attention_bf16_fp32};
 mod mask;
+mod window;
+mod causal_lm;
+pub use window::{TokenWindow,TokenWindowBackend,token_window,token_window_int};
+pub use causal_lm::{CausalCrossEntropyConfig,CausalLoss,CausalLanguageModel};
 pub use mask::{CausalMaskBackend,causal_mask};
 pub use rotary::{RotaryBackend,rotary,RotaryPrefixBackend,rotary_prefix};
 pub use feed_forward::{lora_linear_bf16_fp32,swiglu_bf16_fp32};
 pub use embedding::{EmbeddingBackend,EmbeddingOptions,embedding,embedding_nd};
-pub use loss::{NllLossBackend,LossReduction,NllLossOptions,nll_loss,cross_entropy,weighted_cross_entropy};
+pub use loss::{NllLossBackend,LossReduction,NllLossOptions,nll_loss,nll_loss_with_total_weight,cross_entropy,weighted_cross_entropy};
 pub use crate::runtime::RotaryLayout;
 use crate::{Ascend, Autodiff, driver::CannError, runtime::{AscendRuntime, TensorBuffer, Transpose}};
 use ruda_autodiff::{checkpoint::{base::Checkpointer, strategy::CheckpointStrategy},

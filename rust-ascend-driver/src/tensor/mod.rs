@@ -14,6 +14,7 @@ mod owner;
 mod backward;
 mod embedding;
 mod loss;
+mod window;
 use crate::{CannApi, CannError, CannLibrary, check_status, sys::*};
 use ffi::*;
 use layout::invalid;
@@ -21,6 +22,7 @@ pub use layout::{DType, TensorLayout};
 pub use ops::ScalarValue;
 pub use embedding::EmbeddingOptions;
 pub use loss::{LossReduction,NllLossOptions};
+pub use window::TokenWindow;
 use std::{cell::Cell, ffi::c_void, ptr::NonNull, rc::Rc};
 
 /// Thread-local context/stream. `attach` borrows resources from the caller;
