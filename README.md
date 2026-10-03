@@ -111,6 +111,10 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `Autodiff<Ascend>` 保存 cos／sin，不保存输入值，通过原生转置 Jacobian 计算输入梯度；不计算固定表的梯度。运行时对应 `AscendRuntime::rotary` / `rotary_backward`。调用见 [rotary_tensor 示例](examples/rotary_tensor.rs)：`cargo run --locked --release --example rotary_tensor`。
 
+`nn::rotary_prefix(input, cos, sin, P, layout)` 扩展为正偶数 `P<=D` 的前缀旋转，其余末轴值在前向和反向中直接保留，不参与浮点运算。输入和固定表均为连续 FP32、rank-1～8；表的 rank 与输入相同、末轴为 P/2，前导轴可为 1 或与输入对应轴相同。公共整数索引直接读取紧凑广播表，不先展开表或转换位置索引为 FP32；例如输入 `[B,H,N,D]` 可使用 `[1,1,N,P/2]` 的共享序列表或 `[B,1,N,P/2]` 的逐 batch 表。支持两种配对布局、空前导轴及 RUDA 输入梯度，共享图梯度正常累积。旧 `rotary` 入口不变；频率、位置及缩放仍由调用方提供。
+
+运行时对应 `rotary_prefix` / `rotary_prefix_backward`，公共 IR 配置为 `PrefixRotarySpec`。调用见 [rotary_prefix_tensor 示例](examples/rotary_prefix_tensor.rs)：`cargo run --locked --release --example rotary_prefix_tensor`。
+
 ## LoRA 与 SwiGLU 组合
 
 `nn::lora_linear_bf16_fp32(input, weight, down, up, scale)` 计算 `X W^T + scale * (X A^T) B^T`，使用 FP32 参数／输出和显式 BF16 线性计算，复用 RUDA 自动求导及共享输入梯度累积。权重形状为 `W[N,K]`、`A[R,K]`、`B[N,R]`；M／N／K／R 为正且为 16 的倍数。scale 显式提供，base 或 adapter 是否冻结由调用方的 `require_grad` 决定，不自动修改权重、合并 adapter、添加 dropout 或 padding。原生前向 → 两个 adapter 梯度 → FP32 AdamW 调用见 [lora_tensor 示例](examples/lora_tensor.rs)：`cargo run --locked --release --example lora_tensor`。

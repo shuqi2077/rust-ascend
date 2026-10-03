@@ -49,7 +49,7 @@ pub use crate::tensor::EmbeddingOptions;
 pub use crate::tensor::{LossReduction,NllLossOptions};
 pub use rust_ascend_compiler::ascend::mask_programs::CausalMaskSpec;
 pub use rust_ascend_compiler::ascend::heads_programs::RepeatKvSpec;
-pub use rust_ascend_compiler::ascend::rotary_programs::RotaryLayout;
+pub use rust_ascend_compiler::ascend::rotary_programs::{RotaryLayout,PrefixRotarySpec};
 use rust_ascend_compiler::ascend::{AscendCompiler, AscendOptions, AscendTarget};
 use std::{
     ffi::OsString,
@@ -140,6 +140,14 @@ impl AscendRuntime {
     /// Sum the replicas' FP32 derivatives with batched device pair/tail reductions.
     pub fn repeat_kv_heads_backward(client:&ComputeClient<Self>,input_shape:Shape,query_heads:u32,grad:TensorBuffer)->Result<TensorBuffer> {
         heads::backward(client,input_shape,query_heads,grad)
+    }
+    /// Rotate the first P FP32 values, broadcasting singleton axes of fixed tables.
+    pub fn rotary_prefix(client:&ComputeClient<Self>,input:TensorBuffer,cos:TensorBuffer,sin:TensorBuffer,width:u32,layout:RotaryLayout)->Result<TensorBuffer> {
+        rotary::prefix(client,input,cos,sin,width,layout,false)
+    }
+    /// Prefix transpose Jacobian; values after P are passed through without arithmetic.
+    pub fn rotary_prefix_backward(client:&ComputeClient<Self>,grad:TensorBuffer,cos:TensorBuffer,sin:TensorBuffer,width:u32,layout:RotaryLayout)->Result<TensorBuffer> {
+        rotary::prefix(client,grad,cos,sin,width,layout,true)
     }
     /// Independent contiguous FP32/FP16/BF16/INT32/INT64 device-to-device snapshot.
     pub fn copy_contiguous(client:&ComputeClient<Self>,input:TensorBuffer)->Result<TensorBuffer> {

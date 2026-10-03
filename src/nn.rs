@@ -10,7 +10,7 @@ pub use attention::{scaled_dot_product_attention_bf16_fp32,causal_attention_bf16
     grouped_query_attention_bf16_fp32,causal_grouped_query_attention_bf16_fp32};
 mod mask;
 pub use mask::{CausalMaskBackend,causal_mask};
-pub use rotary::{RotaryBackend,rotary};
+pub use rotary::{RotaryBackend,rotary,RotaryPrefixBackend,rotary_prefix};
 pub use feed_forward::{lora_linear_bf16_fp32,swiglu_bf16_fp32};
 pub use embedding::{EmbeddingBackend,EmbeddingOptions,embedding,embedding_nd};
 pub use loss::{NllLossBackend,LossReduction,NllLossOptions,nll_loss,cross_entropy,weighted_cross_entropy};

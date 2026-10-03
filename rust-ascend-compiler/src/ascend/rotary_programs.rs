@@ -4,6 +4,24 @@ use ruda_core::{ir::*,kernel::{KernelArg,KernelDefinition,KernelOptions,Visibili
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum RotaryLayout {Interleaved,SplitHalf}
+/// Rotate only the first P values; fixed cos/sin tables broadcast singleton leading axes.
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct PrefixRotarySpec {pub input:Vec<u32>,pub table:Vec<u32>,pub rotary_width:u32,pub layout:RotaryLayout}
+impl PrefixRotarySpec {
+    pub fn elements(&self)->Result<(u64,u64)> {
+        if !(1..=8).contains(&self.input.len()) || self.table.len()!=self.input.len() {
+            return Err(invalid("rotary prefix requires equal input/table ranks within 1..8"));
+        }
+        let rank=self.input.len();let p=self.rotary_width;
+        if p==0 || p%2!=0 || p>self.input[rank-1] || self.table[rank-1]!=p/2
+            || self.input[..rank-1].iter().zip(&self.table[..rank-1]).any(|(&input,&table)|table!=1 && table!=input) {
+            return Err(invalid("rotary prefix requires positive even P<=D, table last axis P/2 and singleton or matching leading axes"));
+        }
+        let count=|shape:&[u32]|shape.iter().try_fold(1u64,|n,&d|n.checked_mul(d as u64)).filter(|&n|n<=u32::MAX as u64)
+            .ok_or_else(||invalid("rotary prefix complete domain exceeds u32"));
+        Ok((count(&self.input)?,count(&self.table)?))
+    }
+}
 struct Builder {kernel:KernelDefinition,next:u32}
 impl Builder {
     fn local(&mut self,ty:Type)->Variable {let id=self.next;self.next+=1;Variable::new(VariableKind::LocalConst{id},ty)}
@@ -78,6 +96,65 @@ pub fn definition(width:u32,elements:u64,layout:RotaryLayout,backward:bool)->Res
     Ok(builder.kernel)
 }
 
+/// Bindings [X, readonly paired X alias, cos, sin, Y]; tail values keep their exact bits.
+/// Both rotation and its transpose Jacobian use caller tables without expansion or frequency policy.
+pub fn prefix_definition(spec:&PrefixRotarySpec,backward:bool)->Result<KernelDefinition> {
+    let (elements,tables)=spec.elements()?;let rank=spec.input.len();let width=spec.input[rank-1] as u64;
+    let p=spec.rotary_width as u64;let half=p/2;
+    let mut b=Builder {kernel:KernelDefinition {buffers:[elements,elements,tables,tables,elements].into_iter().enumerate().map(|(id,size)|KernelArg {
+        id:id as u32,visibility:if id==4 {Visibility::ReadWrite} else {Visibility::Read},ty:fp32(),size:Some(size as usize),has_extended_meta:false}).collect(),
+        tensor_maps:vec![],scalars:vec![],ruda_dim:RudaDim::new_1d(64),body:Scope::root(false),options:KernelOptions {
+            kernel_name:format!("ruda_cann_rotary_prefix_{}_{}",if spec.layout==RotaryLayout::Interleaved {"interleaved"} else {"split"},if backward {"backward"} else {"forward"}),
+            ..Default::default()}},next:0};
+    let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());
+    let row=b.arithmetic(Arithmetic::Div,lane,integer(width),uint());
+    let col=b.arithmetic(Arithmetic::Modulo,lane,integer(width),uint());
+    // Tail lanes use valid prefix/table addresses too: Select does not suppress operand loads.
+    let prefix_col=b.arithmetic(Arithmetic::Modulo,col,integer(p),uint());
+    let (paired_col,pair,side)=match spec.layout {
+        RotaryLayout::Interleaved=>{
+            let pair=b.arithmetic(Arithmetic::Div,prefix_col,integer(2),uint());
+            let base=b.arithmetic(Arithmetic::Mul,pair,integer(2),uint());
+            let shifted=b.arithmetic(Arithmetic::Add,prefix_col,integer(1),uint());
+            let other=b.arithmetic(Arithmetic::Modulo,shifted,integer(2),uint());
+            let paired=b.arithmetic(Arithmetic::Add,base,other,uint());
+            let side=b.arithmetic(Arithmetic::Modulo,prefix_col,integer(2),uint());(paired,pair,side)
+        },
+        RotaryLayout::SplitHalf=>{
+            let shifted=b.arithmetic(Arithmetic::Add,prefix_col,integer(half),uint());
+            let paired=b.arithmetic(Arithmetic::Modulo,shifted,integer(p),uint());
+            let pair=b.arithmetic(Arithmetic::Modulo,prefix_col,integer(half),uint());
+            let side=b.arithmetic(Arithmetic::Div,prefix_col,integer(half),uint());(paired,pair,side)
+        },
+    };
+    let base=b.arithmetic(Arithmetic::Mul,row,integer(width),uint());
+    let paired=b.arithmetic(Arithmetic::Add,base,paired_col,uint());
+    let mut table=pair;
+    if elements!=0 {
+        let mut input_stride=width;let mut table_stride=half;
+        for axis in (0..rank-1).rev() {
+            if spec.table[axis]!=1 {
+                let coordinate=b.arithmetic(Arithmetic::Div,lane,integer(input_stride),uint());
+                let coordinate=b.arithmetic(Arithmetic::Modulo,coordinate,integer(spec.input[axis] as u64),uint());
+                let offset=b.arithmetic(Arithmetic::Mul,coordinate,integer(table_stride),uint());
+                table=b.arithmetic(Arithmetic::Add,table,offset,uint());
+            }
+            input_stride=input_stride.checked_mul(spec.input[axis] as u64).ok_or_else(||invalid("rotary input stride overflow"))?;
+            table_stride=table_stride.checked_mul(spec.table[axis] as u64).ok_or_else(||invalid("rotary table stride overflow"))?;
+        }
+    }
+    let x=b.read(0,lane);let other=b.read(1,paired);let cos=b.read(2,table);let sin=b.read(3,table);
+    let side=b.op(Operator::Cast(UnaryOperator {input:side}),fp32());
+    let side=b.arithmetic(Arithmetic::Mul,side,float(2.),fp32());let sign=b.arithmetic(Arithmetic::Sub,side,float(1.),fp32());
+    let direct=b.arithmetic(Arithmetic::Mul,x,cos,fp32());let rotation=b.arithmetic(Arithmetic::Mul,other,sin,fp32());
+    let rotation=b.arithmetic(Arithmetic::Mul,rotation,sign,fp32());
+    let rotated=b.arithmetic(if backward {Arithmetic::Sub} else {Arithmetic::Add},direct,rotation,fp32());
+    let cond=b.op(Comparison::Lower(BinaryOperator {lhs:col,rhs:integer(p)}),Type::scalar(ElemType::Bool));
+    let output=b.op(Operator::Select(Select {cond,then:rotated,or_else:x}),fp32());
+    b.kernel.body.instructions.push(Instruction::new(Operator::IndexAssign(IndexAssignOperator {index:lane,value:output,vector_size:0,unroll_factor:1}),
+        Variable::new(VariableKind::GlobalOutputArray(4),fp32())));Ok(b.kernel)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +217,64 @@ mod tests {
             }
         }}
         for (width,n) in [(0,0),(3,9),(6,7),(2,u32::MAX as u64+1)] {assert!(definition(width,n,RotaryLayout::SplitHalf,false).is_err());}
+    }
+    #[test]
+    fn prefix_rotation_broadcasts_table_coordinates_and_keeps_tail_bits() {
+        for (input,table,p) in [
+            (vec![11],vec![3],6),(vec![2,5,11],vec![1,5,3],6),
+            (vec![2,3,5,11],vec![1,1,5,3],6),(vec![2,3,5,11],vec![2,1,5,3],6),
+            (vec![2,3,5,11],vec![1,3,1,3],6),(vec![2,3,5,11],vec![2,3,5,3],6),
+            (vec![2,1,1,1,1,3,5,11],vec![1,1,1,1,1,1,5,3],6),
+            (vec![0,3,5,11],vec![1,1,5,3],6),(vec![2,3,0,11],vec![1,1,0,3],6),
+            (vec![2,3,5,6],vec![1,1,5,3],6),
+        ] {for layout in [RotaryLayout::Interleaved,RotaryLayout::SplitHalf] {
+            let spec=PrefixRotarySpec {input:input.clone(),table:table.clone(),rotary_width:p,layout};
+            let (n,t)=spec.elements().unwrap();let n=n as usize;let width=*input.last().unwrap() as usize;let half=p as usize/2;
+            let cos:Vec<f32>=(0..t).map(|i|0.7+(i%3) as f32/8.).collect();
+            let sin:Vec<f32>=(0..t).map(|i|-0.3+(i%5) as f32/16.).collect();
+            for backward in [false,true] {
+                let x:Vec<f32>=(0..n).map(|i|if i%width>=p as usize {
+                    f32::from_bits([0x80000000,0x7fc01234,0x7f800000,0xff800000][i%4])
+                } else {(i%17) as f32/8.-0.75}).collect();
+                let ir=prefix_definition(&spec,backward).unwrap();let y=evaluate(ir.clone(),n,[&x,&x,&cos,&sin]);
+                let compiled=AscendCompiler.compile(ir,&AscendOptions {target:Some(AscendTarget::Ascend950DT),elements:n as u64,..Default::default()},
+                    ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+                assert_eq!(compiled.bindings().iter().map(|b|b.bytes).collect::<Vec<_>>(),[n as u64*4,n as u64*4,t*4,t*4,n as u64*4]);
+                for row in 0..n/width {
+                    let mut remaining=row;let mut coordinates=vec![0;input.len()-1];
+                    for axis in (0..coordinates.len()).rev() {coordinates[axis]=remaining%input[axis] as usize;remaining/=input[axis] as usize;}
+                    let table_row=table[..table.len()-1].iter().zip(coordinates).fold(0usize,|row,(&dim,c)|row*dim as usize+if dim==1 {0} else {c});
+                    for pair in 0..half {
+                        let (a,b)=if layout==RotaryLayout::Interleaved {(row*width+pair*2,row*width+pair*2+1)} else {(row*width+pair,row*width+half+pair)};
+                        let c=cos[table_row*half+pair] as f64;let s=sin[table_row*half+pair] as f64;let sign=if backward {-1.} else {1.};
+                        for (i,expected) in [(a,x[a] as f64*c-sign*x[b] as f64*s),(b,x[b] as f64*c+sign*x[a] as f64*s)] {
+                            assert!((y[i] as f64-expected).abs()<3e-6+3e-6*expected.abs());
+                        }
+                    }
+                    for column in p as usize..width {assert_eq!(y[row*width+column].to_bits(),x[row*width+column].to_bits());}
+                }
+            }
+        }}
+    }
+    #[test]
+    fn prefix_rejects_invalid_broadcast_and_preserves_full_rotation() {
+        let spec=PrefixRotarySpec {input:vec![2,3,5,11],table:vec![1,1,5,3],rotary_width:6,layout:RotaryLayout::Interleaved};
+        for invalid in [PrefixRotarySpec {input:vec![],..spec.clone()},PrefixRotarySpec {table:vec![5,3],..spec.clone()},
+            PrefixRotarySpec {table:vec![1,2,5,3],..spec.clone()},PrefixRotarySpec {table:vec![1,1,5,6],..spec.clone()},
+            PrefixRotarySpec {rotary_width:0,..spec.clone()},PrefixRotarySpec {rotary_width:5,..spec.clone()},
+            PrefixRotarySpec {rotary_width:12,..spec.clone()},PrefixRotarySpec {input:vec![2,3,u32::MAX,11],table:vec![1,1,u32::MAX,3],..spec.clone()}] {
+            assert!(prefix_definition(&invalid,false).is_err());
+        }
+        for layout in [RotaryLayout::Interleaved,RotaryLayout::SplitHalf] {for backward in [false,true] {
+            let x:Vec<f32>=(0..18).map(|i|i as f32/8.).collect();let cos=vec![0.75;9];let sin=vec![0.25;9];
+            let spec=PrefixRotarySpec {input:vec![3,6],table:vec![3,3],rotary_width:6,layout};
+            let expected=evaluate(definition(6,18,layout,backward).unwrap(),18,[&x,&x,&cos,&sin]);
+            let actual=evaluate(prefix_definition(&spec,backward).unwrap(),18,[&x,&x,&cos,&sin]);
+            assert_eq!(actual.iter().map(|x|x.to_bits()).collect::<Vec<_>>(),expected.iter().map(|x|x.to_bits()).collect::<Vec<_>>());
+        }}
+        let large=PrefixRotarySpec {input:vec![2,3,8192,128],table:vec![1,1,8192,32],rotary_width:64,..spec};
+        let n=large.elements().unwrap().0;
+        AscendCompiler.compile(prefix_definition(&large,false).unwrap(),&AscendOptions {target:Some(AscendTarget::Ascend950DT),elements:n,..Default::default()},
+            ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
     }
 }
