@@ -1,7 +1,7 @@
 use super::*;
 use std::ffi::CStr;
 
-type CastPlan = unsafe extern "C" fn(
+pub(super) type CastPlan = unsafe extern "C" fn(
     *const AclTensor, i32, *mut AclTensor, *mut u64, *mut *mut AclOpExecutor,
 ) -> Status;
 type SiluGradPlan = unsafe extern "C" fn(

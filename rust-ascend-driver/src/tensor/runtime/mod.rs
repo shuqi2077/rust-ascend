@@ -6,6 +6,8 @@ mod normalization;
 mod matrix;
 mod rows;
 mod elementwise;
+mod conversion;
+mod descriptor;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -119,6 +121,18 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Explicit device-side FP32/FP16/BF16 conversion through CANN ACLNN Cast.
+    /// Shape is retained; input and output must be contiguous. No host data conversion.
+    pub fn cast(client: &ComputeClient<Self>, input: TensorBuffer, dtype: ruda_core::tensor::DType)
+        -> Result<TensorBuffer> {
+        conversion::cast(client,input,dtype)
+    }
+
+    /// Convert into existing, distinct output storage with the same shape.
+    pub fn cast_into(client: &ComputeClient<Self>, input: TensorBuffer, output: TensorBuffer) -> Result<()> {
+        conversion::cast_into(client,input,output)
+    }
+
     /// Native FP32 SiLU(gate) * up on equal-shaped contiguous buffers.
     pub fn silu_mul(client: &ComputeClient<Self>, gate: TensorBuffer, up: TensorBuffer) -> Result<TensorBuffer> {
         elementwise::silu_mul(client,gate,up)

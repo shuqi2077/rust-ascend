@@ -123,6 +123,29 @@ pub(super) struct State {
     gemm_artifacts: tempfile::TempDir,
 }
 impl State {
+    pub fn cast(&mut self,layouts:[crate::tensor::TensorLayout;2],resources:[AscendResource;2])->Result<()> {
+        if layouts[0].shape()!=layouts[1].shape() || resources.iter().zip(&layouts).any(|(r,l)|r.size!=l.byte_len()) {
+            return Err(error("Cast layout/resource contract mismatch"));
+        }
+        let addresses=[self.pointer(&resources[0])? as usize,self.pointer(&resources[1])? as usize];
+        cast_ranges(addresses,&layouts)?;
+        if layouts[0].byte_len()==0 {return Ok(());}
+        let [input,output]=layouts;
+        let target=output.dtype();
+        // SAFETY: both managed allocations belong to this worker. The caller retains
+        // their guards until the existing synchronized ACLNN executor returns.
+        let input=unsafe {super::descriptor::Descriptor::new(&self.session,input,addresses[0] as *mut c_void)?};
+        let output=unsafe {super::descriptor::Descriptor::new(&self.session,output,addresses[1] as *mut c_void)?};
+        // The target dtype remains explicit; no native-IR or CPU fallback is selected.
+        unsafe {
+            let plan:crate::tensor::backward::CastPlan=self.session.ops.get(c"aclnnCastGetWorkspaceSize")?;
+            let run=self.session.ops.get(c"aclnnCast")?;
+            self.session.execute("aclnnCast",run,|size,executor| {
+                plan(input.handle.as_ptr(),target as i32,output.handle.as_ptr(),size,executor)
+            })
+        }
+    }
+
     pub fn allocate(&mut self, id: StorageId, size: usize) -> Result<()> {
         self.buffers.insert(id, self.session.allocate(size)?);
         Ok(())
@@ -220,6 +243,18 @@ impl State {
     }
 }
 
+fn cast_ranges(addresses:[usize;2],layouts:&[crate::tensor::TensorLayout;2])->Result<()> {
+    let mut ends=[0;2];
+    for i in 0..2 {
+        if addresses[i]==0 || addresses[i]%layouts[i].dtype().bytes()!=0 {return Err(error("Cast address is null or unaligned"));}
+        ends[i]=addresses[i].checked_add(layouts[i].byte_len()).ok_or_else(||error("Cast address range overflow"))?;
+    }
+    if layouts[0].byte_len()!=0 && addresses[0]<ends[1] && addresses[1]<ends[0] {
+        return Err(error("Cast input and output storage overlap"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +263,18 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Worker>();
         assert_send_sync::<AscendResource>();
+    }
+    #[test]
+    fn cast_ranges_reject_overlap_alignment_and_overflow_before_any_execution() {
+        use crate::tensor::{DType,TensorLayout};
+        let layouts=[TensorLayout::contiguous(&[65],DType::BF16).unwrap(),
+            TensorLayout::contiguous(&[65],DType::F32).unwrap()];
+        assert!(cast_ranges([4096,8192],&layouts).is_ok());
+        assert!(cast_ranges([4096,4096],&layouts).is_err());
+        assert!(cast_ranges([4096,4224],&layouts).is_err());
+        assert!(cast_ranges([4097,8192],&layouts).is_err());
+        assert!(cast_ranges([4096,8194],&layouts).is_err());
+        assert!(cast_ranges([0,8192],&layouts).is_err());
+        assert!(cast_ranges([usize::MAX-1,8192],&layouts).is_err());
     }
 }
