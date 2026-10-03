@@ -2,6 +2,7 @@ use ruda_kernel::{
     dsl::{InfoBuilder, prelude::*},
     library::tensor::{AsViewExpand, AsViewMutExpand, layout::plain::PlainLayout},
 };
+use ruda_kernel::dsl as kernel_dsl;
 use ruprim::elementwise::binary::numeric::{AddOp, kernel_binop, kernel_scalar_binop};
 use rust_ascend::core::ir::FloatKind;
 use rust_ascend::{
@@ -11,8 +12,19 @@ use rust_ascend::{
 
 type E = Vector<f32, Const<1>>;
 
+#[ruda(launch_unchecked,address_type="dynamic")]
+fn scalar_integer_power<F:Float,I:Int,N:Size>(
+    input:&ruda_kernel::library::tensor::layout::linear::LinearView<Vector<F,N>>,
+    exponent:InputScalar,
+    out:&mut ruda_kernel::library::tensor::layout::linear::LinearView<Vector<F,N>,ReadWrite>,
+    #[define(F,I)] _dtypes:[StorageType;2],
+) where F:Powi<I> {
+    if !out.is_in_bounds(ABSOLUTE_POS) {terminate!();}
+    out[ABSOLUTE_POS]=Vector::powi(input[ABSOLUTE_POS],Vector::new(exponent.get::<I>()));
+}
+
 #[test]
-fn actual_ruprim_signed_integer_scalar_power_compiles() {
+fn shared_frontend_signed_integer_scalar_power_compiles() {
     use rust_ascend::core::ir::IntKind;
     for exponent in [-3i32,3,7] {
         let mut builder=KernelBuilder::default();let address=AddressType::U32;address.register(&mut builder.scope);
@@ -23,8 +35,8 @@ fn actual_ruprim_signed_integer_scalar_power_compiles() {
         let len=layout_scalar(&mut builder,&mut info,address,65);
         let layout=PlainLayout::__expand_new(&mut builder.scope,len);
         let output=output.__expand_view_mut_method(&mut builder.scope,layout.into());
-        ruprim::elementwise::binary::integer_power::scalar_kernel::expand::<f32,i32,Const<1>>(
-            &mut builder.scope,input,scalar,output,[FloatKind::F32.into(),IntKind::I32.into()]);
+        scalar_integer_power::expand::<f32,i32,Const<1>>(
+            &mut builder.scope,1,input,scalar,output,[FloatKind::F32.into(),IntKind::I32.into()]);
         let definition=builder.build(KernelSettings::default().address_type(address).ruda_dim(RudaDim::new_1d(64)).kernel_name("integer_power"));
         let packed=info.finish(address);
         let definition=arguments::specialize(definition,&packed.data,packed.dynamic_metadata_offset,address.unsigned_type()).unwrap();
