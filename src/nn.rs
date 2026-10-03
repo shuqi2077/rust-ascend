@@ -7,6 +7,9 @@ pub use padded_attention::{scaled_dot_product_attention_padded_bf16_fp32,causal_
     grouped_query_attention_padded_bf16_fp32,causal_grouped_query_attention_padded_bf16_fp32};
 mod rotary;
 mod feed_forward;
+mod gelu_ffn;
+pub use gelu_ffn::{GeluMode,gelu_mlp_padded_bf16_fp32_nd,geglu_padded_bf16_fp32_nd,
+    gelu_mlp_frozen_padded_bf16_fp32_nd,geglu_frozen_padded_bf16_fp32_nd};
 mod embedding;
 mod loss;
 mod heads;

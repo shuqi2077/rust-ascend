@@ -125,6 +125,8 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `nn::swiglu_bf16_fp32(input, gate, up, down)` 计算 `(SiLU(X Wgate^T) * (X Wup^T)) Wdown^T`，组合原生线性计算、FP32 SiLU 门控乘法与 RUDA 求导。gate／up 为 `[H,K]`，down 为 `[N,H]`；M／N／K／H 为正且为 16 的倍数。不推断模型维度、bias、dropout、residual 或 normalization。调用见 [swiglu_tensor 示例](examples/swiglu_tensor.rs)：`cargo run --locked --release --example swiglu_tensor`。
 
+`nn::gelu_mlp_padded_bf16_fp32_nd` 计算 `GELU(X Wup^T) Wdown^T`，`nn::geglu_padded_bf16_fp32_nd` 计算 `(GELU(X Wgate^T) * (X Wup^T)) Wdown^T`。两者接收 FP32 `X[...,K]` 和可训练 FP32 权重，支持 rank 1～8、正 token 轴以及不对齐的 K／H／N；原生矩阵计算为显式 BF16，层间裁回逻辑形状后执行 FP32 GELU。`GeluMode::Exact`／`Tanh` 显式选择并复用已有 RUDA GELU 前后向定义；共享分支及参数梯度由 RUDA 图累积。对应 `gelu_mlp_frozen_padded_bf16_fp32_nd`／`geglu_frozen_padded_bf16_fp32_nd` 使用固定 BF16 权重，只计算输入梯度，不将权重展开为 FP32。沿用 padded GEMM 的域限制，不支持空 token 轴，不隐式增加 bias、dropout、residual 或 normalization。调用见 [gelu_ffn_tensor 示例](examples/gelu_ffn_tensor.rs)：`cargo run --locked --release --example gelu_ffn_tensor`。
+
 ## 显式矩阵 padding 与任意正 LoRA rank
 
 `nn::matmul_padded_bf16_fp32(a, b, ta, tb)` 与 `nn::linear_padded_bf16_fp32(input, weight)` 接收连续 FP32 参数，支持正 M／N／K 不为 16 倍数的逻辑尺寸。设备端用 ACLNN Cast 转成 BF16，再用 ACLNN ConstantPadNd 补零到 16 对齐，矩阵计算仍执行本仓库的 Rust 原生 GEMM；FP32 输出和两侧梯度裁回原始物理形状。Matmul 支持 rank-2／相同 batch 的 rank-3 和四种转置组合，不做 batch 广播；对齐后的矩阵轴不超过 INT32_MAX，batch 为 1～4096，沿用原生调度器的 tile 域限制。
