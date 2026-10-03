@@ -3,11 +3,12 @@ use super::{Result,invalid};
 use ruda_core::{ir::*,kernel::{KernelArg,KernelDefinition,KernelOptions,Visibility},launch::RudaDim};
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum WideStage {CopyTile,ExpTile,SoftmaxTile,LogSoftmaxTile,DotTile,SoftmaxBackwardTile,LogSoftmaxBackwardTile}
+pub enum WideStage {CopyTile,ExpTile,SoftmaxTile,LogSoftmaxTile,DotTile,SoftmaxBackwardTile,LogSoftmaxBackwardTile,SumBackwardTile,MeanBackwardTile}
 impl WideStage {
-    pub fn partial(self)->bool {matches!(self,Self::SoftmaxTile|Self::LogSoftmaxTile|Self::SoftmaxBackwardTile|Self::LogSoftmaxBackwardTile)}
+    pub fn partial(self)->bool {matches!(self,Self::SoftmaxTile|Self::LogSoftmaxTile|Self::SoftmaxBackwardTile|Self::LogSoftmaxBackwardTile|Self::SumBackwardTile|Self::MeanBackwardTile)}
     fn name(self)->&'static str {match self {Self::CopyTile=>"copy",Self::ExpTile=>"exp",Self::SoftmaxTile=>"softmax",
-        Self::LogSoftmaxTile=>"log_softmax",Self::DotTile=>"dot",Self::SoftmaxBackwardTile=>"softmax_backward",Self::LogSoftmaxBackwardTile=>"log_softmax_backward"}}
+        Self::LogSoftmaxTile=>"log_softmax",Self::DotTile=>"dot",Self::SoftmaxBackwardTile=>"softmax_backward",Self::LogSoftmaxBackwardTile=>"log_softmax_backward",
+        Self::SumBackwardTile=>"sum_backward",Self::MeanBackwardTile=>"mean_backward"}}
 }
 fn f()->Type {Type::new(FloatKind::F32.into())}
 fn u()->Type {Type::new(UIntKind::U64.into())}
@@ -46,6 +47,7 @@ pub fn definition(stage:WideStage,rows:u64,width:u32,start:u32,columns:u32)->Res
         WideStage::CopyTile=>vec![full,tile],WideStage::ExpTile=>vec![full,rows,tile],
         WideStage::SoftmaxTile=>vec![tile,rows,full],WideStage::LogSoftmaxTile=>vec![full,rows,rows,full],
         WideStage::DotTile=>vec![full,full,tile],WideStage::SoftmaxBackwardTile|WideStage::LogSoftmaxBackwardTile=>vec![full,full,rows,full],
+        WideStage::SumBackwardTile|WideStage::MeanBackwardTile=>vec![rows,full],
     };
     let mut builder=Builder::new(format!("ruda_cann_wide_{}",stage.name()),&sizes);
     let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());
@@ -80,6 +82,11 @@ pub fn definition(stage:WideStage,rows:u64,width:u32,start:u32,columns:u32)->Res
             let exp=builder.unary(Arithmetic::Exp,y);let term=builder.binary(Arithmetic::Mul,exp,sum,f());
             builder.binary(Arithmetic::Sub,grad,term,f())
         },
+        WideStage::SumBackwardTile|WideStage::MeanBackwardTile=>{
+            let grad=builder.read(0,row);
+            if stage==WideStage::MeanBackwardTile {builder.binary(Arithmetic::Div,grad,Variable::constant(ConstantValue::Float(width as f32 as f64),f()),f())}
+            else {grad}
+        },
     };
     builder.write(if stage.partial() {index} else {lane},output);
     Ok(builder.kernel)
@@ -97,6 +104,14 @@ pub fn zero_definition(elements:u64)->Result<KernelDefinition> {
     let mut builder=Builder::new("ruda_cann_wide_zero".into(),&[elements]);
     builder.write(Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into()),Variable::constant(ConstantValue::Float(0.),f()));
     Ok(builder.kernel)
+}
+/// Divide completed row sums once by the full width, not by individual tile widths.
+pub fn mean_definition(rows:u64,width:u32)->Result<KernelDefinition> {
+    if width==0 || rows>u32::MAX as u64 {return Err(invalid("mean requires positive width and a row count within u32"));}
+    let mut builder=Builder::new("ruda_cann_wide_mean".into(),&[rows;2]);
+    let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());let value=builder.read(0,lane);
+    let result=builder.binary(Arithmetic::Div,value,Variable::constant(ConstantValue::Float(width as f32 as f64),f()),f());
+    builder.write(lane,result);Ok(builder.kernel)
 }
 
 #[cfg(test)]
@@ -131,7 +146,7 @@ mod tests {
     #[test]
     fn every_wide_stage_compiles_with_explicit_output_contract_and_tail_bounds() {
         let stages=[WideStage::CopyTile,WideStage::ExpTile,WideStage::SoftmaxTile,WideStage::LogSoftmaxTile,
-            WideStage::DotTile,WideStage::SoftmaxBackwardTile,WideStage::LogSoftmaxBackwardTile];
+            WideStage::DotTile,WideStage::SoftmaxBackwardTile,WideStage::LogSoftmaxBackwardTile,WideStage::SumBackwardTile,WideStage::MeanBackwardTile];
         for width in [4128u32,8192,8224] {for rows in [0u64,1,2] {for start in (0..width).step_by(4096) {
             let columns=(width-start).min(4096);let n=rows*columns as u64;
             for stage in stages {
@@ -159,6 +174,7 @@ mod tests {
         assert!(AscendCompiler.compile_partial_map(bad,&options(64),ExecutionMode::Checked,UIntKind::U64.into()).is_err());
         assert!(AscendCompiler.compile(merge_definition(3,true).unwrap(),&options(3),ExecutionMode::Checked,UIntKind::U64.into()).unwrap().source().contains("AscendC::Max("));
         assert!(AscendCompiler.compile(zero_definition(65).unwrap(),&options(65),ExecutionMode::Checked,UIntKind::U64.into()).is_ok());
+        assert!(AscendCompiler.compile(mean_definition(3,8224).unwrap(),&options(3),ExecutionMode::Checked,UIntKind::U64.into()).is_ok());
     }
     #[test]
     fn wide_softmax_and_backward_tiles_match_independent_fp64_equations() {
@@ -210,5 +226,34 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn wide_sum_mean_and_broadcast_gradients_keep_the_full_width_divisor() {
+        for width in [4128usize,8192,8224] {for rows in [1usize,3] {
+            let x:Vec<f32>=(0..rows*width).map(|i|(i%19) as f32/8.-0.75).collect();
+            let grad:Vec<f32>=(0..rows).map(|i|i as f32*0.25-0.5).collect();let mut sum=vec![0.;rows];
+            for start in (0..width).step_by(4096) {
+                let columns=(width-start).min(4096);let mut copied=vec![0.;rows*columns];
+                tile(WideStage::CopyTile,rows,width,start,columns,&[&x],&mut copied);
+                let current:Vec<_>=copied.chunks(columns).map(|row|row.iter().sum::<f32>()).collect();
+                let mut merged=vec![0.;rows];evaluate(merge_definition(rows as u64,false).unwrap(),rows,&[&sum,&current],&mut merged,false);sum=merged;
+            }
+            let mut mean=vec![0.;rows];evaluate(mean_definition(rows as u64,width as u32).unwrap(),rows,&[&sum],&mut mean,false);
+            for row in 0..rows {
+                let reference=x[row*width..(row+1)*width].iter().map(|&x|x as f64).sum::<f64>();
+                assert_eq!(sum[row] as f64,reference);
+                assert!((mean[row] as f64-reference/width as f64).abs()<1e-6);
+            }
+            for averaged in [false,true] {
+                let mut output=vec![f32::NAN;rows*width];
+                for start in (0..width).step_by(4096) {
+                    tile(if averaged {WideStage::MeanBackwardTile} else {WideStage::SumBackwardTile},rows,width,start,(width-start).min(4096),&[&grad],&mut output);
+                }
+                for (i,&x) in output.iter().enumerate() {
+                    let expected=grad[i/width] as f64/if averaged {width as f64} else {1.};
+                    assert!((x as f64-expected).abs()<1e-7);
+                }
+            }
+        }}
     }
 }

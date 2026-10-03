@@ -104,6 +104,7 @@ fn reduce_last<B: ReductionBackend, const D: usize>(input: Tensor<B,D>, mean: bo
 }
 
 /// Native last-axis FP32 Softmax on a RUDA tensor, including RUDA autodiff.
+/// Positive widths divisible by 32 use tiled native passes above 4096 columns.
 pub fn softmax<B: SoftmaxBackend, const D: usize>(input: Tensor<B,D>) -> Result<Tensor<B,D>> {
     normalized_exponential(input, false)
 }

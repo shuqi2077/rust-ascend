@@ -160,7 +160,7 @@ impl AscendRuntime {
     }
 
     /// Native FP32 last-axis sum, retaining the axis with size one.
-    /// Width must be 32..4096 and divisible by 32; leading dimensions are preserved.
+    /// Width must be positive and divisible by 32; wide rows use native tile reductions.
     pub fn sum_last(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
         rows::reduce(client,input,false)
     }

@@ -77,7 +77,7 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `nn::scaled_dot_product_attention_bf16_fp32(q, k, v, scale, additive_mask)` 接收 FP32 `Q[B,M,D]`、`K[B,N,D]`、`V[B,N,Dv]`，组合原生 BF16 矩阵乘、FP32 scale／可选加性 mask、原生 FP32 Softmax 与第二次原生矩阵乘；输出及 Q／K／V／可训练 mask 的梯度接入 RUDA 自动求导。scale 显式提供，mask 为同设备 FP32 `[B,M,N]`，可用负无穷屏蔽 key，不做 mask 广播。
 
-该入口物化 score 和 probability 矩阵，不是 FlashAttention；没有隐式 causal mask、dropout、GQA head 重复或 padding。各 batch 数必须相同，M／D／Dv 为正且为 16 的倍数，N 为 32～4096 且为 32 的倍数；矩阵计算与反向使用前述显式 BF16 精度模式。调用见 [attention_tensor 示例](examples/attention_tensor.rs)：`cargo run --locked --release --example attention_tensor`。
+该入口物化 score 和 probability 矩阵，不是 FlashAttention；没有隐式 causal mask、dropout、GQA head 重复或 padding。各 batch 数必须相同，M／D／Dv 为正且为 16 的倍数，N 为正且为 32 的倍数，各矩阵轴不超过 INT32_MAX，score 总元素数不超过 u32；N 超过 4096 时接入原生分块 Softmax。矩阵计算与反向使用前述显式 BF16 精度模式。调用见 [attention_tensor 示例](examples/attention_tensor.rs)：`cargo run --locked --release --example attention_tensor`。
 
 ## 原生旋转位置编码
 
@@ -113,7 +113,7 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 ## 原生 Sum 与 Mean
 
-`AscendRuntime::sum_last` / `mean_last` 归约连续 FP32 输入的最后一维，保留该维且长度变为 1；宽度为 32～4096 且是 32 的倍数。对应反向在设备端广播每行上游梯度，Mean 再除以行宽；支持空 batch，不保存输入值，不调用 ACLNN。
+`AscendRuntime::sum_last` / `mean_last` 归约连续 FP32 输入的最后一维，保留该维且长度变为 1；宽度为正且是 32 的倍数，总元素数不超过 u32。超过 4096 列时在设备端分块归约并合并全行和，Mean 最后除以完整行宽。对应反向在设备端广播每行上游梯度，Mean 再除以行宽；支持空 batch，不保存输入值，不调用 ACLNN。
 
 `rust_ascend::nn::sum_last` / `mean_last` 接收 `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，接入现有 RUDA 计算图和梯度累积。这是显式原生入口，不改变张量原有 `sum_dim` / `mean_dim` 的调度。调用见 [reduction_tensor 示例](examples/reduction_tensor.rs)：`cargo run --locked --release --example reduction_tensor`。
 
@@ -181,7 +181,7 @@ python tools/ascend/build_deepgemm.py --emit-only --out ./target/bf16-source
 ## 支持范围
 
 - 公共编译器：连续 FP32 逐元素程序；行宽为 32～4096、且为 32 的倍数。
-- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度；RMSNorm 和 LayerNorm 另提供共享 weight 梯度。运行时 Softmax/LogSoftmax 及反向另支持超过 4096 列的原生分块路径，其余行操作仍遵循 32～4096 列限制。
+- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度；RMSNorm 和 LayerNorm 另提供共享 weight 梯度。运行时 Sum/Mean、Softmax/LogSoftmax 及反向另支持超过 4096 列的原生分块路径，其余行操作仍遵循 32～4096 列限制。
 - BF16 矩阵：direct-store Dense/Batched NN/NT/TN/TT、对齐的 MGrouped NT，BF16/FP32 输出。
 - 设备代码目标为 Ascend950DT / dav-c310；不自动推断或替换目标型号。
 - Rust 程序生成 CCE，再由 Bisheng 编译为设备机器码，不是直接 Rust → 昇腾 ISA。

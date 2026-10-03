@@ -10,13 +10,8 @@ use crate::{driver::CannError,runtime::Transpose,tensor::{DType,api::Tensor}};
 pub fn scaled_dot_product_attention_bf16_fp32<B:MatmulBf16Fp32Backend+SoftmaxBackend>(
     query:Tensor<B,3>,key:Tensor<B,3>,value:Tensor<B,3>,scale:f32,
     additive_mask:Option<Tensor<B,3>>)->Result<Tensor<B,3>> {
-    let [batch,m,d]=query.dims();let [kb,n,kd]=key.dims();let [vb,vn,dv]=value.dims();
-    if batch==0 || batch>4096 || kb!=batch || vb!=batch || kd!=d || vn!=n
-        || [m,d,dv].iter().any(|&size|size==0 || size%16!=0 || size>i32::MAX as usize)
-        || !(32..=4096).contains(&n) || n%32!=0 || !scale.is_finite()
-        || batch.checked_mul(m).and_then(|size|size.checked_mul(n)).is_none_or(|size|size>u32::MAX as usize) {
-        return Err(CannError::InvalidTensor("attention requires matching batches/contractions, aligned positive matrix dimensions, N=32..4096 divisible by 32, a finite FP32 scale and scores within u32".into()));
-    }
+    validate_dimensions(query.dims(),key.dims(),value.dims(),scale)?;
+    let [batch,m,_]=query.dims();let [_,n,_]=key.dims();
     let device=query.device();
     if query.dtype()!=DType::F32 || key.dtype()!=DType::F32 || value.dtype()!=DType::F32
         || key.device()!=device || value.device()!=device {
@@ -31,4 +26,30 @@ pub fn scaled_dot_product_attention_bf16_fp32<B:MatmulBf16Fp32Backend+SoftmaxBac
     if let Some(mask)=additive_mask {scores=scores+mask;}
     let probabilities=softmax(scores)?;
     matmul_bf16_fp32(probabilities,value,Transpose::No,Transpose::No)
+}
+fn validate_dimensions(query:[usize;3],key:[usize;3],value:[usize;3],scale:f32)->Result<()> {
+    let [batch,m,d]=query;let [kb,n,kd]=key;let [vb,vn,dv]=value;
+    if batch==0 || batch>4096 || kb!=batch || vb!=batch || kd!=d || vn!=n
+        || [m,d,dv].iter().any(|&size|size==0 || size%16!=0 || size>i32::MAX as usize)
+        || n==0 || n>i32::MAX as usize || n%32!=0 || !scale.is_finite()
+        || batch.checked_mul(m).and_then(|size|size.checked_mul(n)).is_none_or(|size|size>u32::MAX as usize) {
+        return Err(CannError::InvalidTensor("attention requires matching batches/contractions, aligned positive matrix dimensions, positive N divisible by 32 within INT32_MAX, a finite FP32 scale and scores within u32".into()));
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn long_context_attention_uses_aligned_shapes_without_a_4096_key_cap() {
+        for n in [32,4096,4128,8192,32768] {
+            assert!(validate_dimensions([2,32,16],[2,n,16],[2,n,32],0.25).is_ok());
+        }
+        for n in [0,31,4097,i32::MAX as usize+1] {
+            assert!(validate_dimensions([2,32,16],[2,n,16],[2,n,32],0.25).is_err());
+        }
+        assert!(validate_dimensions([4096,65536,16],[4096,8192,16],[4096,8192,16],0.25).is_err());
+        assert!(validate_dimensions([2,32,16],[1,8192,16],[2,8192,32],0.25).is_err());
+        assert!(validate_dimensions([2,32,16],[2,8192,16],[2,8192,32],f32::NAN).is_err());
+    }
 }

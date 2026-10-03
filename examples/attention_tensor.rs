@@ -20,10 +20,10 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
     }
     // SAFETY: this executable exclusively owns the process-wide ACL context.
     let device=unsafe {AscendRuntime::initialize_exclusive(options)?};
-    let (batch,m,n,d,dv)=(2,32,32,16,16);let scale=0.25f32;
-    for masked in [false,true] {
+    let (batch,m,d,dv)=(2,32,16,16);let scale=0.25f32;
+    for n in [32,8192] {for masked in [false,true] {
         // Orthogonal nonzero Q/K give zero scores, but nonzero Q and K derivatives.
-        // Uniform probabilities (1/32 or 1/16) and this case's derivatives are BF16-exact.
+        // Power-of-two active widths give exactly representable BF16 probabilities.
         let mut q=vec![0f32;batch*m*d];let mut k=vec![0f32;batch*n*d];
         let mut v=vec![0f32;batch*n*dv];let mut dy=vec![0f32;batch*m*dv];
         let mut mask=vec![0f32;batch*m*n];let active=if masked {n/2} else {n};
@@ -64,8 +64,8 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
         close(key.grad(&gradients).ok_or("missing K gradient")?.into_data().as_slice::<f32>()?,&gk,"dK")?;
         close(value.grad(&gradients).ok_or("missing V gradient")?.into_data().as_slice::<f32>()?,&gv,"dV")?;
         if let Some(mask)=additive {close(mask.grad(&gradients).ok_or("missing mask gradient")?.into_data().as_slice::<f32>()?,&gm,"dMask")?;}
-        println!("ASCEND_ATTENTION_TENSOR_CASE masked={masked} passed=true");
-    }
-    println!("ASCEND_ATTENTION_TENSOR_DEVICE_OK cases=2");
+        println!("ASCEND_ATTENTION_TENSOR_CASE n={n} masked={masked} passed=true");
+    }}
+    println!("ASCEND_ATTENTION_TENSOR_DEVICE_OK cases=4");
     Ok(())
 }

@@ -1,17 +1,21 @@
 use super::{AscendRuntime,ComputeClient,Result,TensorBuffer,error,contiguous,
     normalization::{buffer,check_for,row,run}};
-use ruda_core::{compiler::Compiler,ir::UIntKind,kernel::KernelDefinition,launch::ExecutionMode,tensor::{DType,Shape}};
+use ruda_core::{compiler::Compiler,ir::UIntKind,kernel::KernelDefinition,launch::ExecutionMode,tensor::{DType,Shape,Strides}};
 use rust_ascend_compiler::ascend::{AscendCompiler,AscendOptions,AscendTarget,row_programs::RowProgram,
-    wide_programs::{self,WideStage}};
+    programs::{self,MapProgram},wide_programs::{self,WideStage}};
 const TILE:usize=4096;
 type Client=ComputeClient<AscendRuntime>;
 pub(super) fn layout(input:&TensorBuffer)->Result<(usize,u32)> {
-    if input.dtype!=DType::F32 || !contiguous(&input.shape,&input.strides) {return Err(error("wide rows require contiguous FP32"));}
-    let &width=input.shape.last().ok_or_else(||error("wide rows require a last axis"))?;
+    let result=layout_for(&input.shape,&input.strides,input.dtype)?;
+    check_for(input,&input.shape,"wide rows")?;Ok(result)
+}
+fn layout_for(shape:&[usize],strides:&[usize],dtype:DType)->Result<(usize,u32)> {
+    if dtype!=DType::F32 || !contiguous(shape,strides) {return Err(error("wide rows require contiguous FP32"));}
+    let &width=shape.last().ok_or_else(||error("wide rows require a last axis"))?;
     if width==0 || width%32!=0 || width>u32::MAX as usize {return Err(error("wide row width must be positive and divisible by 32 within u32"));}
-    let rows=input.shape[..input.shape.len()-1].iter().try_fold(1usize,|n,&d|n.checked_mul(d)).ok_or_else(||error("wide row shape overflow"))?;
+    let rows=shape[..shape.len()-1].iter().try_fold(1usize,|n,&d|n.checked_mul(d)).ok_or_else(||error("wide row shape overflow"))?;
     if rows.checked_mul(width).is_none_or(|n|n>u32::MAX as usize) {return Err(error("wide row element count exceeds u32"));}
-    check_for(input,&input.shape,"wide rows")?;Ok((rows,width as u32))
+    Ok((rows,width as u32))
 }
 fn compile(definition:KernelDefinition,elements:u64,partial:bool)->Result<rust_ascend_compiler::ascend::AscendKernel> {
     let options=AscendOptions {target:Some(AscendTarget::Ascend950DT),elements,..Default::default()};
@@ -33,6 +37,32 @@ fn merge(client:&Client,a:TensorBuffer,b:TensorBuffer,rows:usize,max:bool)->Resu
 fn reduce(client:&Client,value:&TensorBuffer,rows:usize,columns:u32,max:bool)->Result<TensorBuffer> {
     let stat=buffer(client,Shape::new([rows]),false);
     run(client,row(if max {RowProgram::Max} else {RowProgram::Sum},rows,columns,1e-5)?,&[value,&stat])?;Ok(stat)
+}
+pub(super) fn reduction(client:&Client,input:TensorBuffer,mean:bool)->Result<TensorBuffer> {
+    let (rows,width)=layout(&input)?;let mut shape=input.shape.clone();*shape.last_mut().expect("validated last axis")=1;
+    let out=buffer(client,shape,false);if rows==0 {return Ok(out);}
+    let mut total=None;
+    for start in (0..width as usize).step_by(TILE) {
+        let columns=(width as usize-start).min(TILE) as u32;let tile=buffer(client,Shape::new([rows,columns as usize]),false);
+        stage(client,WideStage::CopyTile,rows,width,start as u32,columns,&[&input,&tile])?;
+        let current=reduce(client,&tile,rows,columns,false)?;
+        total=Some(match total {Some(previous)=>merge(client,previous,current,rows,false)?,None=>current});
+    }
+    let total=total.ok_or_else(||error("wide reduction has no tiles"))?;
+    let definition=if mean {wide_programs::mean_definition(rows as u64,width).map_err(error)?} else {programs::definition(MapProgram::Copy)};
+    run(client,compile(definition,rows as u64,false)?,&[&total,&out])?;Ok(out)
+}
+pub(super) fn reduction_backward(client:&Client,shape:Shape,strides:Strides,grad:TensorBuffer,mean:bool)->Result<TensorBuffer> {
+    let (rows,width)=layout_for(&shape,&strides,DType::F32)?;
+    let mut reduced=shape.clone();*reduced.last_mut().expect("validated last axis")=1;
+    check_for(&grad,&reduced,"wide reduction backward")?;
+    if rows==0 {return Ok(buffer(client,shape,false));}
+    let out=output(client,shape)?;
+    for start in (0..width as usize).step_by(TILE) {
+        let columns=(width as usize-start).min(TILE) as u32;
+        stage(client,if mean {WideStage::MeanBackwardTile} else {WideStage::SumBackwardTile},rows,width,start as u32,columns,&[&grad,&out])?;
+    }
+    Ok(out)
 }
 pub(super) fn softmax(client:&Client,input:TensorBuffer,logarithmic:bool)->Result<TensorBuffer> {
     let (rows,width)=layout(&input)?;
@@ -87,4 +117,18 @@ pub(super) fn backward(client:&Client,saved:TensorBuffer,grad:TensorBuffer,logar
             rows,width,start as u32,columns,&[&saved,&grad,&total,&out])?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn wide_rows_keep_full_domain_and_reject_invalid_layouts() {
+        assert_eq!(layout_for(&[2,3,8224],&[24672,8224,1],DType::F32).unwrap(),(6,8224));
+        assert_eq!(layout_for(&[1,0,4128],&[0,4128,1],DType::F32).unwrap(),(0,4128));
+        for width in [0,1,31,4097] {assert!(layout_for(&[width],&[1],DType::F32).is_err());}
+        assert!(layout_for(&[2,4128],&[1,2],DType::F32).is_err());
+        assert!(layout_for(&[4128],&[1],DType::BF16).is_err());
+        assert!(layout_for(&[u32::MAX as usize,4128],&[4128,1],DType::F32).is_err());
+    }
 }

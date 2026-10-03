@@ -11,6 +11,7 @@ fn reduced_shape(shape: &Shape) -> Shape {
 
 pub(super) fn reduce(client: &ComputeClient<AscendRuntime>, input: TensorBuffer, mean: bool)
     -> Result<TensorBuffer> {
+    if input.shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::reduction(client,input,mean);}
     let (rows,width)=layout_for(&input.shape,&input.strides,input.dtype,"row reduction")?;
     check_for(&input,&input.shape,"row reduction")?;
     let output=buffer(client,reduced_shape(&input.shape),false);
@@ -27,6 +28,7 @@ pub(super) fn reduce_backward(client: &ComputeClient<AscendRuntime>, shape: Shap
     for (i,&dim) in shape.iter().enumerate().rev() {
         strides[i]=stride;stride=stride.checked_mul(dim).ok_or_else(||super::error("reduction shape overflow"))?;
     }
+    if shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::reduction_backward(client,shape,ruda_core::tensor::Strides::from(strides),grad,mean);}
     let (rows,width)=layout_for(&shape,&strides,DType::F32,"row reduction backward")?;
     check_for(&grad,&reduced_shape(&shape),"row reduction backward")?;
     let output=buffer(client,shape,false);
