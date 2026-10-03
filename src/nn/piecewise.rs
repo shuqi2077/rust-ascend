@@ -52,6 +52,11 @@ pub fn celu<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>,alpha:f32)->Resu
 pub fn selu<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>)->Result<Tensor<B,D>> {
     apply(input,PiecewiseActivation::Selu)
 }
+/// Native FP32 LogSigmoid retaining RUDA's max-shifted exponentials and its dedicated backward.
+/// Uses only local predicates; contiguous rank 1..8, empty axes and tails are accepted.
+pub fn log_sigmoid<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>)->Result<Tensor<B,D>> {
+    apply(input,PiecewiseActivation::LogSigmoid)
+}
 fn forward(input:Primitive,activation:PiecewiseActivation)->Result<Primitive> {
     let client=input.client.clone();let device=input.device.clone();
     let out=AscendRuntime::piecewise_activation(&client,buffer(input),activation)?;

@@ -3,7 +3,7 @@ use rust_ascend::{Ascend,Autodiff,nn,runtime::{AscendRuntime,RuntimeOptions,Asce
     tensor::{DType,TensorData,api::Tensor}};
 type AD=Autodiff<Ascend>;
 fn modes()->Vec<nn::PiecewiseActivation> {
-    let mut modes=vec![nn::PiecewiseActivation::Selu];
+    let mut modes=vec![nn::PiecewiseActivation::Selu,nn::PiecewiseActivation::LogSigmoid];
     for alpha in [0.1f32,1.,-0.5,0.,f32::INFINITY,f32::NAN] {
         modes.push(nn::PiecewiseActivation::Elu {alpha});modes.push(nn::PiecewiseActivation::Celu {alpha});
     }modes
@@ -28,12 +28,18 @@ fn reference(x:f32,g:f32,activation:nn::PiecewiseActivation)->(f32,f32) {
             let output=if positive {x*gamma} else {(exp-1.)*coefficient};
             let masked=if positive {0.} else {g};let direct=if positive {g} else {0.};
             (output,(masked*coefficient)*exp+direct*gamma)
+        },
+        nn::PiecewiseActivation::LogSigmoid=>{
+            let neg=-x;let mask=neg<0.;let max=if mask {0.} else {neg};
+            let sum=(-max).exp()+(neg-max).exp();let derivative=if mask {0.} else {1.};let sign=if mask {-1.} else {1.};
+            (-max-sum.ln(),g*(derivative-sign*(1.-1./sum)))
         },_=>unreachable!("this example covers exponential piecewise activations"),
     }
 }
 fn apply<B:nn::PiecewiseBackend,const D:usize>(input:Tensor<B,D>,activation:nn::PiecewiseActivation)->Result<Tensor<B,D>,rust_ascend::driver::CannError> {
     match activation {nn::PiecewiseActivation::Elu {alpha}=>nn::elu(input,alpha),
         nn::PiecewiseActivation::Celu {alpha}=>nn::celu(input,alpha),nn::PiecewiseActivation::Selu=>nn::selu(input),
+        nn::PiecewiseActivation::LogSigmoid=>nn::log_sigmoid(input),
         _=>unreachable!("this example covers exponential piecewise activations")}
 }
 fn close(actual:&[f32],expected:&[f32],name:&str)->Result<(),Box<dyn std::error::Error>> {
@@ -44,7 +50,7 @@ fn close(actual:&[f32],expected:&[f32],name:&str)->Result<(),Box<dyn std::error:
         }
     }Ok(())
 }
-fn values()->[f32;11] { [f32::NEG_INFINITY,-2.,-1.,-0.,0.,0.5,1.,2.,90.,f32::INFINITY,f32::from_bits(0x7fc12345)] }
+fn values()->[f32;15] { [f32::NEG_INFINITY,-1000.,-90.,-2.,-1.,-0.,0.,0.5,1.,2.,90.,1000.,f32::INFINITY,f32::from_bits(0x7fc12345),-0.5] }
 fn case<const D:usize>(device:&AscendDevice,shape:[usize;D])->Result<(),Box<dyn std::error::Error>> {
     let values=values();let count=shape.iter().product();
     let x:Vec<f32>=(0..count).map(|i|values[i%values.len()]).collect();
@@ -75,5 +81,5 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
         let expected:Vec<f32>=values.iter().map(|&x|reference(x,0.,activation).0).collect();
         close(apply(input,activation)?.into_data().as_slice::<f32>()?,&expected,"plain exponential piecewise output")?;
     }
-    println!("ASCEND_EXP_PIECEWISE_TENSOR_DEVICE_OK gradient_cases=65 plain_cases=13");Ok(())
+    println!("ASCEND_EXP_PIECEWISE_TENSOR_DEVICE_OK gradient_cases=70 plain_cases=14");Ok(())
 }

@@ -22,7 +22,7 @@ fn apply<B:nn::PiecewiseBackend,const D:usize>(input:Tensor<B,D>,activation:nn::
         nn::PiecewiseActivation::LeakyRelu {negative_slope}=>nn::leaky_relu(input,negative_slope),
         nn::PiecewiseActivation::HardSigmoid {alpha,beta}=>nn::hard_sigmoid(input,alpha,beta),
         nn::PiecewiseActivation::Elu {alpha}=>nn::elu(input,alpha),nn::PiecewiseActivation::Celu {alpha}=>nn::celu(input,alpha),
-        nn::PiecewiseActivation::Selu=>nn::selu(input)}
+        nn::PiecewiseActivation::Selu=>nn::selu(input),nn::PiecewiseActivation::LogSigmoid=>nn::log_sigmoid(input)}
 }
 fn bits(actual:&[f32],expected:&[f32],name:&str)->Result<(),Box<dyn std::error::Error>> {
     if actual.len()!=expected.len() {return Err(format!("{name}: length mismatch").into());}

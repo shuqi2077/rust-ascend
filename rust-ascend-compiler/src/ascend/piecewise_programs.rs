@@ -4,7 +4,7 @@ use ruda_core::{ir::*,kernel::{KernelArg,KernelDefinition,KernelOptions,Visibili
 
 #[derive(Clone,Copy,Debug,PartialEq)]
 pub enum PiecewiseActivation {Relu,Clamp {min:f32,max:f32},LeakyRelu {negative_slope:f32},HardSigmoid {alpha:f32,beta:f32},
-    Elu {alpha:f32},Celu {alpha:f32},Selu}
+    Elu {alpha:f32},Celu {alpha:f32},Selu,LogSigmoid}
 fn f()->Type {Type::new(FloatKind::F32.into())}
 pub fn definition(activation:PiecewiseActivation,elements:u64,backward:bool)->Result<KernelDefinition> {
     if elements>u32::MAX as u64 {return Err(invalid("piecewise activation domain exceeds u32"));}
@@ -20,6 +20,7 @@ pub fn definition(activation:PiecewiseActivation,elements:u64,backward:bool)->Re
             (PiecewiseActivation::Elu {..},false)=>"ruda_cann_elu",(PiecewiseActivation::Elu {..},true)=>"ruda_cann_elu_backward",
             (PiecewiseActivation::Celu {..},false)=>"ruda_cann_celu",(PiecewiseActivation::Celu {..},true)=>"ruda_cann_celu_backward",
             (PiecewiseActivation::Selu,false)=>"ruda_cann_selu",(PiecewiseActivation::Selu,true)=>"ruda_cann_selu_backward",
+            (PiecewiseActivation::LogSigmoid,false)=>"ruda_cann_log_sigmoid",(PiecewiseActivation::LogSigmoid,true)=>"ruda_cann_log_sigmoid_backward",
         }.into(),..Default::default()}};
     let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());let mut next=0;
     let mut op=|operation:Operation,ty:Type| {
@@ -48,6 +49,29 @@ pub fn definition(activation:PiecewiseActivation,elements:u64,backward:bool)->Re
             } else {
                 let scaled=op(Arithmetic::Mul(BinaryOperator {lhs:x,rhs:slope}).into(),f());
                 op(Operator::Select(Select {cond:mask,then:scaled,or_else:x}).into(),f())
+            }
+        },
+        PiecewiseActivation::LogSigmoid=>{
+            let neg=op(Arithmetic::Neg(UnaryOperator {input:x}).into(),f());
+            let mask=op(Comparison::Lower(BinaryOperator {lhs:neg,rhs:zero}).into(),bool_type);
+            let max=op(Operator::Select(Select {cond:mask,then:zero,or_else:neg}).into(),f());
+            let neg_max=op(Arithmetic::Neg(UnaryOperator {input:max}).into(),f());
+            let first=op(Arithmetic::Exp(UnaryOperator {input:neg_max}).into(),f());
+            let difference=op(Arithmetic::Sub(BinaryOperator {lhs:neg,rhs:max}).into(),f());
+            let second=op(Arithmetic::Exp(UnaryOperator {input:difference}).into(),f());
+            let sum=op(Arithmetic::Add(BinaryOperator {lhs:first,rhs:second}).into(),f());
+            if let Some(grad)=grad {
+                let one=op(bits(1.).into(),f());let minus_one=op(bits(-1.).into(),f());
+                let max_derivative=op(Operator::Select(Select {cond:mask,then:zero,or_else:one}).into(),f());
+                let sign=op(Operator::Select(Select {cond:mask,then:minus_one,or_else:one}).into(),f());
+                let reciprocal=op(Arithmetic::Recip(UnaryOperator {input:sum}).into(),f());
+                let shifted=op(Arithmetic::Sub(BinaryOperator {lhs:one,rhs:reciprocal}).into(),f());
+                let signed=op(Arithmetic::Mul(BinaryOperator {lhs:sign,rhs:shifted}).into(),f());
+                let factor=op(Arithmetic::Sub(BinaryOperator {lhs:max_derivative,rhs:signed}).into(),f());
+                op(Arithmetic::Mul(BinaryOperator {lhs:grad,rhs:factor}).into(),f())
+            } else {
+                let logarithm=op(Arithmetic::Log(UnaryOperator {input:sum}).into(),f());
+                op(Arithmetic::Sub(BinaryOperator {lhs:neg_max,rhs:logarithm}).into(),f())
             }
         },
         PiecewiseActivation::Elu {..}|PiecewiseActivation::Celu {..}|PiecewiseActivation::Selu=>{
@@ -210,5 +234,26 @@ mod tests {
             assert!(compiled.source().contains("AscendC::Exp("));assert_eq!(compiled.source().contains("AscendC::Div("),matches!(activation,PiecewiseActivation::Celu {..}));
             assert!(compiled.source().contains(if matches!(activation,PiecewiseActivation::Selu) {"CMPMODE::GE"} else {"CMPMODE::LE"}));
         }}}
+    }
+    #[test]
+    fn log_sigmoid_retains_shifted_exponentials_and_original_backward() {
+        let values=[f32::NEG_INFINITY,-1000.,-90.,-2.,-0.,0.,2.,90.,1000.,f32::INFINITY,f32::from_bits(0x7fc12345)];
+        for count in [0usize,1,7,65,257] {for backward in [false,true] {
+            let x:Vec<f32>=(0..count).map(|i|values[i%values.len()]).collect();
+            let grad:Vec<f32>=(0..count).map(|i|if i%3==0 {-0.} else {(i%7) as f32-3.}).collect();
+            let kernel=definition(PiecewiseActivation::LogSigmoid,count as u64,backward).unwrap();
+            let actual=evaluate(kernel.clone(),count,[&x,&grad,&[]]);
+            for lane in 0..count {
+                let neg=-x[lane];let mask=neg<0.;let max=if mask {0.} else {neg};
+                let sum=(-max).exp()+(neg-max).exp();
+                let expected=if backward {let derivative=if mask {0.} else {1.};let sign=if mask {-1.} else {1.};
+                    grad[lane]*(derivative-sign*(1.-1./sum))} else {-max-sum.ln()};
+                let result=actual[0][lane];assert!(result.to_bits()==expected.to_bits() || result.is_nan() && expected.is_nan());
+            }
+            let compiled=AscendCompiler.compile(kernel,&AscendOptions {target:Some(AscendTarget::Ascend950DT),elements:count as u64,..Default::default()},
+                ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+            assert_eq!(compiled.source().matches("AscendC::Exp(").count(),2);
+            assert!(compiled.source().contains("CMPMODE::LT"));assert_eq!(compiled.source().contains("AscendC::Ln("),!backward);
+        }}
     }
 }
