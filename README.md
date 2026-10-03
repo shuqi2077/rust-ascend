@@ -65,6 +65,12 @@ let dx = x.grad(&gradients).unwrap();
 
 此入口复用已有 ACLNN Cast，不冒充公共 IR 内核，不隐式转换矩阵或优化器输入，也不修改通用张量 cast 的调度。调用见 [conversion_runtime 示例](examples/conversion_runtime.rs)：`cargo run --locked --release --example conversion_runtime`。
 
+## BF16 计算、FP32 存储的线性层
+
+`nn::linear_bf16_fp32(input, weight)` 显式计算 `Y = X W^T`，接收连续 FP32 `X[M,K]` 与 `W[N,K]`，在设备端转换为 BF16 后执行已有 Rust 原生矩阵内核，返回 FP32 输出。`Autodiff<Ascend>` 保存独立的 BF16 输入快照；反向将 FP32 上游梯度显式转换为 BF16，再由原生矩阵内核生成 FP32 `dX` 与 `dWeight`，接入 RUDA 共享图梯度累积和 FP32 参数优化器。精度转换使用 ACLNN Cast，矩阵乘不调用 ACLNN Matmul。
+
+M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播或隐式 padding，不改变通用张量 `matmul` 的调度。对应运行时接口为 `AscendRuntime::linear_bf16_fp32` / `linear_bf16_fp32_backward`。调用见 [linear_tensor 示例](examples/linear_tensor.rs)：`cargo run --locked --release --example linear_tensor`。
+
 ## 原生 RMSNorm 公共 IR
 
 `AscendRuntime::rms_norm` 通过 RUDA `ComputeClient` 接收 `TensorBuffer` 的输入和共享 weight，返回 `[Y, rstd]`。`AscendRuntime::rms_norm_backward` 接收输入、weight、`dY` 及前向保存的 `rstd`，返回 `[dX, dWeight]`。`RowProgram::RmsNormWeightContributions` 生成逐元素 weight 梯度贡献，再在设备端归约所有前导行；空 batch 的 weight 梯度为零。

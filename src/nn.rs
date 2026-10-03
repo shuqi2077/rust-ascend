@@ -9,6 +9,24 @@ use ruda_tensor_device::RudaTensor;
 type Primitive = RudaTensor<AscendRuntime>;
 type Result<T> = std::result::Result<T, CannError>;
 
+/// Backend extension for explicitly selected BF16-compute, FP32-storage linear operations.
+pub trait LinearBf16Fp32Backend: Backend {
+    fn linear_bf16_fp32(input:FloatTensor<Self>,weight:FloatTensor<Self>)->Result<FloatTensor<Self>>;
+}
+
+/// Y = X W^T for contiguous FP32 X[M,K] and W[N,K], with M/N/K positive multiples of 16.
+/// Casts X/W and upstream derivatives to BF16 on-device; output and both gradients are FP32.
+/// This explicit compute mode does not change generic tensor matmul or add bias/broadcasting.
+pub fn linear_bf16_fp32<B:LinearBf16Fp32Backend>(input:Tensor<B,2>,weight:Tensor<B,2>)
+    ->Result<Tensor<B,2>> {
+    let unquantized=|primitive:TensorPrimitive<B>|match primitive {
+        TensorPrimitive::Float(tensor)=>Ok(tensor),
+        TensorPrimitive::QFloat(_)=>Err(CannError::InvalidTensor("BF16-compute linear does not dequantize inputs implicitly".into())),
+    };
+    B::linear_bf16_fp32(unquantized(input.into_primitive())?,unquantized(weight.into_primitive())?)
+        .map(|output|Tensor::from_primitive(TensorPrimitive::Float(output)))
+}
+
 /// Backend extension for native common-IR RMSNorm.
 pub trait RmsNormBackend: Backend {
     /// Forward primitive, registering first-order derivatives when this backend tracks them.
@@ -281,6 +299,46 @@ impl<C:CheckpointStrategy> SiluMulBackend for Autodiff<Ascend,C> {
         let output=silu_mul_forward(x.clone(),u.clone())?;
         Ok(match SiluMulBackward.prepare::<C>([gate.node,up.node]).compute_bound().stateful() {
             OpsKind::Tracked(prep)=>prep.finish((x,u),output),
+            OpsKind::UnTracked(prep)=>prep.finish(output),
+        })
+    }
+}
+
+fn linear_forward(input:Primitive,weight:Primitive)->Result<[Primitive;3]> {
+    check_queue(&input,&[&weight],"BF16-compute linear")?;
+    let client=input.client.clone();let device=input.device.clone();
+    let result=AscendRuntime::linear_bf16_fp32(&client,buffer(input),buffer(weight))?;
+    Ok(result.map(|b|Primitive::new(client.clone(),b.handle,Metadata::new(b.shape,b.strides),device.clone(),b.dtype)))
+}
+fn linear_backward(input:Primitive,weight:Primitive,grad:Primitive)->Result<[Primitive;2]> {
+    check_queue(&input,&[&weight,&grad],"BF16-compute linear backward")?;
+    let client=input.client.clone();let device=input.device.clone();
+    let result=AscendRuntime::linear_bf16_fp32_backward(&client,buffer(input),buffer(weight),buffer(grad))?;
+    Ok(result.map(|b|Primitive::new(client.clone(),b.handle,Metadata::new(b.shape,b.strides),device.clone(),b.dtype)))
+}
+impl LinearBf16Fp32Backend for Ascend {
+    fn linear_bf16_fp32(input:FloatTensor<Self>,weight:FloatTensor<Self>)->Result<FloatTensor<Self>> {
+        linear_forward(input,weight).map(|[output,_,_]|output)
+    }
+}
+#[derive(Debug)]
+struct LinearBf16Fp32Backward;
+impl Backward<Ascend,2> for LinearBf16Fp32Backward {
+    type State=(Primitive,Primitive);
+    fn backward(self,ops:Ops<Self::State,2>,grads:&mut Gradients,_:&mut Checkpointer) {
+        let (input,weight)=ops.state;
+        let grad=grads.consume::<Ascend>(&ops.node);
+        let derivatives=linear_backward(input,weight,grad).expect("Ascend BF16-compute linear backward failed");
+        for (parent,gradient) in ops.parents.into_iter().zip(derivatives) {
+            if let Some(parent)=parent {grads.register::<Ascend>(parent.id,gradient);}
+        }
+    }
+}
+impl<C:CheckpointStrategy> LinearBf16Fp32Backend for Autodiff<Ascend,C> {
+    fn linear_bf16_fp32(input:FloatTensor<Self>,weight:FloatTensor<Self>)->Result<FloatTensor<Self>> {
+        let [output,x,w]=linear_forward(input.primitive,weight.primitive)?;
+        Ok(match LinearBf16Fp32Backward.prepare::<C>([input.node,weight.node]).compute_bound().stateful() {
+            OpsKind::Tracked(prep)=>prep.finish((x,w),output),
             OpsKind::UnTracked(prep)=>prep.finish(output),
         })
     }

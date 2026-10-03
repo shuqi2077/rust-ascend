@@ -73,6 +73,48 @@ pub(super) fn linear_nt_backward(client: &Client, input: TensorBuffer, weight: T
     Ok([dx,dw])
 }
 
+fn mixed_linear_spec(x: &TensorLayout, w: &TensorLayout) -> Result<GemmSpec> {
+    if x.shape().len()!=2 || w.shape().len()!=2 || x.dtype()!=CannDType::F32 || w.dtype()!=CannDType::F32 {
+        return Err(error("BF16-compute FP32 linear requires rank-2 FP32 input and weight"));
+    }
+    let x=TensorLayout::contiguous(x.shape(),CannDType::BF16)?;
+    let w=TensorLayout::contiguous(w.shape(),CannDType::BF16)?;
+    GemmSpec::new(&x,&w,Transpose::No,Transpose::Yes,CannDType::F32)
+}
+
+pub(super) fn linear_bf16_fp32(client: &Client, input: TensorBuffer, weight: TensorBuffer)
+    -> Result<[TensorBuffer;3]> {
+    let spec=mixed_linear_spec(&layout(&input)?,&layout(&weight)?)?;
+    // Cast allocations are independent snapshots, including when FP32 parameters alias.
+    let input=super::conversion::cast(client,input,DType::BF16)?;
+    let weight=super::conversion::cast(client,weight,DType::BF16)?;
+    let output=allocate(client,spec.output_layout());
+    launch(client,spec,&input,&weight,&output)?;
+    Ok([output,input,weight])
+}
+
+fn mixed_linear_backward_specs(x: &TensorLayout, w: &TensorLayout, dy: &TensorLayout)
+    -> Result<[GemmSpec;2]> {
+    let forward=GemmSpec::new(x,w,Transpose::No,Transpose::Yes,CannDType::F32)?;
+    if forward.kind()!=GemmKind::Dense || dy!=forward.output_layout() {
+        return Err(error("BF16-compute linear backward requires saved rank-2 BF16 X/W and matching FP32 dY"));
+    }
+    let dy=TensorLayout::contiguous(dy.shape(),CannDType::BF16)?;
+    Ok([GemmSpec::new(&dy,w,Transpose::No,Transpose::No,CannDType::F32)?,
+        GemmSpec::new(&dy,x,Transpose::Yes,Transpose::No,CannDType::F32)?])
+}
+
+pub(super) fn linear_bf16_fp32_backward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
+    grad: TensorBuffer) -> Result<[TensorBuffer;2]> {
+    let [dx_spec,dw_spec]=mixed_linear_backward_specs(&layout(&input)?,&layout(&weight)?,&layout(&grad)?)?;
+    let grad=super::conversion::cast(client,grad,DType::BF16)?;
+    let dx=allocate(client,dx_spec.output_layout());
+    let dw=allocate(client,dw_spec.output_layout());
+    launch(client,dx_spec,&grad,&weight,&dx)?;
+    launch(client,dw_spec,&grad,&input,&dw)?;
+    Ok([dx,dw])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +126,21 @@ mod tests {
         assert!(layout_parts(&[32,48], &[48,1], DType::F16).is_err());
         assert!(layout_parts(&[usize::MAX,48], &[48,1], DType::BF16).is_err());
         assert!(output_dtype(DType::F16).is_err());
+    }
+
+    #[test]
+    fn mixed_linear_keeps_fp32_output_and_both_gradients() {
+        let t=|shape:&[i64],dtype|TensorLayout::contiguous(shape,dtype).unwrap();
+        let x=t(&[32,16],CannDType::F32);let w=t(&[48,16],CannDType::F32);
+        let forward=mixed_linear_spec(&x,&w).unwrap();
+        assert_eq!(forward.output_layout(),&t(&[32,48],CannDType::F32));
+        let [dx,dw]=mixed_linear_backward_specs(&forward.a,&forward.b,forward.output_layout()).unwrap();
+        assert_eq!(dx.output_layout(),&x);assert_eq!(dw.output_layout(),&w);
+        assert!(mixed_linear_spec(&t(&[2,32,16],CannDType::F32),&w).is_err());
+        assert!(mixed_linear_spec(&t(&[32,16],CannDType::BF16),&w).is_err());
+        assert!(mixed_linear_spec(&t(&[31,16],CannDType::F32),&w).is_err());
+        assert!(mixed_linear_spec(&x,&t(&[48,32],CannDType::F32)).is_err());
+        assert!(mixed_linear_backward_specs(&forward.a,&forward.b,&t(&[32,48],CannDType::BF16)).is_err());
+        assert!(mixed_linear_backward_specs(&forward.a,&forward.b,&t(&[48,32],CannDType::F32)).is_err());
     }
 }

@@ -210,6 +210,21 @@ impl AscendRuntime {
         matrix::linear_nt_backward(client, input, weight, grad)
     }
 
+    /// Explicit BF16-compute Y = X W^T with contiguous rank-2 FP32 X and W.
+    /// Returns [FP32 output, saved BF16 X, saved BF16 W]; M/N/K are positive multiples of 16.
+    /// Inputs are cast on-device through ACLNN; multiplication uses native Rust GEMM.
+    pub fn linear_bf16_fp32(client: &ComputeClient<Self>, input: TensorBuffer, weight: TensorBuffer)
+        -> Result<[TensorBuffer;3]> {
+        matrix::linear_bf16_fp32(client,input,weight)
+    }
+
+    /// Returns [FP32 dX, FP32 dW] from saved BF16 X/W and matching FP32 dY.
+    /// dY is explicitly rounded to BF16 on-device before the two native GEMMs.
+    pub fn linear_bf16_fp32_backward(client: &ComputeClient<Self>, input: TensorBuffer,
+        weight: TensorBuffer, grad: TensorBuffer) -> Result<[TensorBuffer;2]> {
+        matrix::linear_bf16_fp32_backward(client,input,weight,grad)
+    }
+
     /// Native common-IR RMSNorm on contiguous FP32 tensors. Returns [output, rstd].
     /// The last dimension must be 32..4096 and divisible by 32.
     pub fn rms_norm(client: &ComputeClient<Self>, input: TensorBuffer,
