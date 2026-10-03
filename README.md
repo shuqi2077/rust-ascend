@@ -73,6 +73,12 @@ let dx = x.grad(&gradients).unwrap();
 
 `rust_ascend::nn::softmax` / `log_softmax` 接收 `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，原生反向接入 RUDA 的现有计算图和梯度累积。调用见 [softmax_tensor 示例](examples/softmax_tensor.rs)：`cargo run --locked --release --example softmax_tensor`。
 
+## 原生 SiLU 门控乘法
+
+`AscendRuntime::silu_mul` / `silu_mul_backward` 使用已有公共逐元素 IR，计算 `SiLU(gate) * up` 与两路输入梯度。输入为形状相同的连续 FP32 缓冲区，支持任意元素数、非对齐尾部与空张量；不做隐式广播或低精度转换。
+
+`rust_ascend::nn::silu_mul` 接收 `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，接入 RUDA 求导图与共享节点梯度累积。调用见 [silu_mul_tensor 示例](examples/silu_mul_tensor.rs)：`cargo run --locked --release --example silu_mul_tensor`。
+
 ## 原生 Sum 与 Mean
 
 `AscendRuntime::sum_last` / `mean_last` 归约连续 FP32 输入的最后一维，保留该维且长度变为 1；宽度为 32～4096 且是 32 的倍数。对应反向在设备端广播每行上游梯度，Mean 再除以行宽；支持空 batch，不保存输入值，不调用 ACLNN。

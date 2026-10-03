@@ -27,6 +27,21 @@ pub trait ReductionBackend: Backend {
     fn reduce_last(input: FloatTensor<Self>, mean: bool) -> Result<FloatTensor<Self>>;
 }
 
+/// Backend extension for native fused SiLU(gate) * up and both input gradients.
+pub trait SiluMulBackend: Backend {
+    fn silu_mul(gate:FloatTensor<Self>,up:FloatTensor<Self>)->Result<FloatTensor<Self>>;
+}
+
+/// Native FP32 SiLU(gate) * up on equal-shaped contiguous RUDA tensors.
+pub fn silu_mul<B:SiluMulBackend,const D:usize>(gate:Tensor<B,D>,up:Tensor<B,D>)->Result<Tensor<B,D>> {
+    let unquantized=|primitive:TensorPrimitive<B>|match primitive {
+        TensorPrimitive::Float(tensor)=>Ok(tensor),
+        TensorPrimitive::QFloat(_)=>Err(CannError::InvalidTensor("native SiLU Mul does not dequantize inputs implicitly".into())),
+    };
+    B::silu_mul(unquantized(gate.into_primitive())?,unquantized(up.into_primitive())?)
+        .map(|output|Tensor::from_primitive(TensorPrimitive::Float(output)))
+}
+
 /// Native FP32 last-axis sum on a RUDA tensor, including first-order autodiff.
 pub fn sum_last<B: ReductionBackend, const D: usize>(input: Tensor<B,D>) -> Result<Tensor<B,D>> {
     reduce_last(input,false)
@@ -225,6 +240,47 @@ impl<C: CheckpointStrategy> ReductionBackend for Autodiff<Ascend,C> {
         let output=reduction_forward(input.primitive,mean)?;
         Ok(match ReductionBackward.prepare::<C>([input.node]).compute_bound().stateful() {
             OpsKind::Tracked(prep)=>prep.finish(state,output),
+            OpsKind::UnTracked(prep)=>prep.finish(output),
+        })
+    }
+}
+
+fn silu_mul_forward(gate:Primitive,up:Primitive)->Result<Primitive> {
+    check_queue(&gate,&[&up],"SiLU Mul")?;
+    let client=gate.client.clone();let device=gate.device.clone();
+    let b=AscendRuntime::silu_mul(&client,buffer(gate),buffer(up))?;
+    Ok(Primitive::new(client,b.handle,Metadata::new(b.shape,b.strides),device,b.dtype))
+}
+fn silu_mul_backward(gate:Primitive,up:Primitive,grad:Primitive)->Result<[Primitive;2]> {
+    check_queue(&gate,&[&up,&grad],"SiLU Mul backward")?;
+    let client=gate.client.clone();let device=gate.device.clone();
+    let result=AscendRuntime::silu_mul_backward(&client,buffer(gate),buffer(up),buffer(grad))?;
+    Ok(result.map(|b|Primitive::new(client.clone(),b.handle,Metadata::new(b.shape,b.strides),device.clone(),b.dtype)))
+}
+impl SiluMulBackend for Ascend {
+    fn silu_mul(gate:FloatTensor<Self>,up:FloatTensor<Self>)->Result<FloatTensor<Self>> {
+        silu_mul_forward(gate,up)
+    }
+}
+#[derive(Debug)]
+struct SiluMulBackward;
+impl Backward<Ascend,2> for SiluMulBackward {
+    type State=(Primitive,Primitive);
+    fn backward(self,ops:Ops<Self::State,2>,grads:&mut Gradients,_:&mut Checkpointer) {
+        let (gate,up)=ops.state;
+        let grad=grads.consume::<Ascend>(&ops.node);
+        let derivatives=silu_mul_backward(gate,up,grad).expect("Ascend SiLU Mul backward failed");
+        for (parent,gradient) in ops.parents.into_iter().zip(derivatives) {
+            if let Some(parent)=parent {grads.register::<Ascend>(parent.id,gradient);}
+        }
+    }
+}
+impl<C:CheckpointStrategy> SiluMulBackend for Autodiff<Ascend,C> {
+    fn silu_mul(gate:FloatTensor<Self>,up:FloatTensor<Self>)->Result<FloatTensor<Self>> {
+        let x=gate.primitive;let u=up.primitive;
+        let output=silu_mul_forward(x.clone(),u.clone())?;
+        Ok(match SiluMulBackward.prepare::<C>([gate.node,up.node]).compute_bound().stateful() {
+            OpsKind::Tracked(prep)=>prep.finish((x,u),output),
             OpsKind::UnTracked(prep)=>prep.finish(output),
         })
     }

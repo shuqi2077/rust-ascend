@@ -5,6 +5,7 @@ mod worker;
 mod normalization;
 mod matrix;
 mod rows;
+mod elementwise;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -118,6 +119,17 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Native FP32 SiLU(gate) * up on equal-shaped contiguous buffers.
+    pub fn silu_mul(client: &ComputeClient<Self>, gate: TensorBuffer, up: TensorBuffer) -> Result<TensorBuffer> {
+        elementwise::silu_mul(client,gate,up)
+    }
+
+    /// Native [gate gradient, up gradient], consuming saved inputs and upstream gradient.
+    pub fn silu_mul_backward(client: &ComputeClient<Self>, gate: TensorBuffer,
+        up: TensorBuffer, grad: TensorBuffer) -> Result<[TensorBuffer;2]> {
+        elementwise::silu_mul_backward(client,gate,up,grad)
+    }
+
     /// Native FP32 last-axis sum, retaining the axis with size one.
     /// Width must be 32..4096 and divisible by 32; leading dimensions are preserved.
     pub fn sum_last(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {

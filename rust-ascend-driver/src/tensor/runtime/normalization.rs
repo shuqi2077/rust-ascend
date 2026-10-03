@@ -60,7 +60,7 @@ pub(super) fn row(op: RowProgram, rows: usize, width: u32, eps: f32) -> Result<A
         row_width: Some(width), ..Default::default()
     }, ExecutionMode::Checked, UIntKind::U64.into()).map_err(error)
 }
-fn map(op: MapProgram, count: usize) -> Result<AscendKernel> {
+pub(super) fn map(op: MapProgram, count: usize) -> Result<AscendKernel> {
     AscendCompiler.compile(programs::definition(op), &AscendOptions {
         target: Some(AscendTarget::Ascend950DT), elements: count as u64, ..Default::default()
     }, ExecutionMode::Checked, UIntKind::U64.into()).map_err(error)
