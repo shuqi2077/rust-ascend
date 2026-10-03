@@ -28,7 +28,7 @@ pub fn embedding_nd<B:EmbeddingBackend,const D:usize,const O:usize>(weight:Tenso
         TensorPrimitive::Float(weight)=>weight,
         TensorPrimitive::QFloat(_)=>return Err(CannError::InvalidTensor("embedding does not dequantize its table implicitly".into())),
     };
-    B::embedding(weight,indices.into_primitive(),options)
+    <B as EmbeddingBackend>::embedding(weight,indices.into_primitive(),options)
         .map(|out|Tensor::from_primitive(TensorPrimitive::Float(out)))
 }
 fn validate(weight:&Primitive,indices:&Primitive,options:EmbeddingOptions)->Result<()> {
