@@ -45,9 +45,9 @@ impl Builder {
 pub fn definition(stage:WideStage,rows:u64,width:u32,start:u32,columns:u32)->Result<KernelDefinition> {
     let full=rows.checked_mul(width as u64).ok_or_else(||invalid("wide row domain overflow"))?;
     let tile=rows.checked_mul(columns as u64).ok_or_else(||invalid("wide tile domain overflow"))?;
-    if width==0 || width%32!=0 || columns==0 || columns>4096 || columns%32!=0
+    if width==0 || columns==0 || columns>4096
         || start.checked_add(columns).is_none_or(|end|end>width) || full>u32::MAX as u64 {
-        return Err(invalid("wide tiles require aligned positive width/columns, columns<=4096, an in-row range and full domain within u32"));
+        return Err(invalid("wide tiles require positive width/columns, columns<=4096, an in-row range and full domain within u32"));
     }
     let sizes=match stage {
         WideStage::CopyTile|WideStage::SquareTile=>vec![full,tile],WideStage::ExpTile=>vec![full,rows,tile],
@@ -153,6 +153,30 @@ pub fn definition(stage:WideStage,rows:u64,width:u32,start:u32,columns:u32)->Res
     builder.write(if stage.partial() {index} else {lane},output);
     Ok(builder.kernel)
 }
+/// Pad only a completed reduction tile, never the model input or its logical
+/// statistics. Sum uses +0; Max uses -Inf. All operand loads remain in bounds.
+pub fn reduction_pad_definition(rows:u64,columns:u32,max:bool)->Result<KernelDefinition> {
+    if columns==0 || columns>4096 {return Err(invalid("reduction tile width must be 1..4096"));}
+    let aligned=columns.div_ceil(32)*32;
+    let source=rows.checked_mul(columns as u64).ok_or_else(||invalid("reduction tile domain overflow"))?;
+    let output=rows.checked_mul(aligned as u64).filter(|&count|count<=u32::MAX as u64)
+        .ok_or_else(||invalid("padded reduction tile domain exceeds u32"))?;
+    let mut b=Builder::new(format!("ruda_cann_reduction_pad_{}",if max {"max"} else {"sum"}),&[source,output]);
+    let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());
+    let row=b.binary(Arithmetic::Div,lane,integer(aligned as u64),u());
+    let col=b.binary(Arithmetic::Modulo,lane,integer(aligned as u64),u());
+    // Select evaluates both values. Wrap artificial lanes to a valid source
+    // column instead of relying on the predicate to suppress an invalid load.
+    let safe_col=b.binary(Arithmetic::Modulo,col,integer(columns as u64),u());
+    let base=b.binary(Arithmetic::Mul,row,integer(columns as u64),u());
+    let index=b.binary(Arithmetic::Add,base,safe_col,u());let value=b.read(0,index);
+    let cond=b.op(Comparison::Lower(BinaryOperator {lhs:col,rhs:integer(columns as u64)}),Type::scalar(ElemType::Bool));
+    let neutral=if max {b.op(Operator::Reinterpret(UnaryOperator {
+        input:Variable::constant(ConstantValue::UInt(0xff800000),Type::new(UIntKind::U32.into()))}),f())}
+        else {Variable::constant(ConstantValue::Float(0.),f())};
+    let result=b.op(Operator::Select(Select {cond,then:value,or_else:neutral}),f());b.write(lane,result);Ok(b.kernel)
+}
+
 pub fn merge_definition(elements:u64,max:bool)->Result<KernelDefinition> {
     if elements>u32::MAX as u64 {return Err(invalid("wide statistic domain exceeds u32"));}
     let mut builder=Builder::new(format!("ruda_cann_wide_merge_{}",if max {"max"} else {"sum"}),&[elements;3]);
@@ -214,22 +238,41 @@ mod tests {
         evaluate(definition(kind,rows as u64,width as u32,start as u32,columns as u32).unwrap(),rows*columns,inputs,output,kind.partial());
     }
     #[test]
+    fn reduction_padding_copies_bits_and_selects_safe_neutral_tail_lanes() {
+        for rows in [0usize,1,3] {for columns in [1usize,2,7,31,33,65,4095] {for max in [false,true] {
+            let aligned=columns.div_ceil(32)*32;let n=rows*aligned;
+            let input:Vec<f32>=(0..rows*columns).map(|i|match i%5 {
+                0=>f32::from_bits(0x80000000),1=>f32::from_bits(0x7fc12345),2=>f32::NEG_INFINITY,
+                3=>f32::INFINITY,_=>i as f32/8.}).collect();
+            let definition=reduction_pad_definition(rows as u64,columns as u32,max).unwrap();
+            let compiled=AscendCompiler.compile(definition.clone(),&options(n as u64),ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+            assert_eq!(compiled.bindings()[0].bytes,input.len() as u64*4);assert_eq!(compiled.bindings()[1].bytes,n as u64*4);
+            let mut output=vec![f32::NAN;n];evaluate(definition,n,&[&input],&mut output,false);
+            for row in 0..rows {for col in 0..aligned {
+                let expected=if col<columns {input[row*columns+col].to_bits()} else if max {0xff800000} else {0};
+                assert_eq!(output[row*aligned+col].to_bits(),expected,"rows={rows} columns={columns} col={col} max={max}");
+            }}
+        }}}
+        assert!(reduction_pad_definition(1,0,false).is_err());assert!(reduction_pad_definition(1,4097,false).is_err());
+        assert!(reduction_pad_definition(u32::MAX as u64/2,2,false).is_err());
+    }
+    #[test]
     fn every_wide_stage_compiles_with_explicit_output_contract_and_tail_bounds() {
         let stages=[WideStage::CopyTile,WideStage::ExpTile,WideStage::SoftmaxTile,WideStage::LogSoftmaxTile,
             WideStage::DotTile,WideStage::SoftmaxBackwardTile,WideStage::LogSoftmaxBackwardTile,WideStage::SumBackwardTile,WideStage::MeanBackwardTile,
             WideStage::SquareTile,WideStage::RmsNormTile,WideStage::RmsDotTile,WideStage::RmsBackwardTile,WideStage::RmsWeightTile,
             WideStage::CenteredSquareTile,WideStage::LayerNormTile,WideStage::LayerGTile,WideStage::LayerGYTile,WideStage::LayerBackwardTile,WideStage::LayerWeightTile];
-        for width in [4128u32,8192,8224] {for rows in [0u64,1,2] {for start in (0..width).step_by(4096) {
+        for width in [1u32,2,7,31,33,65,4095,4097,4128,4129,8192,8224,8225] {for rows in [0u64,1,2] {for start in (0..width).step_by(4096) {
             let columns=(width-start).min(4096);let n=rows*columns as u64;
             for stage in stages {
                 let k=definition(stage,rows,width,start,columns).unwrap();
-                if stage.partial() && rows!=0 {assert!(AscendCompiler.compile(k.clone(),&options(n),ExecutionMode::Checked,UIntKind::U64.into()).is_err());}
+                if stage.partial() && rows!=0 && columns!=width {assert!(AscendCompiler.compile(k.clone(),&options(n),ExecutionMode::Checked,UIntKind::U64.into()).is_err());}
                 let compiled=if stage.partial() {AscendCompiler.compile_partial_map(k,&options(n),ExecutionMode::Checked,UIntKind::U64.into())}
                     else {AscendCompiler.compile(k,&options(n),ExecutionMode::Checked,UIntKind::U64.into())}.unwrap();
                 assert_eq!(compiled.bindings().last().unwrap().bytes,if stage.partial() {rows*width as u64*4} else {n*4});
                 if stage.partial() && rows!=0 {
-                    assert!(compiled.requires_initialized_outputs());
-                    if start!=0 || rows>1 {
+                    assert_eq!(compiled.requires_initialized_outputs(),columns!=width);
+                    if (start!=0 || rows>1) && width%32==0 && columns%32==0 {
                         assert!(compiled.source().contains("[lane], run_copy)"));
                         assert!(!compiled.source().contains("scatter_cell.SetValue"));
                     }
@@ -272,7 +315,7 @@ mod tests {
     }
     #[test]
     fn wide_softmax_and_backward_tiles_match_independent_fp64_equations() {
-        for width in [4128usize,8192,8224] {let rows=2;let n=rows*width;
+        for width in [1usize,2,7,31,33,65,4095,4097,4128,4129,8192,8224,8225] {let rows=2;let n=rows*width;
             let x:Vec<f32>=(0..n).map(|i|-1000.+(i%47) as f32/8.).collect();
             let grad:Vec<f32>=(0..n).map(|i|(i%13) as f32/7.-0.6).collect();
             let mut maximum=vec![f32::NEG_INFINITY;rows];
@@ -323,7 +366,7 @@ mod tests {
     }
     #[test]
     fn wide_sum_mean_and_broadcast_gradients_keep_the_full_width_divisor() {
-        for width in [4128usize,8192,8224] {for rows in [1usize,3] {
+        for width in [1usize,2,7,31,33,65,4095,4097,4128,4129,8192,8224,8225] {for rows in [1usize,3] {
             let x:Vec<f32>=(0..rows*width).map(|i|(i%19) as f32/8.-0.75).collect();
             let grad:Vec<f32>=(0..rows).map(|i|i as f32*0.25-0.5).collect();let mut sum=vec![0.;rows];
             for start in (0..width).step_by(4096) {
@@ -352,7 +395,7 @@ mod tests {
     }
     #[test]
     fn wide_rms_norm_saved_statistics_and_affine_gradients_match_fp64() {
-        for width in [4128usize,8192,8224] {let rows=3;let eps=1e-3f32;
+        for width in [1usize,2,7,31,33,65,4095,4097,4128,4129,8192,8224,8225] {let rows=3;let eps=1e-3f32;
             let x:Vec<f32>=(0..rows*width).map(|i|(i%31) as f32/7.-1.).collect();
             let weight:Vec<f32>=(0..width).map(|i|0.5+(i%7) as f32/9.).collect();
             let grad:Vec<f32>=(0..rows*width).map(|i|(i%11) as f32/5.-0.7).collect();
@@ -397,7 +440,7 @@ mod tests {
     }
     #[test]
     fn wide_layer_norm_centers_variance_and_uses_saved_affine_backward_statistics() {
-        for width in [4128usize,8192,8224] {let rows=3;let eps=1e-3f32;
+        for width in [1usize,2,7,31,33,65,4095,4097,4128,4129,8192,8224,8225] {let rows=3;let eps=1e-3f32;
             let x:Vec<f32>=(0..rows*width).map(|i|(i%31) as f32/7.-1.).collect();
             let weight:Vec<f32>=(0..width).map(|i|0.5+(i%7) as f32/9.).collect();
             let bias:Vec<f32>=(0..width).map(|i|(i%5) as f32/8.-0.25).collect();

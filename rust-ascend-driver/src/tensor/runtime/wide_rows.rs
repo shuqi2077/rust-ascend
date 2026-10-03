@@ -1,10 +1,11 @@
 use super::{AscendRuntime,ComputeClient,Result,TensorBuffer,error,contiguous,
-    normalization::{buffer,check_for,row,run,epsilon_for,column_sum}};
+    normalization::{buffer,check_for,row,run,epsilon_for,column_sum,slice}};
 use ruda_core::{compiler::Compiler,ir::UIntKind,kernel::KernelDefinition,launch::ExecutionMode,tensor::{DType,Shape,Strides}};
 use rust_ascend_compiler::ascend::{AscendCompiler,AscendOptions,AscendTarget,row_programs::RowProgram,
     programs::{self,MapProgram},wide_programs::{self,WideStage}};
 const TILE:usize=4096;
 type Client=ComputeClient<AscendRuntime>;
+pub(super) fn needs_tiles(width:usize)->bool {width>4096 || width%32!=0}
 pub(super) fn layout(input:&TensorBuffer)->Result<(usize,u32)> {
     let result=layout_for(&input.shape,&input.strides,input.dtype)?;
     check_for(input,&input.shape,"wide rows")?;Ok(result)
@@ -12,7 +13,7 @@ pub(super) fn layout(input:&TensorBuffer)->Result<(usize,u32)> {
 fn layout_for(shape:&[usize],strides:&[usize],dtype:DType)->Result<(usize,u32)> {
     if dtype!=DType::F32 || !contiguous(shape,strides) {return Err(error("wide rows require contiguous FP32"));}
     let &width=shape.last().ok_or_else(||error("wide rows require a last axis"))?;
-    if width==0 || width%32!=0 || width>u32::MAX as usize {return Err(error("wide row width must be positive and divisible by 32 within u32"));}
+    if width==0 || width>u32::MAX as usize {return Err(error("tiled row width must be positive within u32"));}
     let rows=shape[..shape.len()-1].iter().try_fold(1usize,|n,&d|n.checked_mul(d)).ok_or_else(||error("wide row shape overflow"))?;
     if rows.checked_mul(width).is_none_or(|n|n>u32::MAX as usize) {return Err(error("wide row element count exceeds u32"));}
     Ok((rows,width as u32))
@@ -36,7 +37,26 @@ fn merge(client:&Client,a:TensorBuffer,b:TensorBuffer,rows:usize,max:bool)->Resu
 }
 fn reduce(client:&Client,value:&TensorBuffer,rows:usize,columns:u32,max:bool)->Result<TensorBuffer> {
     let stat=buffer(client,Shape::new([rows]),false);
-    run(client,row(if max {RowProgram::Max} else {RowProgram::Sum},rows,columns,1e-5)?,&[value,&stat])?;Ok(stat)
+    if columns==1 {
+        run(client,compile(programs::definition(MapProgram::Copy),rows as u64,false)?,&[value,&stat])?;
+    } else if columns%32==0 {
+        run(client,row(if max {RowProgram::Max} else {RowProgram::Sum},rows,columns,1e-5)?,&[value,&stat])?;
+    } else {
+        let aligned=columns.div_ceil(32)*32;
+        // Preserve the existing full logical u32 domain. Split row batches if
+        // expanding a tiny tile to 32 lanes would otherwise exceed that domain.
+        let batch_rows=u32::MAX as usize/aligned as usize;
+        for start in (0..rows).step_by(batch_rows) {
+            let count=(rows-start).min(batch_rows);
+            let input=slice(value,start*columns as usize,count*columns as usize);
+            let padded=buffer(client,Shape::new([count,aligned as usize]),false);
+            let out=slice(&stat,start,count);
+            run(client,compile(wide_programs::reduction_pad_definition(count as u64,columns,max).map_err(error)?,
+                count as u64*aligned as u64,false)?,&[&input,&padded])?;
+            run(client,row(if max {RowProgram::Max} else {RowProgram::Sum},count,aligned,1e-5)?,&[&padded,&out])?;
+        }
+    }
+    Ok(stat)
 }
 pub(super) fn reduction(client:&Client,input:TensorBuffer,mean:bool)->Result<TensorBuffer> {
     let (rows,width)=layout(&input)?;let mut shape=input.shape.clone();*shape.last_mut().expect("validated last axis")=1;
@@ -201,7 +221,10 @@ mod tests {
     fn wide_rows_keep_full_domain_and_reject_invalid_layouts() {
         assert_eq!(layout_for(&[2,3,8224],&[24672,8224,1],DType::F32).unwrap(),(6,8224));
         assert_eq!(layout_for(&[1,0,4128],&[0,4128,1],DType::F32).unwrap(),(0,4128));
-        for width in [0,1,31,4097] {assert!(layout_for(&[width],&[1],DType::F32).is_err());}
+        for width in [1,2,7,31,33,65,4095,4097,4129,8225] {assert_eq!(layout_for(&[width],&[1],DType::F32).unwrap(),(1,width as u32));}
+        assert!(layout_for(&[0],&[1],DType::F32).is_err());
+        for width in [32,4096] {assert!(!needs_tiles(width));}
+        for width in [1,31,33,4095,4097,4128] {assert!(needs_tiles(width));}
         assert!(layout_for(&[2,4128],&[1,2],DType::F32).is_err());
         assert!(layout_for(&[4128],&[1],DType::BF16).is_err());
         assert!(layout_for(&[u32::MAX as usize,4128],&[4128,1],DType::F32).is_err());

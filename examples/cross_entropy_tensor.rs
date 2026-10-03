@@ -18,10 +18,11 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
     }
     // SAFETY: this standalone executable is the sole ACL context owner.
     let device=unsafe {AscendRuntime::initialize_exclusive(options)?};let rows=5;
-    for classes in [32,96,4128] {for reduction in [nn::LossReduction::None,nn::LossReduction::Mean,nn::LossReduction::Sum] {
+    let widths=[1usize,3,7,31,32,33,65,96,4095,4097,4128,4129];
+    for classes in widths {for reduction in [nn::LossReduction::None,nn::LossReduction::Mean,nn::LossReduction::Sum] {
         for ignore_index in [None,Some(-100)] {for weighted in [false,true] {
             let x:Vec<f32>=(0..rows*classes).map(|i|(i%23) as f32/8.-1000.).collect();
-            let mut labels=vec![0i64,31,7,0,2];if let Some(ignore)=ignore_index {labels[1]=ignore;}
+            let mut labels=vec![0i64,(31%classes) as i64,(7%classes) as i64,0,(2%classes) as i64];if let Some(ignore)=ignore_index {labels[1]=ignore;}
             let weights:Vec<f32>=(0..classes).map(|c|if weighted {0.5+(c%7) as f32/4.} else {1.}).collect();
             let logits=Tensor::<AD,2>::from_data(TensorData::new(x.clone(),[rows,classes]),(&device,DType::F32)).require_grad();
             let labels_tensor=Tensor::<AD,1,Int>::from_data(TensorData::new(labels.clone(),[rows]),(&device,DType::I64));
@@ -52,11 +53,11 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
             println!("ASCEND_CROSS_ENTROPY_TENSOR_CASE classes={classes} reduction={reduction:?} ignore={ignore_index:?} weighted={weighted} passed=true");
         }}
     }}
-    // Direct NLLLoss has no native Softmax width alignment requirement.
+    // Direct NLLLoss consumes caller-provided log-probabilities without LogSoftmax.
     let input=Tensor::<Ascend,2>::from_data([[-1.0f32,-2.,-3.],[-4.,-5.,-6.]],(&device,DType::F32));
     let target=Tensor::<Ascend,1,Int>::from_data([0i32,2],(&device,DType::I32));
     let weight=Tensor::<Ascend,1>::from_data([1.0f32,2.,3.],(&device,DType::F32));
     let loss=nn::nll_loss(input,target,weight,nn::NllLossOptions {reduction:nn::LossReduction::Mean,ignore_index:None})?;
     close(loss.into_data().as_slice::<f32>()?,&[19./4.],"plain NLLLoss")?;
-    println!("ASCEND_CROSS_ENTROPY_TENSOR_DEVICE_OK cases=37");Ok(())
+    println!("ASCEND_CROSS_ENTROPY_TENSOR_DEVICE_OK cases={}",widths.len()*12+1);Ok(())
 }

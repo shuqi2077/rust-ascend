@@ -23,7 +23,7 @@ pub fn nll_loss<B:NllLossBackend>(input:Tensor<B,2>,target:Tensor<B,1,Int>,weigh
         unquantized(weight.into_primitive())?,options).map(|out|Tensor::from_primitive(TensorPrimitive::Float(out)))
 }
 /// Cross entropy via native FP32 LogSoftmax and ACLNN NLLLoss, without class weighting.
-/// The native LogSoftmax requires positive C divisible by 32; labels are not shifted implicitly.
+/// The native LogSoftmax requires positive C; labels are not shifted implicitly.
 pub fn cross_entropy<B:NllLossBackend+SoftmaxBackend>(logits:Tensor<B,2>,target:Tensor<B,1,Int>,
     options:NllLossOptions)->Result<Tensor<B,1>> {
     let classes=logits.dims()[1];let device=logits.device();

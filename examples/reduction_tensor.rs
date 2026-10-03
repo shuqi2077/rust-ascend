@@ -22,7 +22,8 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
     }
     // SAFETY: this standalone executable exclusively owns ACL initialization.
     let device=unsafe {AscendRuntime::initialize_exclusive(options)?};
-    let cases=[(0,32),(1,32),(3,96),(7,256),(33,4096),(0,4128),(1,4128),(3,8192),(2,8224)];
+    let cases=[(0,32),(1,32),(3,96),(7,256),(33,4096),(0,4128),(1,4128),(3,8192),(2,8224),
+        (0,7),(1,1),(3,2),(3,7),(3,31),(3,33),(3,65),(3,4095),(3,4097),(3,8225)];
     for (rows,width) in cases {
         let x:Vec<f32>=(0..rows*width).map(|i|(i%23) as f32/8.-1.).collect();
         let up:Vec<f32>=(0..rows).map(|r|r as f32*0.125-0.5).collect();

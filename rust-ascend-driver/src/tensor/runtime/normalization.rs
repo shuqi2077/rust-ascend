@@ -82,7 +82,7 @@ pub(super) fn run(client: &Client, kernel: AscendKernel, tensors: &[&TensorBuffe
     drop(guards);
     result
 }
-fn slice(t: &TensorBuffer, offset: usize, elements: usize) -> TensorBuffer {
+pub(super) fn slice(t: &TensorBuffer, offset: usize, elements: usize) -> TensorBuffer {
     let bytes = elements as u64*4;
     let start = offset as u64*4;
     let size = t.handle.size_in_used();
@@ -115,7 +115,7 @@ pub(super) fn column_sum(client: &Client, mut value: TensorBuffer, mut rows: usi
 
 pub(super) fn forward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
     bias: Option<TensorBuffer>, eps: f64) -> Result<[TensorBuffer; 3]> {
-    if input.shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::layer_forward(client,input,weight,bias,eps);}
+    if input.shape.last().is_some_and(|&width|super::wide_rows::needs_tiles(width)) {return super::wide_rows::layer_forward(client,input,weight,bias,eps);}
     let (rows, width) = layout(&input.shape, &input.strides, input.dtype)?;
     let eps = epsilon(eps)?;
     check(&input, &input.shape)?;
@@ -132,7 +132,7 @@ pub(super) fn forward(client: &Client, input: TensorBuffer, weight: TensorBuffer
 }
 pub(super) fn backward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
     grad: TensorBuffer, mean: TensorBuffer, rstd: TensorBuffer) -> Result<[TensorBuffer; 3]> {
-    if input.shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::layer_backward(client,input,weight,grad,mean,rstd);}
+    if input.shape.last().is_some_and(|&width|super::wide_rows::needs_tiles(width)) {return super::wide_rows::layer_backward(client,input,weight,grad,mean,rstd);}
     let (rows, width) = layout(&input.shape, &input.strides, input.dtype)?;
     check(&input, &input.shape)?;
     check(&grad, &input.shape)?;
@@ -152,7 +152,7 @@ pub(super) fn backward(client: &Client, input: TensorBuffer, weight: TensorBuffe
 
 pub(super) fn rms_forward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
     eps: f64) -> Result<[TensorBuffer; 2]> {
-    if input.shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::rms_forward(client,input,weight,eps);}
+    if input.shape.last().is_some_and(|&width|super::wide_rows::needs_tiles(width)) {return super::wide_rows::rms_forward(client,input,weight,eps);}
     let (rows, width) = layout_for(&input.shape, &input.strides, input.dtype, "RMSNorm")?;
     let eps = epsilon_for(eps, "RMSNorm")?;
     check_for(&input, &input.shape, "RMSNorm")?;
@@ -167,7 +167,7 @@ pub(super) fn rms_forward(client: &Client, input: TensorBuffer, weight: TensorBu
 
 pub(super) fn rms_backward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
     grad: TensorBuffer, rstd: TensorBuffer) -> Result<[TensorBuffer; 2]> {
-    if input.shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::rms_backward(client,input,weight,grad,rstd);}
+    if input.shape.last().is_some_and(|&width|super::wide_rows::needs_tiles(width)) {return super::wide_rows::rms_backward(client,input,weight,grad,rstd);}
     let (rows, width) = layout_for(&input.shape, &input.strides, input.dtype, "RMSNorm")?;
     check_for(&input, &input.shape, "RMSNorm")?;
     check_for(&weight, &[width as usize], "RMSNorm")?;

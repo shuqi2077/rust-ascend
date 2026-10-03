@@ -120,7 +120,7 @@ fn reduce_last<B: ReductionBackend, const D: usize>(input: Tensor<B,D>, mean: bo
 }
 
 /// Native last-axis FP32 Softmax on a RUDA tensor, including RUDA autodiff.
-/// Positive widths divisible by 32 use tiled native passes above 4096 columns.
+/// Positive unaligned widths and widths above 4096 use tiled native passes.
 pub fn softmax<B: SoftmaxBackend, const D: usize>(input: Tensor<B,D>) -> Result<Tensor<B,D>> {
     normalized_exponential(input, false)
 }
@@ -140,7 +140,7 @@ fn normalized_exponential<B: SoftmaxBackend, const D: usize>(input: Tensor<B,D>,
 }
 
 /// Normalize the last dimension of a contiguous FP32 RUDA tensor.
-/// The shared weight has rank one; width must be positive and divisible by 32.
+/// The shared weight has rank one; the logical width must be positive.
 /// Wider rows use device-side tiled statistics and the forward's saved reciprocal RMS.
 /// `Autodiff<Ascend>` tracks input and weight gradients using saved device statistics.
 pub fn rms_norm<B: RmsNormBackend, const D: usize>(input: Tensor<B, D>, weight: Tensor<B, 1>,

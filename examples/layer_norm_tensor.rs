@@ -23,7 +23,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options.operator_libraries = std::env::split_paths(&paths).map(|p| p.into_os_string()).collect();
     }
     let device = unsafe { AscendRuntime::initialize_exclusive(options)? };
-    let cases=[(0,32),(1,32),(3,96),(8,256),(3,4096),(0,4128),(1,8192),(3,8224)];
+    let cases=[(0,32),(1,32),(3,96),(8,256),(3,4096),(0,4128),(1,8192),(3,8224),
+        (0,7),(1,1),(3,2),(3,7),(3,31),(3,33),(3,65),(3,4095),(3,4097),(3,8225)];
     for (rows, width) in cases {
         for bias in [false, true] {
             let eps = 1e-3;

@@ -240,7 +240,7 @@ impl AscendRuntime {
     }
 
     /// Native FP32 last-axis sum, retaining the axis with size one.
-    /// Width must be positive and divisible by 32; wide rows use native tile reductions.
+    /// Width must be positive; unaligned and wide rows use native tile reductions.
     pub fn sum_last(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
         rows::reduce(client,input,false)
     }
@@ -262,8 +262,8 @@ impl AscendRuntime {
         rows::reduce_backward(client,input_shape,grad,true)
     }
 
-    /// Native FP32 last-axis Softmax. Width is positive and divisible by 32.
-    /// Widths above 4096 use tiled, device-side max/sum passes and normalized output patches.
+    /// Native FP32 last-axis Softmax. Logical width is positive.
+    /// Unaligned widths and widths above 4096 use device-side max/sum tile passes.
     pub fn softmax(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
         rows::softmax(client, input, false)
     }
@@ -346,7 +346,7 @@ impl AscendRuntime {
     }
 
     /// Native common-IR RMSNorm on contiguous FP32 tensors. Returns [output, rstd].
-    /// The last dimension must be positive and divisible by 32; wide rows use native tiles.
+    /// The last dimension must be positive; unaligned and wide rows use native tiles.
     pub fn rms_norm(client: &ComputeClient<Self>, input: TensorBuffer,
         weight: TensorBuffer, epsilon: f64) -> Result<[TensorBuffer; 2]> {
         normalization::rms_forward(client, input, weight, epsilon)

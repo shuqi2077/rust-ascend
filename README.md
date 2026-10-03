@@ -145,13 +145,15 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `AscendRuntime::rms_norm` 通过 RUDA `ComputeClient` 接收 `TensorBuffer` 的输入和共享 weight，返回 `[Y, rstd]`。`AscendRuntime::rms_norm_backward` 接收输入、weight、`dY` 及前向保存的 `rstd`，返回 `[dX, dWeight]`。`RowProgram::RmsNormWeightContributions` 生成逐元素 weight 梯度贡献，再在设备端归约所有前导行；空 batch 的 weight 梯度为零。
 
-此接口使用公共 Rust IR 和 CCE，不调用 ACLNN RMSNorm。支持连续 FP32、最后一维宽度为正且为 32 的倍数，总元素数不超过 u32。宽度超过 4096 时使用设备端分块平方和及全行 reciprocal RMS；反向复用前向统计，分块计算输入梯度及共享 weight 梯度。完整运行时调用见 [rms_norm_runtime 示例](examples/rms_norm_runtime.rs)：`cargo run --locked --release --example rms_norm_runtime`。
+此接口使用公共 Rust IR 和 CCE，不调用 ACLNN RMSNorm。支持连续 FP32、最后一维宽度为正，总元素数不超过 u32。非 32 对齐或超过 4096 的宽度使用设备端分块平方和及全行 reciprocal RMS；反向复用前向统计，分块计算输入梯度及共享 weight 梯度。完整运行时调用见 [rms_norm_runtime 示例](examples/rms_norm_runtime.rs)：`cargo run --locked --release --example rms_norm_runtime`。
+
+非对齐行只在完成计算的归约 tile 尾部补中性值：求和补正零，最大值补负无穷；输入、weight 和激活保持原逻辑形状，均值、方差和梯度统计始终除以原行宽。补尾程序使用公共 IR 的安全索引与选择操作，再执行已有原生行归约，不调用 ACLNN；单列归约直接设备复制，扩展后的 tile 域过大时按行分批。
 
 `rust_ascend::nn::rms_norm(input, weight, epsilon)` 接收现有 RUDA `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，复用 RUDA 的计算图、梯度存储和共享图梯度累积，原生计算输入与 weight 的梯度。已有 `ruda_nn::RmsNorm` 可将 `gamma.val()` 和 `epsilon` 传给此入口；不修改该模块原有的 `forward` 方法。完整调用见 [rms_norm_tensor 示例](examples/rms_norm_tensor.rs)：`cargo run --locked --release --example rms_norm_tensor`。
 
 ## 原生 Softmax 与 LogSoftmax
 
-`AscendRuntime::softmax` / `log_softmax` 及其 `*_backward` 接收 RUDA `TensorBuffer`，归一化连续 FP32 输入的最后一维；宽度为正且为 32 的倍数，总元素数不超过 u32。宽度不超过 4096 时使用原行内核；更宽的行以最多 4096 列分块，在设备端合并全行最大值及指数和，再写回归一化结果。反向同样分块合并全行统计，使用前向保存的输出；支持任意前导维度和空 batch，不调用 ACLNN。宽行 Softmax 保留一份完整 FP32 指数工作区，LogSoftmax 不保留该完整工作区。
+`AscendRuntime::softmax` / `log_softmax` 及其 `*_backward` 接收 RUDA `TensorBuffer`，归一化连续 FP32 输入的最后一维；宽度为正，总元素数不超过 u32。32 对齐且不超过 4096 的宽度使用原行内核；其余宽度以最多 4096 列分块，在设备端合并全行最大值及指数和，再写回逻辑形状的归一化结果。反向同样分块合并全行统计，使用前向保存的输出；支持任意前导维度和空 batch，不调用 ACLNN。分块 Softmax 保留一份完整 FP32 指数工作区，LogSoftmax 不保留该完整工作区。
 
 `rust_ascend::nn::softmax` / `log_softmax` 接收 `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，原生反向接入 RUDA 的现有计算图和梯度累积。调用见 [softmax_tensor 示例](examples/softmax_tensor.rs)：`cargo run --locked --release --example softmax_tensor`。
 
@@ -159,7 +161,7 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `CannSession::nll_loss` / `nll_loss_backward` 与 `AscendRuntime` 的对应接口使用 ACLNN NLLLoss，接收连续 FP32／FP16／BF16 的 `[N,C]` log-probabilities、INT32／INT64 `[N]` 标签及同精度 `[C]` class weight。前向返回 loss 和设备端 total weight；反向复用前向 total weight。`NllLossOptions` 要求显式选择 None／Mean／Sum 和可选 ignore index，标签须为有效类别或该 ignore 值。None 返回 `[N]`，Mean／Sum 返回 `[1]`；加权 Mean 除以未忽略标签的权重和。
 
-`nn::nll_loss` 把 FP32 输入反向接入 RUDA 图，class weight 为固定的 inner-backend 张量。已跟踪的前向独立保存设备端整数标签与 class weight 快照，不将标签或归约计数搬回主机。`nn::cross_entropy` / `weighted_cross_entropy` 将原生 FP32 LogSoftmax 与这一 NLLLoss 路径组合，支持 logits 梯度及共享图累积；类别数沿用原生 LogSoftmax 的正数、32 对齐要求。调用方自行决定标签位移，不隐式 shift、label smoothing 或 soft targets。
+`nn::nll_loss` 把 FP32 输入反向接入 RUDA 图，class weight 为固定的 inner-backend 张量。已跟踪的前向独立保存设备端整数标签与 class weight 快照，不将标签或归约计数搬回主机。`nn::cross_entropy` / `weighted_cross_entropy` 将原生 FP32 LogSoftmax 与这一 NLLLoss 路径组合，支持 logits 梯度及共享图累积；类别数为正，不再要求 32 对齐。调用方自行决定标签位移，不隐式 shift、label smoothing 或 soft targets。
 
 调用见 [cross_entropy_tensor 示例](examples/cross_entropy_tensor.rs)：`cargo run --locked --release --example cross_entropy_tensor`。`AscendRuntime::copy_contiguous` 也可独立保存连续 FP32／FP16／BF16／INT32／INT64 设备张量，保留原存储位模式。
 
@@ -171,7 +173,7 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 ## 原生 Sum 与 Mean
 
-`AscendRuntime::sum_last` / `mean_last` 归约连续 FP32 输入的最后一维，保留该维且长度变为 1；宽度为正且是 32 的倍数，总元素数不超过 u32。超过 4096 列时在设备端分块归约并合并全行和，Mean 最后除以完整行宽。对应反向在设备端广播每行上游梯度，Mean 再除以行宽；支持空 batch，不保存输入值，不调用 ACLNN。
+`AscendRuntime::sum_last` / `mean_last` 归约连续 FP32 输入的最后一维，保留该维且长度变为 1；宽度为正，总元素数不超过 u32。非 32 对齐或超过 4096 列时在设备端分块归约并合并全行和，Mean 最后除以完整逻辑行宽。对应反向在设备端广播每行上游梯度，Mean 再除以行宽；支持空 batch，不保存输入值，不调用 ACLNN。
 
 `rust_ascend::nn::sum_last` / `mean_last` 接收 `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，接入现有 RUDA 计算图和梯度累积。这是显式原生入口，不改变张量原有 `sum_dim` / `mean_dim` 的调度。调用见 [reduction_tensor 示例](examples/reduction_tensor.rs)：`cargo run --locked --release --example reduction_tensor`。
 
@@ -181,7 +183,7 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `RowProgram::LayerNormInputBackward` 接收 `X`、`dY`、`weight`、保存的 `mean`、`rstd`，返回 `dX`。`LayerNormWeightContributions` 计算逐元素权重梯度贡献，再通过设备端逐级成对求和生成 weight 梯度；bias 梯度由 `dY` 按同样方式求和。前向统计量保留在设备端传给反向。上述路径使用公共 Rust IR 和 CCE 向量指令，不调用 ACLNN LayerNorm。
 
-RUDA 的现有 `ruda_nn::LayerNorm` 已接入 `Ascend` 和 `Autodiff<Ascend>`，包括输入、weight、可选 bias 的梯度及共享计算图梯度累积。输入为连续 FP32，归一化最后一维，宽度为正且是 32 的倍数，总元素数不超过 u32；支持任意数量的前导维度和空 batch。宽度超过 4096 时在设备端分块计算全行均值，再以中心化平方和计算方差，反向复用保存的 mean／rstd 并合并全行梯度统计。不支持的 dtype／布局直接报错。
+RUDA 的现有 `ruda_nn::LayerNorm` 已接入 `Ascend` 和 `Autodiff<Ascend>`，包括输入、weight、可选 bias 的梯度及共享计算图梯度累积。输入为连续 FP32，归一化最后一维，宽度为正，总元素数不超过 u32；支持任意数量的前导维度和空 batch。非 32 对齐或超过 4096 的宽度在设备端分块计算全行均值，再以中心化平方和计算方差，反向复用保存的 mean／rstd 并合并全行梯度统计。不支持的 dtype／布局直接报错。
 
 当前接入使用 Cargo.toml 中固定 Git 提交的 RUDA 依赖，尚不包含在已发布的 crates.io 0.1.0 中。从本仓库运行完整张量／自动求导示例：
 
@@ -239,7 +241,7 @@ python tools/ascend/build_deepgemm.py --emit-only --out ./target/bf16-source
 ## 支持范围
 
 - 公共编译器：连续 FP32 逐元素程序；行宽为 32～4096、且为 32 的倍数。
-- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度；RMSNorm 和 LayerNorm 另提供共享 weight 梯度。运行时 Sum/Mean、Softmax/LogSoftmax、RMSNorm、LayerNorm 及反向另支持超过 4096 列的原生分块路径；直接调用完整行编译模式仍遵循 32～4096 列限制。
+- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度；RMSNorm 和 LayerNorm 另提供共享 weight 梯度。运行时 Sum/Mean、Softmax/LogSoftmax、RMSNorm、LayerNorm 及反向支持任意正行宽的原生分块路径；直接调用完整行编译模式仍遵循 32～4096 列、32 对齐限制。
 - BF16 矩阵：direct-store Dense/Batched NN/NT/TN/TT、对齐的 MGrouped NT，BF16/FP32 输出。
 - 设备代码目标为 Ascend950DT / dav-c310；不自动推断或替换目标型号。
 - Rust 程序生成 CCE，再由 Bisheng 编译为设备机器码，不是直接 Rust → 昇腾 ISA。
