@@ -115,6 +115,8 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 运行时对应 `rotary_prefix` / `rotary_prefix_backward`，公共 IR 配置为 `PrefixRotarySpec`。调用见 [rotary_prefix_tensor 示例](examples/rotary_prefix_tensor.rs)：`cargo run --locked --release --example rotary_prefix_tensor`。
 
+公共逐元素编译原生支持 FP32 `Sin`／`Cos`，现有 `Tensor::sin()`／`cos()` 及其 RUDA 自动求导可直接使用；设备端结果也可作为上述固定 RoPE 表。三角函数采用完整周期约减，workspace 以两个 32 元素对齐向量加 32 字节计入 UB 预算，并与其他顺序数学算子的 workspace 复用；不限制角度到默认多项式模式的区间，不隐式选择位置、频率或缩放。调用见 [trig_tensor 示例](examples/trig_tensor.rs)：`cargo run --locked --release --example trig_tensor`。
+
 ## LoRA 与 SwiGLU 组合
 
 `nn::bias_add(input, bias)` 显式执行 FP32 `X[...,H] + bias[H]`；`nn::residual_bias_add(input, residual, bias)` 以 `(X + residual) + bias` 的 FP32 顺序融合两次加法，residual 必须与 X 完全同形状。使用公共 Rust IR 原生向量内核，支持连续 FP32 rank 1～8、任意正 H、空 token 轴及不超过 u32 的总元素数，不做 residual 广播或类型转换。反向不保存激活值：输入及 residual 的梯度直接传递，bias 梯度在设备端按全部 token 成对求和，支持共享输入／图的梯度累积。固定 bias 不触发无用的 bias 梯度归约，不改变 Linear／LoRA 的无 bias 默认行为。调用见 [bias_tensor 示例](examples/bias_tensor.rs)：`cargo run --locked --release --example bias_tensor`。

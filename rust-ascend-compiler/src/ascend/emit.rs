@@ -23,6 +23,12 @@ pub(super) fn emit(p:&Program,a:&Allocation,o:&AscendOptions,math_workspace:usiz
     if p.nodes.iter().any(|n|matches!(n,Node::Unary(Unary::Tanh,_))) {
         s.push_str("#include \"adv_api/math/tanh.h\"\nstatic constexpr AscendC::TanhConfig ruda_tanh_config{AscendC::TanhAlgo::SUBSECTION_COMPENSATION};\n");
     }
+    if p.nodes.iter().any(|n|matches!(n,Node::Unary(Unary::Sin,_))) {
+        s.push_str("#include \"adv_api/math/sin.h\"\nstatic constexpr AscendC::SinConfig ruda_sin_config{AscendC::SinAlgo::RADIAN_REDUCTION};\n");
+    }
+    if p.nodes.iter().any(|n|matches!(n,Node::Unary(Unary::Cos,_))) {
+        s.push_str("#include \"adv_api/math/cos.h\"\nstatic constexpr AscendC::CosConfig ruda_cos_config{AscendC::CosAlgo::RADIAN_REDUCTION};\n");
+    }
     let gather=p.load_indices.values().any(|index| **index!=super::index::Index::Lane)
         || p.nodes.iter().any(|node|matches!(node,Node::UniformInput(..)));
     let scatter=p.store_indices.values().any(|index| **index!=super::index::Index::Lane);
@@ -129,7 +135,9 @@ pub(super) fn emit(p:&Program,a:&Allocation,o:&AscendOptions,math_workspace:usiz
                 if op==Unary::Neg {format!("AscendC::Muls({d}, {x}, -1.0f, aligned);")}
                 else if op==Unary::Erf {format!("AscendC::Erf<float, false, ruda_erf_config>({d}, {x}, math_tmp, aligned);")}
                 else if op==Unary::Tanh {format!("AscendC::Tanh<float, false, ruda_tanh_config>({d}, {x}, math_tmp, aligned);")}
-                else {let fun=match op{Unary::Abs=>"Abs",Unary::Exp=>"Exp",Unary::Log=>"Ln",Unary::Sqrt=>"Sqrt",Unary::Rsqrt=>"Rsqrt",Unary::Recip=>"Reciprocal",Unary::Neg|Unary::Erf|Unary::Tanh=>unreachable!()};format!("AscendC::{fun}({d}, {x}, aligned);")}
+                else if op==Unary::Sin {format!("AscendC::Sin<float, false, ruda_sin_config>({d}, {x}, math_tmp, aligned);")}
+                else if op==Unary::Cos {format!("AscendC::Cos<float, false, ruda_cos_config>({d}, {x}, math_tmp, aligned);")}
+                else {let fun=match op{Unary::Abs=>"Abs",Unary::Exp=>"Exp",Unary::Log=>"Ln",Unary::Sqrt=>"Sqrt",Unary::Rsqrt=>"Rsqrt",Unary::Recip=>"Reciprocal",Unary::Neg|Unary::Erf|Unary::Tanh|Unary::Sin|Unary::Cos=>unreachable!()};format!("AscendC::{fun}({d}, {x}, aligned);")}
             },
             Node::Binary(op,x,y)=>{let x=value(p,a,x);let y=value(p,a,y);let fun=match op{Binary::Add=>"Add",Binary::Sub=>"Sub",Binary::Mul=>"Mul",Binary::Div=>"Div",Binary::Max=>"Max"};format!("AscendC::{fun}({d}, {x}, {y}, aligned);")},
         };

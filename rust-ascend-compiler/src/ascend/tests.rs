@@ -64,6 +64,31 @@ fn activation_kernel(make:impl FnOnce(Variable)->Arithmetic)->KernelDefinition {
         assert!(compile(activation_kernel(|lhs|Arithmetic::Powi(BinaryOperator{lhs,rhs})),1).is_err());
     }
 }
+#[test]fn full_range_trigonometry_uses_sdk_workspace_and_one_shared_buffer() {
+    for (make,call) in [(Arithmetic::Sin as fn(UnaryOperator)->Arithmetic,"Sin<float, false, ruda_sin_config>"),
+        (Arithmetic::Cos as fn(UnaryOperator)->Arithmetic,"Cos<float, false, ruda_cos_config>")] {
+        let mut kernel=activation_kernel(|input|make(UnaryOperator{input}));
+        for tile in [8u32,24,32,64,256,4096] {
+            let mut options=opt(65);options.tile_elements=tile;
+            let compiled=AscendCompiler.compile(kernel.clone(),&options,ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+            let workspace=tile.div_ceil(32) as usize*32*8+32;
+            let p=lower::lower(kernel.clone(),65).unwrap();let slots=plan::allocate(&p,true).unwrap().slots;
+            assert_eq!(compiled.ub_bytes() as usize,(p.bindings.len()+slots)*tile as usize*4+workspace);
+            assert!(compiled.source().contains(call));assert!(compiled.source().contains("RADIAN_REDUCTION"));
+            assert!(compiled.source().contains(&format!("pipe.InitBuffer(math_workspace, {workspace}U)")));
+            options.ub_limit_bytes=compiled.ub_bytes()-1;
+            assert!(AscendCompiler.compile(kernel.clone(),&options,ExecutionMode::Checked,UIntKind::U64.into()).is_err());
+        }
+        kernel.body.instructions.insert(2,Instruction::new(Arithmetic::Cos(UnaryOperator{input:v(999)}),v(998)));
+        kernel.body.instructions.insert(3,Instruction::new(Arithmetic::Tanh(UnaryOperator{input:v(998)}),v(997)));
+        if let Operation::Operator(Operator::IndexAssign(store))=&mut kernel.body.instructions[4].operation {store.value=v(997);}
+        let p=lower::lower(kernel.clone(),65).unwrap();assert_eq!(plan::math_workspace(&p,8).unwrap(),288);
+        let compiled=compile(kernel.clone(),65).unwrap();assert_eq!(compiled.source().matches("TPosition::VECCALC> math_workspace;").count(),1);
+        kernel.body.instructions.insert(4,Instruction::new(Arithmetic::Erf(UnaryOperator{input:v(997)}),v(996)));
+        if let Operation::Operator(Operator::IndexAssign(store))=&mut kernel.body.instructions[5].operation {store.value=v(996);}
+        assert_eq!(plan::math_workspace(&lower::lower(kernel,65).unwrap(),8).unwrap(),768);
+    }
+}
 #[test]fn real_common_ir_generates_vector_primitives(){let k=compile(definition(MapProgram::Add),1025).unwrap();assert!(k.source().contains("AscendC::Add("));assert!(k.source().contains("DataCopyPad"));assert!(k.source().contains("count * uint32_t(sizeof(float))"));assert!(!k.source().contains("aclnn"));assert!(!k.source().contains("deep_gemm"));assert_eq!(k.bindings().len(),3);assert_eq!(k.bindings()[2].bytes,4100);}
 #[test]fn every_algorithm_is_a_common_kernel(){for p in [MapProgram::Copy,MapProgram::Add,MapProgram::Mul,MapProgram::Silu,MapProgram::SiluMul,MapProgram::SiluBackward,MapProgram::SiluMulBackward]{let k=compile(definition(p),513).unwrap();assert_eq!(k.bindings().len(),p.input_count()+p.output_count());assert!(k.ub_bytes()<=131072);}}
 #[test]fn missing_target_is_not_guessed(){assert!(AscendCompiler.compile(definition(MapProgram::Add),&AscendOptions::default(),ExecutionMode::Checked,UIntKind::U64.into()).is_err());}
@@ -135,7 +160,7 @@ fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])->Vec<Vec<f
         Node::Constant(bits)=>vec![f32::from_bits(bits);elements],
         Node::IndexFloat(i)=>(0..elements as u64).map(|lane|p.index_values[i].eval(lane) as f32).collect(),
         Node::IndexSelect(i,a,b)=>(0..elements).map(|lane|if p.predicates[i].eval(lane as u64) {nodes[a][lane]} else {nodes[b][lane]}).collect(),
-        Node::Unary(u,a)=>nodes[a].iter().map(|&v|match u{Unary::Neg=>-v,Unary::Abs=>v.abs(),Unary::Exp=>v.exp(),Unary::Log=>v.ln(),Unary::Sqrt=>v.sqrt(),Unary::Rsqrt=>1.0/v.sqrt(),Unary::Recip=>1.0/v,Unary::Erf=>erf_reference(v),Unary::Tanh=>v.tanh()}).collect(),
+        Node::Unary(u,a)=>nodes[a].iter().map(|&v|match u{Unary::Neg=>-v,Unary::Abs=>v.abs(),Unary::Exp=>v.exp(),Unary::Log=>v.ln(),Unary::Sqrt=>v.sqrt(),Unary::Rsqrt=>1.0/v.sqrt(),Unary::Recip=>1.0/v,Unary::Erf=>erf_reference(v),Unary::Tanh=>v.tanh(),Unary::Sin=>v.sin(),Unary::Cos=>v.cos()}).collect(),
         Node::Binary(b,a,c)=>nodes[a].iter().zip(&nodes[c]).map(|(&v,&w)|match b{Binary::Add=>v+w,Binary::Sub=>v-w,Binary::Mul=>v*w,Binary::Div=>v/w,Binary::Max=>v.max(w)}).collect()};nodes.push(z);}
     p.stores.iter().map(|&(_,v)|nodes[v].clone()).collect()
 }

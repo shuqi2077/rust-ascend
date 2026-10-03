@@ -6,7 +6,7 @@ use std::rc::Rc;
 use super::index::Index;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip, Erf, Tanh }
+pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip, Erf, Tanh, Sin, Cos }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Binary { Add, Sub, Mul, Div, Max }
 #[derive(Clone, Copy, Debug)]
@@ -254,7 +254,7 @@ impl Lower {
                     let result=match result {Some(node)=>node,None=>self.vector(Variable::constant(ConstantValue::Float(1.),f32_type()))?};
                     return self.assign(dst,Value::Vector(result));
                 }
-                let (kind,op)=match a { Arithmetic::Neg(op)=>(Unary::Neg,op),Arithmetic::Abs(op)=>(Unary::Abs,op),Arithmetic::Exp(op)=>(Unary::Exp,op),Arithmetic::Log(op)=>(Unary::Log,op),Arithmetic::Sqrt(op)=>(Unary::Sqrt,op),Arithmetic::InverseSqrt(op)=>(Unary::Rsqrt,op),Arithmetic::Recip(op)=>(Unary::Recip,op),Arithmetic::Erf(op)=>(Unary::Erf,op),Arithmetic::Tanh(op)=>(Unary::Tanh,op),_=>return Err(unsupported(format!("arithmetic {a:?}"))) };
+                let (kind,op)=match a { Arithmetic::Neg(op)=>(Unary::Neg,op),Arithmetic::Abs(op)=>(Unary::Abs,op),Arithmetic::Exp(op)=>(Unary::Exp,op),Arithmetic::Log(op)=>(Unary::Log,op),Arithmetic::Sqrt(op)=>(Unary::Sqrt,op),Arithmetic::InverseSqrt(op)=>(Unary::Rsqrt,op),Arithmetic::Recip(op)=>(Unary::Recip,op),Arithmetic::Erf(op)=>(Unary::Erf,op),Arithmetic::Tanh(op)=>(Unary::Tanh,op),Arithmetic::Sin(op)=>(Unary::Sin,op),Arithmetic::Cos(op)=>(Unary::Cos,op),_=>return Err(unsupported(format!("arithmetic {a:?}"))) };
                 let input=self.vector(op.input)?;self.add(dst,Node::Unary(kind,input))
             },
             other=>Err(unsupported(format!("operation {other:?}; no fallback to another kernel/compiler"))),
