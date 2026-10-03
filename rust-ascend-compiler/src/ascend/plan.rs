@@ -2,6 +2,10 @@
 use super::{Result,invalid,lower::{Program,Node,Unary}};
 #[derive(Debug)]
 pub(super) struct Allocation { pub node_slots:Vec<Option<usize>>,pub slots:usize }
+/// SDK Compare's count is a multiple of 64 FP32 lanes; logical dispatch is unchanged.
+pub(super) fn map_capacity(p:&Program,tile:u32)->u32 {
+    if p.nodes.iter().any(|n|matches!(n,Node::Compare(..))) {tile.div_ceil(64)*64} else {tile}
+}
 /// SDK FP32 maximum workspace: Erf three vectors, Tanh one, minimum 256 bytes/vector.
 /// Full-range Sin/Cos: two 32-element-aligned vectors plus 32 bytes.
 /// One separate buffer is reused only across barrier-separated math instructions.

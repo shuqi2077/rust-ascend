@@ -16,6 +16,7 @@ mod loss;
 mod mask;
 mod heads;
 mod affine;
+mod piecewise;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -51,6 +52,7 @@ pub use crate::tensor::EmbeddingOptions;
 pub use crate::tensor::{LossReduction,NllLossOptions};
 pub use rust_ascend_compiler::ascend::mask_programs::CausalMaskSpec;
 pub use rust_ascend_compiler::ascend::heads_programs::RepeatKvSpec;
+pub use rust_ascend_compiler::ascend::piecewise_programs::PiecewiseActivation;
 pub use rust_ascend_compiler::ascend::rotary_programs::{RotaryLayout,PrefixRotarySpec};
 use rust_ascend_compiler::ascend::{AscendCompiler, AscendOptions, AscendTarget};
 use std::{
@@ -134,6 +136,16 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Explicit native rank 1..8 contiguous FP32 ReLU or ordered upper/lower Clamp.
+    /// Empty axes and logical tails are retained; bounds are specialized from their exact FP32 bits.
+    pub fn piecewise_activation(client:&ComputeClient<Self>,input:TensorBuffer,activation:PiecewiseActivation)->Result<TensorBuffer> {
+        piecewise::execute(client,input,None,activation)
+    }
+    /// Mask dY using the saved original X. ReLU has zero derivative at zero;
+    /// Clamp passes dY at equal boundaries and zeros strictly clipped lanes.
+    pub fn piecewise_activation_backward(client:&ComputeClient<Self>,input:TensorBuffer,grad:TensorBuffer,activation:PiecewiseActivation)->Result<TensorBuffer> {
+        piecewise::execute(client,input,Some(grad),activation)
+    }
     /// Native FP32 X[...,H] + bias[H], or (X + residual) + bias, with exact shapes.
     /// Positive H, empty leading axes and logical tails; no implicit matrix bias.
     pub fn bias_add(client:&ComputeClient<Self>,input:TensorBuffer,bias:TensorBuffer,residual:Option<TensorBuffer>)->Result<TensorBuffer> {

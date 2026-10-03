@@ -10,11 +10,17 @@ pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip, Erf, Tanh, Sin, 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Binary { Add, Sub, Mul, Div, Max }
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Node { Input(usize), UniformInput(usize,u64), Constant(u32), IndexFloat(usize), IndexSelect(usize,usize,usize), Unary(Unary, usize), Binary(Binary, usize, usize) }
+pub(super) enum Node { Input(usize), UniformInput(usize,u64), Constant(u32), IndexFloat(usize), IndexSelect(usize,usize,usize), Compare(IndexCompare,usize,usize), DataSelect(usize,usize,usize), Unary(Unary, usize), Binary(Binary, usize, usize) }
 impl Node { pub fn inputs(&self) -> Vec<usize> { match self {
-    Self::Unary(_, a) => vec![*a], Self::Binary(_, a,b)|Self::IndexSelect(_,a,b) => vec![*a,*b], _ => vec![] } } }
+    Self::Unary(_, a) => vec![*a], Self::Binary(_, a,b)|Self::IndexSelect(_,a,b)|Self::Compare(_,a,b) => vec![*a,*b],
+    Self::DataSelect(mask,a,b)=>vec![*mask,*a,*b], _ => vec![] } } }
 #[derive(Clone,Copy,Debug)]
 pub(super) enum IndexCompare {Eq,Ne,Lt,Le,Gt,Ge}
+impl IndexCompare {
+    pub fn cce(self)->&'static str {match self {Self::Eq=>"EQ",Self::Ne=>"NE",Self::Lt=>"LT",Self::Le=>"LE",Self::Gt=>"GT",Self::Ge=>"GE"}}
+    #[cfg(test)]
+    pub fn float_eval(self,a:f32,b:f32)->bool {match self {Self::Eq=>a==b,Self::Ne=>a!=b,Self::Lt=>a<b,Self::Le=>a<=b,Self::Gt=>a>b,Self::Ge=>a>=b}}
+}
 #[derive(Clone,Debug)]
 pub(super) struct IndexPredicate {pub comparison:IndexCompare,pub lhs:Rc<Index>,pub rhs:Rc<Index>}
 impl IndexPredicate {
@@ -38,7 +44,7 @@ pub(super) struct Program {
     pub predicates:Vec<IndexPredicate>,
 }
 #[derive(Clone, Debug)]
-enum Value { Lane, Length, Inside, Outside, Predicate(usize), Index(u64), Mapped(Rc<Index>), Vector(usize) }
+enum Value { Lane, Length, Inside, Outside, Predicate(usize), DataPredicate(usize), Index(u64), Mapped(Rc<Index>), Vector(usize) }
 fn f32_type() -> Type { Type::scalar(ElemType::Float(FloatKind::F32)) }
 fn is_index(ty: Type) -> bool { ty == Type::scalar(ElemType::UInt(UIntKind::U32)) || ty == Type::scalar(ElemType::UInt(UIntKind::U64)) }
 fn valid_local(v: Variable) -> bool { matches!(v.kind, VariableKind::LocalMut{..} | VariableKind::LocalConst{..} | VariableKind::Versioned{..}) }
@@ -74,7 +80,7 @@ impl Lower {
     }
     fn assign(&mut self,out:Variable,value:Value)->Result<()> {
         if !valid_local(out) { return Err(invalid(format!("not a local destination: {out:?}"))); }
-        let ty_ok=match value { Value::Vector(_)=>out.ty==f32_type(),Value::Outside|Value::Inside|Value::Predicate(_)=>out.ty==Type::scalar(ElemType::Bool),_=>is_index(out.ty) };
+        let ty_ok=match value { Value::Vector(_)=>out.ty==f32_type(),Value::Outside|Value::Inside|Value::Predicate(_)|Value::DataPredicate(_)=>out.ty==Type::scalar(ElemType::Bool),_=>is_index(out.ty) };
         if !ty_ok { return Err(invalid("IR output type does not match operation")); }
         if self.values.contains_key(&out) && !matches!(out.kind,VariableKind::LocalMut{..}) { return Err(invalid("immutable local assigned twice")); }
         self.values.insert(out,value);Ok(())
@@ -112,8 +118,13 @@ impl Lower {
                 let (kind,op)=match comparison {Comparison::Equal(op)=>(IndexCompare::Eq,op),Comparison::NotEqual(op)=>(IndexCompare::Ne,op),
                     Comparison::Lower(op)=>(IndexCompare::Lt,op),Comparison::LowerEqual(op)=>(IndexCompare::Le,op),
                     Comparison::Greater(op)=>(IndexCompare::Gt,op),Comparison::GreaterEqual(op)=>(IndexCompare::Ge,op),
-                    _=>return Err(unsupported("only unsigned layout/index comparisons are supported"))};
+                    _=>return Err(unsupported("only unsigned index or FP32 data comparisons are supported"))};
                 let dst=out.ok_or_else(||invalid("comparison output missing"))?;
+                if op.lhs.ty==f32_type() && op.rhs.ty==f32_type() {
+                    let a=self.vector(op.lhs)?;let b=self.vector(op.rhs)?;
+                    let node=self.p.nodes.len();self.p.nodes.push(Node::Compare(kind,a,b));
+                    return self.assign(dst,Value::DataPredicate(node));
+                }
                 if matches!(kind,IndexCompare::Lt|IndexCompare::Ge)
                     && matches!((self.resolve(op.lhs)?,self.resolve(op.rhs)?),(Value::Lane,Value::Length)) {
                     return self.assign(dst,if matches!(kind,IndexCompare::Lt) {Value::Inside} else {Value::Outside});
@@ -130,7 +141,10 @@ impl Lower {
                     Value::Predicate(id)=>{
                         let a=self.vector(op.then)?;let b=self.vector(op.or_else)?;self.add(dst,Node::IndexSelect(id,a,b))
                     },
-                    _=>Err(unsupported("select condition must be a checked unsigned index predicate")),
+                    Value::DataPredicate(mask)=>{
+                        let a=self.vector(op.then)?;let b=self.vector(op.or_else)?;self.add(dst,Node::DataSelect(mask,a,b))
+                    },
+                    _=>Err(unsupported("select condition must be a checked index or FP32 data predicate")),
                 }
             },
             Operation::Operator(Operator::Not(op))=>{

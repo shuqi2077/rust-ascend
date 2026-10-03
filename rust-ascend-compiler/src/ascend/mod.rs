@@ -19,6 +19,7 @@ pub mod wide_programs;
 pub mod mask_programs;
 pub mod heads_programs;
 pub mod affine_programs;
+pub mod piecewise_programs;
 #[cfg(test)] mod tests;
 
 use ruda_core::{backtrace::BackTrace, compiler::{CompilationError, Compiler},
@@ -164,8 +165,9 @@ fn compile_kernel(kernel:KernelDefinition,o:&AscendOptions,mode:ExecutionMode,ad
         let gather = p.load_indices.values().any(|index| **index != index::Index::Lane)
             || p.nodes.iter().any(|node|matches!(node,lower::Node::UniformInput(..)));
         let scatter=p.store_indices.values().any(|index| **index!=index::Index::Lane);
-        let math_workspace=plan::math_workspace(&p,o.tile_elements)?;
-        let ub = vectors.checked_mul(o.tile_elements as usize).and_then(|n| n.checked_mul(4))
+        let capacity=plan::map_capacity(&p,o.tile_elements);
+        let math_workspace=plan::math_workspace(&p,capacity)?;
+        let ub = vectors.checked_mul(capacity as usize).and_then(|n| n.checked_mul(4))
             .and_then(|n|n.checked_add(if gather {32}else{0})).and_then(|n|n.checked_add(if scatter {32}else{0}))
             .and_then(|n|n.checked_add(math_workspace))
             .ok_or_else(|| invalid("UB byte count overflow"))?;

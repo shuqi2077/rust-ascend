@@ -152,7 +152,7 @@ assert!(compile(k,9).unwrap().source().contains("0x80000000U"));}
 fn reference(op:MapProgram,x:&[f32],y:&[f32],dy:&[f32])->Vec<Vec<f32>>{
     evaluate(definition(op),x.len(),[x,y,dy])
 }
-fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])->Vec<Vec<f32>>{
+pub(super) fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])->Vec<Vec<f32>>{
     let p=lower::lower(kernel,elements as u64).unwrap();let mut nodes:Vec<Vec<f32>>=vec![];
     for node in &p.nodes{let z:Vec<f32>=match *node{
         Node::Input(i)=>(0..elements as u64).map(|lane|inputs[i][p.load_indices[&i].eval(lane) as usize]).collect(),
@@ -160,6 +160,8 @@ fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])->Vec<Vec<f
         Node::Constant(bits)=>vec![f32::from_bits(bits);elements],
         Node::IndexFloat(i)=>(0..elements as u64).map(|lane|p.index_values[i].eval(lane) as f32).collect(),
         Node::IndexSelect(i,a,b)=>(0..elements).map(|lane|if p.predicates[i].eval(lane as u64) {nodes[a][lane]} else {nodes[b][lane]}).collect(),
+        Node::Compare(comparison,a,b)=>(0..elements).map(|lane|if comparison.float_eval(nodes[a][lane],nodes[b][lane]) {1.} else {0.}).collect(),
+        Node::DataSelect(mask,a,b)=>(0..elements).map(|lane|if nodes[mask][lane]!=0. {nodes[a][lane]} else {nodes[b][lane]}).collect(),
         Node::Unary(u,a)=>nodes[a].iter().map(|&v|match u{Unary::Neg=>-v,Unary::Abs=>v.abs(),Unary::Exp=>v.exp(),Unary::Log=>v.ln(),Unary::Sqrt=>v.sqrt(),Unary::Rsqrt=>1.0/v.sqrt(),Unary::Recip=>1.0/v,Unary::Erf=>erf_reference(v),Unary::Tanh=>v.tanh(),Unary::Sin=>v.sin(),Unary::Cos=>v.cos()}).collect(),
         Node::Binary(b,a,c)=>nodes[a].iter().zip(&nodes[c]).map(|(&v,&w)|match b{Binary::Add=>v+w,Binary::Sub=>v-w,Binary::Mul=>v*w,Binary::Div=>v/w,Binary::Max=>v.max(w)}).collect()};nodes.push(z);}
     p.stores.iter().map(|&(_,v)|nodes[v].clone()).collect()
@@ -201,8 +203,46 @@ fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])->Vec<Vec<f
     }
     let mut invalid=original;
     for instruction in &mut invalid.body.instructions {if let Operation::Comparison(Comparison::Greater(op))=&mut instruction.operation {
-        op.lhs=Variable::constant(ConstantValue::Float(0.),f());op.rhs=op.lhs;
+        op.lhs=Variable::constant(ConstantValue::Float(0.),f());
     }}
     assert!(compile(invalid,42).is_err());
+}
+#[test]fn fp32_predicates_select_bits_with_padded_capacity_and_live_mask() {
+    let pairs=[(-0.,0.),(0.,-0.),(-1.,1.),(1.,-1.),(f32::INFINITY,f32::INFINITY),
+        (f32::NEG_INFINITY,f32::INFINITY),(f32::from_bits(0x7fc12345),0.),(0.,f32::from_bits(0x7fc23456))];
+    let comparisons:[fn(BinaryOperator)->Comparison;6]=[Comparison::Equal,Comparison::NotEqual,Comparison::Lower,
+        Comparison::LowerEqual,Comparison::Greater,Comparison::GreaterEqual];
+    for (kind,comparison) in comparisons.into_iter().enumerate() {for elements in [0usize,1,7,63,65,257] {
+        let mut kernel=definition(MapProgram::Add);let lhs=kernel.body.instructions[0].out.unwrap();let rhs=kernel.body.instructions[1].out.unwrap();
+        let mask=Variable::new(VariableKind::LocalConst{id:991},Type::new(ElemType::Bool));
+        let copied=Variable::new(VariableKind::LocalConst{id:992},Type::new(ElemType::Bool));
+        kernel.body.instructions[2]=Instruction::new(comparison(BinaryOperator {lhs,rhs}),mask);
+        kernel.body.instructions.insert(3,Instruction::new(Operation::Copy(mask),copied));
+        kernel.body.instructions.insert(4,Instruction::new(Arithmetic::Add(BinaryOperator {lhs,rhs}),v(993)));
+        kernel.body.instructions.insert(5,Instruction::new(Operator::Select(Select {cond:copied,then:lhs,or_else:rhs}),v(994)));
+        if let Operation::Operator(Operator::IndexAssign(store))=&mut kernel.body.instructions[6].operation {store.value=v(994);}
+        let a:Vec<f32>=(0..elements).map(|i|pairs[i%pairs.len()].0).collect();let b:Vec<f32>=(0..elements).map(|i|pairs[i%pairs.len()].1).collect();
+        let output=evaluate(kernel.clone(),elements,[&a,&b,&[]]);
+        for lane in 0..elements {let x=a[lane];let y=b[lane];let cond=match kind {0=>x==y,1=>x!=y,2=>x<y,3=>x<=y,4=>x>y,_=>x>=y};
+            assert_eq!(output[0][lane].to_bits(),(if cond {x} else {y}).to_bits());}
+        let p=lower::lower(kernel.clone(),elements as u64).unwrap();let alloc=plan::allocate(&p,true).unwrap();
+        let compare=p.nodes.iter().position(|n|matches!(n,Node::Compare(..))).unwrap();
+        let select=p.nodes.iter().position(|n|matches!(n,Node::DataSelect(..))).unwrap();
+        for i in compare+1..=select {assert_ne!(alloc.node_slots[compare],alloc.node_slots[i]);}
+        for tile in [8u32,24,64,72,256,4096] {
+            let mut options=opt(elements as u64);options.tile_elements=tile;
+            let compiled=AscendCompiler.compile(kernel.clone(),&options,ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+            assert_eq!(compiled.tile_elements(),tile);assert_eq!(compiled.ub_bytes() as usize,(p.bindings.len()+alloc.slots)*tile.div_ceil(64) as usize*64*4);
+            assert!(compiled.source().contains("AscendC::Compare("));assert!(compiled.source().contains("AscendC::Select("));
+            assert!(compiled.source().contains("(count + 63U) / 64U * 64U"));assert!(compiled.source().contains("VSEL_TENSOR_TENSOR_MODE"));
+            options.ub_limit_bytes=compiled.ub_bytes()-1;
+            assert!(AscendCompiler.compile(kernel.clone(),&options,ExecutionMode::Checked,UIntKind::U64.into()).is_err());
+        }
+        let mut branched=kernel.clone();let mut child=Scope::root(false);child.instructions.push(Instruction::no_out(Branch::Return));
+        branched.body.instructions.insert(3,Instruction::no_out(Branch::If(Box::new(If {cond:mask,scope:child}))));
+        assert!(compile(branched,elements as u64).is_err());
+        let mut global_bool=kernel;global_bool.buffers[0].ty=Type::new(ElemType::Bool);
+        assert!(compile(global_bool,elements as u64).is_err());
+    }}
 }
 #[test]fn backward_equations_match_finite_differences(){let x=[-2.0,-0.3,0.2,1.7];let up=[1.2,0.7,-0.9,2.0];let dy=[0.5,-1.0,0.2,0.8];let grads=reference(MapProgram::SiluMulBackward,&x,&up,&dy);let h=0.001;for j in 0..4{let mut hi=x;let mut lo=x;hi[j]+=h;lo[j]-=h;let a=reference(MapProgram::SiluMul,&hi,&up,&[]);let b=reference(MapProgram::SiluMul,&lo,&up,&[]);let finite=(a[0][j]-b[0][j])/(2.0*h)*dy[j];assert!((grads[0][j]-finite).abs()<0.001);let expected=dy[j]*x[j]/(1.0+(-x[j]).exp());assert!((grads[1][j]-expected).abs()<1e-6);}}

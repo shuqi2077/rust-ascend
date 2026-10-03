@@ -179,6 +179,8 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 ## 原生 SiLU 门控乘法
 
+公共逐元素编译支持 FP32 的六种大小／相等比较及内核内 Bool 条件 `Select`，使用设备向量 Compare／Select；比较所需的 64-lane 局部 padding 计入 UB，仍只读写原逻辑域。`nn::relu(input)` 与 `nn::clamp(input, min, max)` 提供连续 FP32、rank 1～8 的显式原生前后向，支持空轴和尾部，接入现有 RUDA 图与共享梯度累积；已跟踪输入独立保存设备快照。ReLU 将 `X <= 0` 置为正零，零点导数为零；Clamp 按先上界、后下界的比较／选择顺序执行，严格越界导数为零，相等边界保留输入及梯度，NaN 比较不触发裁剪；不交换上下界或拒绝非有限界值。这些入口不替换原 `Tensor::relu()`／`clamp()` 的调度，也不启用全局 Bool 张量或数据依赖分支。调用见 [piecewise_tensor 示例](examples/piecewise_tensor.rs)：`cargo run --locked --release --example piecewise_tensor`。
+
 公共逐元素编译支持 FP32 `Erf`、`Tanh` 和标量常量整数幂 `Powi`。Erf／Tanh 使用独立、计入 UB 预算的数学库 workspace；整数幂使用乘法平方展开，负指数先取倒数，保留负底数的整数奇偶语义。现有 `Tensor::erf()`、`tanh()`、整数 `powf_scalar()` 以及 `ruda_nn::Gelu::new()`／`new_approximate()` 直接复用 RUDA 张量与求导定义，不另建模型专用接口。调用见 [activation_tensor 示例](examples/activation_tensor.rs)：`cargo run --locked --release --example activation_tensor`。
 
 `AscendRuntime::silu_mul` / `silu_mul_backward` 使用已有公共逐元素 IR，计算 `SiLU(gate) * up` 与两路输入梯度。输入为形状相同的连续 FP32 缓冲区，支持任意元素数、非对齐尾部与空张量；不做隐式广播或低精度转换。
