@@ -19,11 +19,25 @@ fn apply<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>,activation:Piecewis
 pub fn relu<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>)->Result<Tensor<B,D>> {
     apply(input,PiecewiseActivation::Relu)
 }
+/// Explicit FP32 LeakyReLU: only X < 0 is multiplied by the supplied slope.
+/// Backward retains the original RUDA masked branches and shared-parent addition.
+pub fn leaky_relu<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>,negative_slope:f32)->Result<Tensor<B,D>> {
+    apply(input,PiecewiseActivation::LeakyRelu {negative_slope})
+}
 /// Explicit native FP32 upper-then-lower Clamp, preserving RUDA's default comparison/select order.
 /// Bounds may be infinite, unordered or NaN; no implicit validation, normalization or bound swapping.
 /// Equal-boundary lanes retain their input and derivative; strictly clipped derivatives are +0.
 pub fn clamp<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>,min:f32,max:f32)->Result<Tensor<B,D>> {
     apply(input,PiecewiseActivation::Clamp {min,max})
+}
+/// FP32 alpha * X + beta, then explicit upper/lower Clamp to [0,1].
+/// Reuses native arithmetic and RUDA autodiff; derivatives pass through equal boundaries.
+pub fn hard_sigmoid<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>,alpha:f32,beta:f32)->Result<Tensor<B,D>> {
+    apply(input,PiecewiseActivation::HardSigmoid {alpha,beta})
+}
+/// FP32 X * HardSigmoid(X, 1/6, 1/2), retaining RUDA's shared-input computation graph.
+pub fn hard_swish<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>)->Result<Tensor<B,D>> {
+    Ok(input.clone()*hard_sigmoid(input,1f32/6.,0.5)?)
 }
 fn forward(input:Primitive,activation:PiecewiseActivation)->Result<Primitive> {
     let client=input.client.clone();let device=input.device.clone();

@@ -3,7 +3,7 @@ mod attention;
 mod affine;
 pub use affine::{BiasAddBackend,bias_add,residual_bias_add};
 mod piecewise;
-pub use piecewise::{PiecewiseBackend,PiecewiseActivation,relu,clamp};
+pub use piecewise::{PiecewiseBackend,PiecewiseActivation,relu,clamp,leaky_relu,hard_sigmoid,hard_swish};
 mod padded_attention;
 pub use padded_attention::{scaled_dot_product_attention_padded_bf16_fp32,causal_attention_padded_bf16_fp32,
     grouped_query_attention_padded_bf16_fp32,causal_grouped_query_attention_padded_bf16_fp32};
