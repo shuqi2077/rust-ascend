@@ -12,6 +12,7 @@ mod rotary;
 mod wide_rows;
 mod indexing;
 mod loss;
+mod mask;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -45,6 +46,7 @@ pub use ruda_runtime::runtime::normalization::TensorBuffer;
 pub use crate::tensor::deepgemm::Transpose;
 pub use crate::tensor::EmbeddingOptions;
 pub use crate::tensor::{LossReduction,NllLossOptions};
+pub use rust_ascend_compiler::ascend::mask_programs::CausalMaskSpec;
 pub use rust_ascend_compiler::ascend::rotary_programs::RotaryLayout;
 use rust_ascend_compiler::ascend::{AscendCompiler, AscendOptions, AscendTarget};
 use std::{
@@ -128,6 +130,8 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Native common-IR FP32 causal mask using exact unsigned absolute positions.
+    pub fn causal_mask(client:&ComputeClient<Self>,spec:CausalMaskSpec)->Result<TensorBuffer> {mask::causal(client,spec)}
     /// Independent contiguous FP32/FP16/BF16/INT32/INT64 device-to-device snapshot.
     pub fn copy_contiguous(client:&ComputeClient<Self>,input:TensorBuffer)->Result<TensorBuffer> {
         indexing::copy_contiguous(client,input)

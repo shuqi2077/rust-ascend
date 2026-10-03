@@ -20,7 +20,7 @@ pub(super) fn emit(p:&Program,a:&Allocation,o:&AscendOptions)->String{
     let gather=p.load_indices.values().any(|index| **index!=super::index::Index::Lane)
         || p.nodes.iter().any(|node|matches!(node,Node::UniformInput(..)));
     let scatter=p.store_indices.values().any(|index| **index!=super::index::Index::Lane);
-    if gather || scatter || !p.index_values.is_empty() {s.push_str("template<AscendC::HardEvent event>\n__aicore__ inline void ruda_map_sync(AscendC::TPipe& pipe) {\n    const int32_t id = static_cast<int32_t>(pipe.FetchEventID(event));\n    AscendC::SetFlag<event>(id);\n    AscendC::WaitFlag<event>(id);\n}\n");}
+    if gather || scatter || !p.index_values.is_empty() || !p.predicates.is_empty() {s.push_str("template<AscendC::HardEvent event>\n__aicore__ inline void ruda_map_sync(AscendC::TPipe& pipe) {\n    const int32_t id = static_cast<int32_t>(pipe.FetchEventID(event));\n    AscendC::SetFlag<event>(id);\n    AscendC::WaitFlag<event>(id);\n}\n");}
     let args=(0..p.bindings.len()).map(|i|format!("GM_ADDR b{i}")).collect::<Vec<_>>().join(", ");
     writeln!(s,"extern \"C\" __global__ __aicore__ void {}({args}) {{",p.name).unwrap();
     line(&mut s,"KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);");
@@ -112,6 +112,7 @@ pub(super) fn emit(p:&Program,a:&Allocation,o:&AscendOptions)->String{
             Node::Constant(bits)=>format!("AscendC::Duplicate({d}, ruda_float_bits(0x{bits:08x}U), aligned);"),
             Node::UniformInput(binding,index)=>format!("AscendC::DataCopyPad(gather_cell, g{binding}[{index}ULL], gather_copy, gather_pad);\n    ruda_map_sync<AscendC::HardEvent::MTE2_S>(pipe);\n    const float uniform{n} = gather_cell.GetValue(0);\n    ruda_map_sync<AscendC::HardEvent::S_MTE2>(pipe);\n    AscendC::Duplicate({d}, uniform{n}, aligned);"),
             Node::IndexFloat(index)=>format!("ruda_map_sync<AscendC::HardEvent::V_S>(pipe);\n    for (uint32_t lane = 0; lane < count; ++lane) {{ {d}.SetValue(lane, static_cast<float>({})); }}\n    for (uint32_t lane = count; lane < aligned; ++lane) {{ {d}.SetValue(lane, 0.0f); }}\n    ruda_map_sync<AscendC::HardEvent::S_V>(pipe);",p.index_values[index].cce()),
+            Node::IndexSelect(predicate,lhs,rhs)=>format!("ruda_map_sync<AscendC::HardEvent::V_S>(pipe);\n    for (uint32_t lane = 0; lane < count; ++lane) {{ {d}.SetValue(lane, {} ? {}.GetValue(lane) : {}.GetValue(lane)); }}\n    for (uint32_t lane = count; lane < aligned; ++lane) {{ {d}.SetValue(lane, 0.0f); }}\n    ruda_map_sync<AscendC::HardEvent::S_V>(pipe);",p.predicates[predicate].cce(),value(p,a,lhs),value(p,a,rhs)),
             Node::Unary(op,x)=>{
                 let x=value(p,a,x);
                 if op==Unary::Neg {format!("AscendC::Muls({d}, {x}, -1.0f, aligned);")}

@@ -1,4 +1,4 @@
-use super::{MatmulBf16Fp32Backend,SoftmaxBackend,Result,matmul_bf16_fp32,softmax};
+use super::{MatmulBf16Fp32Backend,SoftmaxBackend,CausalMaskBackend,Result,matmul_bf16_fp32,softmax,causal_mask};
 use crate::{driver::CannError,runtime::Transpose,tensor::{DType,api::Tensor}};
 
 /// Composed attention for Q[B,M,D], K[B,N,D] and V[B,N,Dv], using explicit BF16 GEMMs.
@@ -26,6 +26,21 @@ pub fn scaled_dot_product_attention_bf16_fp32<B:MatmulBf16Fp32Backend+SoftmaxBac
     if let Some(mask)=additive_mask {scores=scores+mask;}
     let probabilities=softmax(scores)?;
     matmul_bf16_fp32(probabilities,value,Transpose::No,Transpose::No)
+}
+/// Explicit causal attention using a fixed device-generated mask and absolute positions.
+/// Query/key starts are provided for prefill, chunked queries or a retained KV prefix.
+/// Retains the existing BF16-compute/FP32-storage matrix and materialized Softmax path.
+pub fn causal_attention_bf16_fp32<B:MatmulBf16Fp32Backend+SoftmaxBackend+CausalMaskBackend>(
+    query:Tensor<B,3>,key:Tensor<B,3>,value:Tensor<B,3>,scale:f32,query_start:u64,key_start:u64)
+    ->Result<Tensor<B,3>> {
+    validate_dimensions(query.dims(),key.dims(),value.dims(),scale)?;
+    let [batch,queries,_]=query.dims();let keys=key.dims()[1];
+    if query.dtype()!=DType::F32 || key.dtype()!=DType::F32 || value.dtype()!=DType::F32
+        || key.device()!=query.device() || value.device()!=query.device() {
+        return Err(CannError::InvalidTensor("attention requires FP32 Q/K/V on the same device".into()));
+    }
+    let mask=causal_mask::<B>(&query.device(),[batch,queries,keys],query_start,key_start)?;
+    scaled_dot_product_attention_bf16_fp32(query,key,value,scale,Some(mask))
 }
 fn validate_dimensions(query:[usize;3],key:[usize;3],value:[usize;3],scale:f32)->Result<()> {
     let [batch,m,d]=query;let [kb,n,kd]=key;let [vb,vn,dv]=value;

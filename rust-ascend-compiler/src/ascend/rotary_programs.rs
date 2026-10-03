@@ -92,6 +92,7 @@ mod tests {
                 Node::UniformInput(id,offset)=>vec![inputs[id][offset as usize];elements],
                 Node::Constant(bits)=>vec![f32::from_bits(bits);elements],
                 Node::IndexFloat(id)=>(0..elements as u64).map(|lane|p.index_values[id].eval(lane) as f32).collect(),
+                Node::IndexSelect(id,a,b)=>(0..elements).map(|lane|if p.predicates[id].eval(lane as u64) {values[a][lane]} else {values[b][lane]}).collect(),
                 Node::Binary(op,a,b)=>values[a].iter().zip(&values[b]).map(|(&a,&b)|match op {
                     Binary::Add=>a+b,Binary::Sub=>a-b,Binary::Mul=>a*b,Binary::Div=>a/b,Binary::Max=>a.max(b)}).collect(),
                 Node::Unary(op,a)=>values[a].iter().map(|&a|match op {Unary::Neg=>-a,Unary::Abs=>a.abs(),

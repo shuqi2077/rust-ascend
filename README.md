@@ -89,6 +89,14 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 该入口物化 score 和 probability 矩阵，不是 FlashAttention；没有隐式 causal mask、dropout、GQA head 重复或 padding。各 batch 数必须相同，M／D／Dv 为正且为 16 的倍数，N 为正且为 32 的倍数，各矩阵轴不超过 INT32_MAX，score 总元素数不超过 u32；N 超过 4096 时接入原生分块 Softmax。矩阵计算与反向使用前述显式 BF16 精度模式。调用见 [attention_tensor 示例](examples/attention_tensor.rs)：`cargo run --locked --release --example attention_tensor`。
 
+## 设备端因果 Mask 与位置偏移
+
+`CausalMaskSpec` 显式提供 batch、query／key 长度与两个 u64 绝对起始位置。`AscendRuntime::causal_mask` / `nn::causal_mask` 在设备端生成 FP32 `[B,Q,K]`：`key_start + key > query_start + query` 时写入精确负无穷，否则写入正零。比较使用公共 IR 的 UInt32／UInt64 索引和 FP32 Select，不先转换成浮点位置；支持超过 `2^24` 的位置、空 batch、非对齐 query／key 长度，总输出元素数不超过 u32。
+
+`nn::causal_attention_bf16_fp32` 显式组合这一固定 mask 与已有 Attention，起始位置适用于 prefill 或带 KV 前缀的 query chunk；仍使用 BF16 计算／FP32 存储、原生 FP32 Softmax 及 RUDA Q／K／V 自动求导，矩阵尺寸限制不变。不自动构建或更新 KV cache，也不改变原有可选 additive mask 接口。
+
+调用见 [causal_attention_tensor 示例](examples/causal_attention_tensor.rs)：`cargo run --locked --release --example causal_attention_tensor`。
+
 ## 原生旋转位置编码
 
 `nn::rotary(input, cos, sin, RotaryLayout)` 使用公共 Rust IR 执行 FP32 全末轴旋转，支持 `Interleaved` 相邻配对与 `SplitHalf` 前后半轴配对。输入为连续 rank-1～8，末轴宽度为正偶数；cos／sin 是同设备固定 `Tensor<Ascend, D>`，前导维度与输入一致，末轴宽度减半。频率、位置、base 与缩放策略由调用方明确提供，不隐式生成或广播表；支持空前导 batch。

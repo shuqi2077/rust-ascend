@@ -10,9 +10,24 @@ pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Binary { Add, Sub, Mul, Div, Max }
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Node { Input(usize), UniformInput(usize,u64), Constant(u32), IndexFloat(usize), Unary(Unary, usize), Binary(Binary, usize, usize) }
+pub(super) enum Node { Input(usize), UniformInput(usize,u64), Constant(u32), IndexFloat(usize), IndexSelect(usize,usize,usize), Unary(Unary, usize), Binary(Binary, usize, usize) }
 impl Node { pub fn inputs(&self) -> Vec<usize> { match self {
-    Self::Unary(_, a) => vec![*a], Self::Binary(_, a,b) => vec![*a,*b], _ => vec![] } } }
+    Self::Unary(_, a) => vec![*a], Self::Binary(_, a,b)|Self::IndexSelect(_,a,b) => vec![*a,*b], _ => vec![] } } }
+#[derive(Clone,Copy,Debug)]
+pub(super) enum IndexCompare {Eq,Ne,Lt,Le,Gt,Ge}
+#[derive(Clone,Debug)]
+pub(super) struct IndexPredicate {pub comparison:IndexCompare,pub lhs:Rc<Index>,pub rhs:Rc<Index>}
+impl IndexPredicate {
+    pub fn cce(&self)->String {
+        let operation=match self.comparison {IndexCompare::Eq=>"==",IndexCompare::Ne=>"!=",IndexCompare::Lt=>"<",IndexCompare::Le=>"<=",IndexCompare::Gt=>">",IndexCompare::Ge=>">="};
+        format!("({} {operation} {})",self.lhs.cce(),self.rhs.cce())
+    }
+    #[cfg(test)]
+    pub fn eval(&self,lane:u64)->bool {
+        let a=self.lhs.eval(lane);let b=self.rhs.eval(lane);
+        match self.comparison {IndexCompare::Eq=>a==b,IndexCompare::Ne=>a!=b,IndexCompare::Lt=>a<b,IndexCompare::Le=>a<=b,IndexCompare::Gt=>a>b,IndexCompare::Ge=>a>=b}
+    }
+}
 #[derive(Debug)]
 pub(super) struct Program {
     pub name: String, pub bindings: Vec<KernelArg>, pub nodes: Vec<Node>,
@@ -20,9 +35,10 @@ pub(super) struct Program {
     pub store_indices: HashMap<usize,Rc<Index>>,
     pub load_indices: HashMap<usize, Rc<Index>>,
     pub index_values: Vec<Rc<Index>>,
+    pub predicates:Vec<IndexPredicate>,
 }
 #[derive(Clone, Debug)]
-enum Value { Lane, Length, Inside, Outside, Index(u64), Mapped(Rc<Index>), Vector(usize) }
+enum Value { Lane, Length, Inside, Outside, Predicate(usize), Index(u64), Mapped(Rc<Index>), Vector(usize) }
 fn f32_type() -> Type { Type::scalar(ElemType::Float(FloatKind::F32)) }
 fn is_index(ty: Type) -> bool { ty == Type::scalar(ElemType::UInt(UIntKind::U32)) || ty == Type::scalar(ElemType::UInt(UIntKind::U64)) }
 fn valid_local(v: Variable) -> bool { matches!(v.kind, VariableKind::LocalMut{..} | VariableKind::LocalConst{..} | VariableKind::Versioned{..}) }
@@ -58,7 +74,7 @@ impl Lower {
     }
     fn assign(&mut self,out:Variable,value:Value)->Result<()> {
         if !valid_local(out) { return Err(invalid(format!("not a local destination: {out:?}"))); }
-        let ty_ok=match value { Value::Vector(_)=>out.ty==f32_type(),Value::Outside|Value::Inside=>out.ty==Type::scalar(ElemType::Bool),_=>is_index(out.ty) };
+        let ty_ok=match value { Value::Vector(_)=>out.ty==f32_type(),Value::Outside|Value::Inside|Value::Predicate(_)=>out.ty==Type::scalar(ElemType::Bool),_=>is_index(out.ty) };
         if !ty_ok { return Err(invalid("IR output type does not match operation")); }
         if self.values.contains_key(&out) && !matches!(out.kind,VariableKind::LocalMut{..}) { return Err(invalid("immutable local assigned twice")); }
         self.values.insert(out,value);Ok(())
@@ -92,15 +108,30 @@ impl Lower {
                 let size=self.p.bindings[self.array(*var,false)?].size.map(|n|n as u64).unwrap_or(self.elements);
                 self.assign(out.ok_or_else(||invalid("metadata output missing"))?,if size==self.elements{Value::Length}else{Value::Index(size)})
             },
-            Operation::Comparison(Comparison::GreaterEqual(op))=>{
-                if matches!((self.resolve(op.lhs)?,self.resolve(op.rhs)?),(Value::Lane,Value::Length)) {
-                    self.assign(out.ok_or_else(||invalid("comparison output missing"))?,Value::Outside)
-                } else { Err(unsupported("only canonical index >= length guard is supported")) }
+            Operation::Comparison(comparison)=>{
+                let (kind,op)=match comparison {Comparison::Equal(op)=>(IndexCompare::Eq,op),Comparison::NotEqual(op)=>(IndexCompare::Ne,op),
+                    Comparison::Lower(op)=>(IndexCompare::Lt,op),Comparison::LowerEqual(op)=>(IndexCompare::Le,op),
+                    Comparison::Greater(op)=>(IndexCompare::Gt,op),Comparison::GreaterEqual(op)=>(IndexCompare::Ge,op),
+                    _=>return Err(unsupported("only unsigned layout/index comparisons are supported"))};
+                let dst=out.ok_or_else(||invalid("comparison output missing"))?;
+                if matches!(kind,IndexCompare::Lt|IndexCompare::Ge)
+                    && matches!((self.resolve(op.lhs)?,self.resolve(op.rhs)?),(Value::Lane,Value::Length)) {
+                    return self.assign(dst,if matches!(kind,IndexCompare::Lt) {Value::Inside} else {Value::Outside});
+                }
+                if !is_index(op.lhs.ty) || op.lhs.ty!=op.rhs.ty {return Err(unsupported("comparison requires matching unsigned index types"));}
+                let predicate=IndexPredicate {comparison:kind,lhs:self.index(op.lhs)?,rhs:self.index(op.rhs)?};
+                let id=self.p.predicates.len();self.p.predicates.push(predicate);self.assign(dst,Value::Predicate(id))
             },
-            Operation::Comparison(Comparison::Lower(op))=>{
-                if matches!((self.resolve(op.lhs)?,self.resolve(op.rhs)?),(Value::Lane,Value::Length)) {
-                    self.assign(out.ok_or_else(||invalid("comparison output missing"))?,Value::Inside)
-                } else {Err(unsupported("only canonical index < length is supported"))}
+            Operation::Operator(Operator::Select(op))=>{
+                let cond=self.resolve(op.cond)?;let dst=out.ok_or_else(||invalid("select output missing"))?;
+                match cond {
+                    Value::Inside=>{let value=self.vector(op.then)?;self.assign(dst,Value::Vector(value))},
+                    Value::Outside=>{let value=self.vector(op.or_else)?;self.assign(dst,Value::Vector(value))},
+                    Value::Predicate(id)=>{
+                        let a=self.vector(op.then)?;let b=self.vector(op.or_else)?;self.add(dst,Node::IndexSelect(id,a,b))
+                    },
+                    _=>Err(unsupported("select condition must be a checked unsigned index predicate")),
+                }
             },
             Operation::Operator(Operator::Not(op))=>{
                 let value=match self.resolve(op.input)?{Value::Inside=>Value::Outside,Value::Outside=>Value::Inside,_=>return Err(unsupported("non-domain boolean negation"))};
@@ -235,7 +266,7 @@ pub(super) fn lower_map(mut k:KernelDefinition,elements:u64,partial_stores:bool)
     // Read actual scope instructions. Unused local declarations carry no effects;
     // every operation, operand and referenced special storage is checked below.
     if k.body.instructions.len()>4096{return Err(unsupported("instruction limit exceeded"));}
-    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![],store_indices:HashMap::new(),load_indices:HashMap::new(),index_values:vec![]},elements,partial_stores,values:HashMap::new(),loads:HashMap::new(),uniform_loads:HashMap::new(),loaded:HashSet::new(),constants:HashMap::new(),wrote:HashSet::new()};
+    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![],store_indices:HashMap::new(),load_indices:HashMap::new(),index_values:vec![],predicates:vec![]},elements,partial_stores,values:HashMap::new(),loads:HashMap::new(),uniform_loads:HashMap::new(),loaded:HashSet::new(),constants:HashMap::new(),wrote:HashSet::new()};
     for (n,i) in k.body.instructions.iter().enumerate(){l.instruction(i).map_err(|e|{
         let text=format!("instruction {n}: {e}");
         if matches!(e,ruda_core::compiler::CompilationError::UnsupportedInstruction{..}){unsupported(text)}else{invalid(text)}

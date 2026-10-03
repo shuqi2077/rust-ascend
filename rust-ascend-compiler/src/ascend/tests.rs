@@ -75,6 +75,7 @@ fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])->Vec<Vec<f
         Node::UniformInput(i,offset)=>vec![inputs[i][offset as usize];elements],
         Node::Constant(bits)=>vec![f32::from_bits(bits);elements],
         Node::IndexFloat(i)=>(0..elements as u64).map(|lane|p.index_values[i].eval(lane) as f32).collect(),
+        Node::IndexSelect(i,a,b)=>(0..elements).map(|lane|if p.predicates[i].eval(lane as u64) {nodes[a][lane]} else {nodes[b][lane]}).collect(),
         Node::Unary(u,a)=>nodes[a].iter().map(|&v|match u{Unary::Neg=>-v,Unary::Abs=>v.abs(),Unary::Exp=>v.exp(),Unary::Log=>v.ln(),Unary::Sqrt=>v.sqrt(),Unary::Rsqrt=>1.0/v.sqrt(),Unary::Recip=>1.0/v}).collect(),
         Node::Binary(b,a,c)=>nodes[a].iter().zip(&nodes[c]).map(|(&v,&w)|match b{Binary::Add=>v+w,Binary::Sub=>v-w,Binary::Mul=>v*w,Binary::Div=>v/w,Binary::Max=>v.max(w)}).collect()};nodes.push(z);}
     p.stores.iter().map(|&(_,v)|nodes[v].clone()).collect()
@@ -99,5 +100,25 @@ fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])->Vec<Vec<f
         }
     }
     kernel.buffers[1].size=Some(8);assert!(compile(kernel,1).is_err());
+}
+#[test]fn unsigned_index_predicates_select_exact_bits_for_all_six_comparisons(){
+    let spec=mask_programs::CausalMaskSpec {batch:2,queries:3,keys:7,query_start:(1u64<<40)+11,key_start:(1u64<<40)+9};
+    let original=mask_programs::definition(spec).unwrap();
+    let comparisons:[fn(BinaryOperator)->Comparison;6]=[Comparison::Equal,Comparison::NotEqual,Comparison::Lower,Comparison::LowerEqual,Comparison::Greater,Comparison::GreaterEqual];
+    for (kind,comparison) in comparisons.into_iter().enumerate() {
+        let mut kernel=original.clone();
+        for instruction in &mut kernel.body.instructions {if let Operation::Comparison(Comparison::Greater(op))=&instruction.operation {instruction.operation=comparison(op.clone()).into();}}
+        let output=evaluate(kernel.clone(),42,[&[],&[],&[]]);
+        for i in 0..42 {let a=spec.key_start+(i%7) as u64;let b=spec.query_start+(i/7%3) as u64;
+            let selected=match kind {0=>a==b,1=>a!=b,2=>a<b,3=>a<=b,4=>a>b,_=>a>=b};
+            assert_eq!(output[0][i].to_bits(),if selected {0xff800000} else {0});
+        }
+        let source=compile(kernel,42).unwrap();assert!(!source.source().contains("static_cast<float>"));
+    }
+    let mut invalid=original;
+    for instruction in &mut invalid.body.instructions {if let Operation::Comparison(Comparison::Greater(op))=&mut instruction.operation {
+        op.lhs=Variable::constant(ConstantValue::Float(0.),f());op.rhs=op.lhs;
+    }}
+    assert!(compile(invalid,42).is_err());
 }
 #[test]fn backward_equations_match_finite_differences(){let x=[-2.0,-0.3,0.2,1.7];let up=[1.2,0.7,-0.9,2.0];let dy=[0.5,-1.0,0.2,0.8];let grads=reference(MapProgram::SiluMulBackward,&x,&up,&dy);let h=0.001;for j in 0..4{let mut hi=x;let mut lo=x;hi[j]+=h;lo[j]-=h;let a=reference(MapProgram::SiluMul,&hi,&up,&[]);let b=reference(MapProgram::SiluMul,&lo,&up,&[]);let finite=(a[0][j]-b[0][j])/(2.0*h)*dy[j];assert!((grads[0][j]-finite).abs()<0.001);let expected=dy[j]*x[j]/(1.0+(-x[j]).exp());assert!((grads[1][j]-expected).abs()<1e-6);}}
