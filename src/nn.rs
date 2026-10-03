@@ -1,5 +1,7 @@
 //! Native Ascend operations on RUDA tensors and RUDA's existing autodiff graph.
 mod attention;
+mod affine;
+pub use affine::{BiasAddBackend,bias_add,residual_bias_add};
 mod padded_attention;
 pub use padded_attention::{scaled_dot_product_attention_padded_bf16_fp32,causal_attention_padded_bf16_fp32,
     grouped_query_attention_padded_bf16_fp32,causal_grouped_query_attention_padded_bf16_fp32};

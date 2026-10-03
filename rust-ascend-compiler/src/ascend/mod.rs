@@ -18,6 +18,7 @@ pub mod rotary_programs;
 pub mod wide_programs;
 pub mod mask_programs;
 pub mod heads_programs;
+pub mod affine_programs;
 #[cfg(test)] mod tests;
 
 use ruda_core::{backtrace::BackTrace, compiler::{CompilationError, Compiler},

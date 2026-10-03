@@ -15,6 +15,7 @@ mod indexing;
 mod loss;
 mod mask;
 mod heads;
+mod affine;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -133,6 +134,15 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Native FP32 X[...,H] + bias[H], or (X + residual) + bias, with exact shapes.
+    /// Positive H, empty leading axes and logical tails; no implicit matrix bias.
+    pub fn bias_add(client:&ComputeClient<Self>,input:TensorBuffer,bias:TensorBuffer,residual:Option<TensorBuffer>)->Result<TensorBuffer> {
+        affine::forward(client,input,bias,residual)
+    }
+    /// Sum dY over all leading token axes on device; no activation values needed.
+    pub fn bias_add_backward(client:&ComputeClient<Self>,grad:TensorBuffer,input_shape:Shape)->Result<TensorBuffer> {
+        affine::bias_backward(client,grad,input_shape)
+    }
     /// Explicit positive matrix tails via device zero-pad, native BF16 GEMM, FP32 crop.
     /// Returns [logical output, independent padded BF16 A snapshot, B snapshot].
     pub fn gemm_padded_bf16_fp32(client:&ComputeClient<Self>,a:TensorBuffer,b:TensorBuffer,ta:Transpose,tb:Transpose)->Result<[TensorBuffer;3]> {

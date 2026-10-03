@@ -117,6 +117,8 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 ## LoRA 与 SwiGLU 组合
 
+`nn::bias_add(input, bias)` 显式执行 FP32 `X[...,H] + bias[H]`；`nn::residual_bias_add(input, residual, bias)` 以 `(X + residual) + bias` 的 FP32 顺序融合两次加法，residual 必须与 X 完全同形状。使用公共 Rust IR 原生向量内核，支持连续 FP32 rank 1～8、任意正 H、空 token 轴及不超过 u32 的总元素数，不做 residual 广播或类型转换。反向不保存激活值：输入及 residual 的梯度直接传递，bias 梯度在设备端按全部 token 成对求和，支持共享输入／图的梯度累积。固定 bias 不触发无用的 bias 梯度归约，不改变 Linear／LoRA 的无 bias 默认行为。调用见 [bias_tensor 示例](examples/bias_tensor.rs)：`cargo run --locked --release --example bias_tensor`。
+
 `nn::lora_linear_bf16_fp32(input, weight, down, up, scale)` 计算 `X W^T + scale * (X A^T) B^T`，使用 FP32 参数／输出和显式 BF16 线性计算，复用 RUDA 自动求导及共享输入梯度累积。权重形状为 `W[N,K]`、`A[R,K]`、`B[N,R]`；M／N／K／R 为正且为 16 的倍数。scale 显式提供，base 或 adapter 是否冻结由调用方的 `require_grad` 决定，不自动修改权重、合并 adapter、添加 dropout 或 padding。原生前向 → 两个 adapter 梯度 → FP32 AdamW 调用见 [lora_tensor 示例](examples/lora_tensor.rs)：`cargo run --locked --release --example lora_tensor`。
 
 `nn::swiglu_bf16_fp32(input, gate, up, down)` 计算 `(SiLU(X Wgate^T) * (X Wup^T)) Wdown^T`，组合原生线性计算、FP32 SiLU 门控乘法与 RUDA 求导。gate／up 为 `[H,K]`，down 为 `[N,H]`；M／N／K／H 为正且为 16 的倍数。不推断模型维度、bias、dropout、residual 或 normalization。调用见 [swiglu_tensor 示例](examples/swiglu_tensor.rs)：`cargo run --locked --release --example swiglu_tensor`。
