@@ -38,6 +38,7 @@ pub(super) fn reduce_backward(client: &ComputeClient<AscendRuntime>, shape: Shap
 
 pub(super) fn softmax(client: &ComputeClient<AscendRuntime>, input: TensorBuffer,
     logarithmic: bool) -> Result<TensorBuffer> {
+    if input.shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::softmax(client,input,logarithmic);}
     let name = if logarithmic {"LogSoftmax"} else {"Softmax"};
     let (rows,width) = layout_for(&input.shape, &input.strides, input.dtype, name)?;
     check_for(&input, &input.shape, name)?;
@@ -51,6 +52,7 @@ pub(super) fn softmax(client: &ComputeClient<AscendRuntime>, input: TensorBuffer
 
 pub(super) fn softmax_backward(client: &ComputeClient<AscendRuntime>, output: TensorBuffer,
     grad: TensorBuffer, logarithmic: bool) -> Result<TensorBuffer> {
+    if output.shape.last().is_some_and(|&width|width>4096) {return super::wide_rows::backward(client,output,grad,logarithmic);}
     let name = if logarithmic {"LogSoftmax backward"} else {"Softmax backward"};
     let (rows,width) = layout_for(&output.shape, &output.strides, output.dtype, name)?;
     check_for(&output, &output.shape, name)?;

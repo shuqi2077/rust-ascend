@@ -22,7 +22,8 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
     }
     // SAFETY: this standalone executable is the sole ACL context owner.
     let device=unsafe {AscendRuntime::initialize_exclusive(options)?};
-    for (rows,width) in [(0,32),(1,32),(3,96),(7,256),(33,4096)] {for logarithmic in [false,true] {
+    let cases=[(0,32),(1,32),(3,96),(7,256),(33,4096),(0,4128),(1,4128),(3,8192),(2,8224)];
+    for (rows,width) in cases {for logarithmic in [false,true] {
         let x:Vec<f32>=(0..rows*width).map(|i|(i%31) as f32/4.-1000.).collect();
         let upstream:Vec<f32>=(0..rows*width).map(|i|(i%11) as f32/5.-0.7).collect();
         let input=Tensor::<AD,3>::from_data(TensorData::new(x.clone(),[1,rows,width]),
@@ -55,6 +56,6 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
         close(untracked.into_data().as_slice::<f32>()?,&expected,"untracked Y")?;
         println!("ASCEND_SOFTMAX_TENSOR_CASE rows={rows} width={width} logarithmic={logarithmic} passed=true");
     }}
-    println!("ASCEND_SOFTMAX_TENSOR_DEVICE_OK cases=10");
+    println!("ASCEND_SOFTMAX_TENSOR_DEVICE_OK cases={}",cases.len()*2);
     Ok(())
 }

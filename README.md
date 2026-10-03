@@ -101,7 +101,7 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 ## 原生 Softmax 与 LogSoftmax
 
-`AscendRuntime::softmax` / `log_softmax` 及其 `*_backward` 接收 RUDA `TensorBuffer`，归一化连续 FP32 输入的最后一维；宽度为 32～4096 且为 32 的倍数。反向使用前向保存的输出，支持任意前导维度和空 batch，不调用 ACLNN。
+`AscendRuntime::softmax` / `log_softmax` 及其 `*_backward` 接收 RUDA `TensorBuffer`，归一化连续 FP32 输入的最后一维；宽度为正且为 32 的倍数，总元素数不超过 u32。宽度不超过 4096 时使用原行内核；更宽的行以最多 4096 列分块，在设备端合并全行最大值及指数和，再写回归一化结果。反向同样分块合并全行统计，使用前向保存的输出；支持任意前导维度和空 batch，不调用 ACLNN。宽行 Softmax 保留一份完整 FP32 指数工作区，LogSoftmax 不保留该完整工作区。
 
 `rust_ascend::nn::softmax` / `log_softmax` 接收 `Tensor<Ascend, D>` 或 `Tensor<Autodiff<Ascend>, D>`，原生反向接入 RUDA 的现有计算图和梯度累积。调用见 [softmax_tensor 示例](examples/softmax_tensor.rs)：`cargo run --locked --release --example softmax_tensor`。
 
@@ -181,7 +181,7 @@ python tools/ascend/build_deepgemm.py --emit-only --out ./target/bf16-source
 ## 支持范围
 
 - 公共编译器：连续 FP32 逐元素程序；行宽为 32～4096、且为 32 的倍数。
-- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度；RMSNorm 和 LayerNorm 另提供共享 weight 梯度。
+- 行计算：sum/mean/max、Softmax/LogSoftmax、RMSNorm、LayerNorm，以及对应归一化操作的输入梯度；RMSNorm 和 LayerNorm 另提供共享 weight 梯度。运行时 Softmax/LogSoftmax 及反向另支持超过 4096 列的原生分块路径，其余行操作仍遵循 32～4096 列限制。
 - BF16 矩阵：direct-store Dense/Batched NN/NT/TN/TT、对齐的 MGrouped NT，BF16/FP32 输出。
 - 设备代码目标为 Ascend950DT / dav-c310；不自动推断或替换目标型号。
 - Rust 程序生成 CCE，再由 Bisheng 编译为设备机器码，不是直接 Rust → 昇腾 ISA。

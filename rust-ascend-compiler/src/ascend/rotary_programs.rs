@@ -93,7 +93,7 @@ mod tests {
                 Node::Constant(bits)=>vec![f32::from_bits(bits);elements],
                 Node::IndexFloat(id)=>(0..elements as u64).map(|lane|p.index_values[id].eval(lane) as f32).collect(),
                 Node::Binary(op,a,b)=>values[a].iter().zip(&values[b]).map(|(&a,&b)|match op {
-                    Binary::Add=>a+b,Binary::Sub=>a-b,Binary::Mul=>a*b,Binary::Div=>a/b}).collect(),
+                    Binary::Add=>a+b,Binary::Sub=>a-b,Binary::Mul=>a*b,Binary::Div=>a/b,Binary::Max=>a.max(b)}).collect(),
                 Node::Unary(op,a)=>values[a].iter().map(|&a|match op {Unary::Neg=>-a,Unary::Abs=>a.abs(),
                     Unary::Exp=>a.exp(),Unary::Log=>a.ln(),Unary::Sqrt=>a.sqrt(),Unary::Rsqrt=>a.sqrt().recip(),Unary::Recip=>a.recip()}).collect(),
             };

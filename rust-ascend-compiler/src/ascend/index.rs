@@ -38,6 +38,22 @@ mod tests {
         assert!(Index::binary('+',Rc::new(Index::Lane),c(u32::MAX as u64),65,u32::MAX as u64).is_err());
         assert!(Index::binary('-',Rc::new(Index::Lane),c(1),65,u32::MAX as u64).is_err());
     }
+    #[test]
+    fn injective_patch_proofs_match_independent_coordinate_sets() {
+        for rows in [1,2,7] {for cols in [32,96,4096] {for width in [cols,cols+32,cols*2] {
+            let n=rows*cols;let lane=Rc::new(Index::Lane);
+            let index=op('+',op('*',op('/',lane.clone(),c(cols),n),c(width),n),op('%',lane,c(cols),n),n);
+            assert!(index.injective());
+            let values:std::collections::HashSet<_>=(0..n).map(|i|index.eval(i)).collect();
+            assert_eq!(values.len(),n as usize);
+            assert!((0..n).all(|i|index.eval(i)==i/cols*width+i%cols));
+        }}}
+        let lane=Rc::new(Index::Lane);
+        assert!(!op('%',lane.clone(),c(32),64).injective());
+        let overlapping=op('+',op('*',op('/',lane.clone(),c(32),64),c(16),64),op('%',lane,c(32),64),64);
+        assert!(!overlapping.injective());
+        assert!(!Index::Constant(0).injective());
+    }
 }
 impl Index {
     pub fn binary(op: char, a: Rc<Self>, b: Rc<Self>, elements: u64, max: u64) -> Result<Rc<Self>> {
@@ -50,7 +66,8 @@ impl Index {
             ('*', _, _) => Rc::new(Self::Mul(a, b)),
             ('/' | '%', _, Self::Constant(d)) if *d != 0 => {
                 let d = *d;
-                Rc::new(if op == '/' { Self::Div(a, d) } else { Self::Mod(a, d) })
+                if op=='%' && a.bounds(elements)?.1<d {a}
+                else {Rc::new(if op == '/' { Self::Div(a, d) } else { Self::Mod(a, d) })}
             }
             ('-', _, Self::Mul(q, d)) => {
                 if let (Self::Div(x, divisor), Self::Constant(factor)) = (q.as_ref(), d.as_ref()) {
@@ -87,6 +104,26 @@ impl Index {
             Self::Mul(a,b) => format!("({} * {})", a.cce(), b.cce()),
             Self::Div(a,d) => format!("({} / {d}ULL)", a.cce()),
             Self::Mod(a,d) => format!("({} % {d}ULL)", a.cce()),
+        }
+    }
+    /// Sufficient symbolic proofs only: no enumeration or assumption about thread scheduling.
+    pub fn injective(&self)->bool {
+        match self {
+            Self::Lane=>true,
+            Self::Add(a,b)=>match (a.as_ref(),b.as_ref()) {
+                (_,Self::Constant(_))=>a.injective(),(Self::Constant(_),_)=>b.injective(),
+                (Self::Mul(row,stride),Self::Mod(lane,cols))=>match (row.as_ref(),stride.as_ref(),lane.as_ref()) {
+                    (Self::Div(origin,divisor),Self::Constant(width),Self::Lane)=>
+                        matches!(origin.as_ref(),Self::Lane) && divisor==cols && width>=cols,
+                    _=>false,
+                },
+                _=>false,
+            },
+            Self::Mul(a,b)=>match (a.as_ref(),b.as_ref()) {
+                (_,Self::Constant(value)) if *value>0=>a.injective(),
+                (Self::Constant(value),_) if *value>0=>b.injective(),_=>false,
+            },
+            _=>false,
         }
     }
     #[cfg(test)]

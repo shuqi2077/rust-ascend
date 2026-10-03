@@ -76,7 +76,7 @@ fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])->Vec<Vec<f
         Node::Constant(bits)=>vec![f32::from_bits(bits);elements],
         Node::IndexFloat(i)=>(0..elements as u64).map(|lane|p.index_values[i].eval(lane) as f32).collect(),
         Node::Unary(u,a)=>nodes[a].iter().map(|&v|match u{Unary::Neg=>-v,Unary::Abs=>v.abs(),Unary::Exp=>v.exp(),Unary::Log=>v.ln(),Unary::Sqrt=>v.sqrt(),Unary::Rsqrt=>1.0/v.sqrt(),Unary::Recip=>1.0/v}).collect(),
-        Node::Binary(b,a,c)=>nodes[a].iter().zip(&nodes[c]).map(|(&v,&w)|match b{Binary::Add=>v+w,Binary::Sub=>v-w,Binary::Mul=>v*w,Binary::Div=>v/w}).collect()};nodes.push(z);}
+        Node::Binary(b,a,c)=>nodes[a].iter().zip(&nodes[c]).map(|(&v,&w)|match b{Binary::Add=>v+w,Binary::Sub=>v-w,Binary::Mul=>v*w,Binary::Div=>v/w,Binary::Max=>v.max(w)}).collect()};nodes.push(z);}
     p.stores.iter().map(|&(_,v)|nodes[v].clone()).collect()
 }
 #[test]fn readonly_uniform_slots_are_dynamic_and_keep_distinct_offsets(){

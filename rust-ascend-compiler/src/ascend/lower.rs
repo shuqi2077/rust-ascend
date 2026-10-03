@@ -8,7 +8,7 @@ use super::index::Index;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Binary { Add, Sub, Mul, Div }
+pub(super) enum Binary { Add, Sub, Mul, Div, Max }
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Node { Input(usize), UniformInput(usize,u64), Constant(u32), IndexFloat(usize), Unary(Unary, usize), Binary(Binary, usize, usize) }
 impl Node { pub fn inputs(&self) -> Vec<usize> { match self {
@@ -17,6 +17,7 @@ impl Node { pub fn inputs(&self) -> Vec<usize> { match self {
 pub(super) struct Program {
     pub name: String, pub bindings: Vec<KernelArg>, pub nodes: Vec<Node>,
     pub stores: Vec<(usize, usize)>,
+    pub store_indices: HashMap<usize,Rc<Index>>,
     pub load_indices: HashMap<usize, Rc<Index>>,
     pub index_values: Vec<Rc<Index>>,
 }
@@ -27,7 +28,7 @@ fn is_index(ty: Type) -> bool { ty == Type::scalar(ElemType::UInt(UIntKind::U32)
 fn valid_local(v: Variable) -> bool { matches!(v.kind, VariableKind::LocalMut{..} | VariableKind::LocalConst{..} | VariableKind::Versioned{..}) }
 fn ident(s:&str)->bool { !["for","while","if","else","return","float","int","void","class","template","auto","const","extern","union","struct","namespace","operator","new","delete"].contains(&s) && !s.is_empty() && s.len()<=128 && s.as_bytes()[0].is_ascii_alphabetic() && s.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_') }
 
-struct Lower { p: Program, elements:u64, values: HashMap<Variable,Value>, loads: HashMap<usize,usize>,
+struct Lower { p: Program, elements:u64, partial_stores:bool, values: HashMap<Variable,Value>, loads: HashMap<usize,usize>,
     uniform_loads: HashMap<(usize,u64),usize>, loaded: HashSet<usize>, constants: HashMap<u32,usize>, wrote: HashSet<usize> }
 impl Lower {
     fn resolve(&self, v: Variable) -> Result<Value> {
@@ -178,9 +179,18 @@ impl Lower {
                 self.assign(out.ok_or_else(||invalid("load output missing"))?,Value::Vector(id))
             },
             Operation::Operator(Operator::IndexAssign(op)|Operator::UncheckedIndexAssign(op))=>{
-                if op.vector_size!=0 || op.unroll_factor!=1 || !matches!(self.resolve(op.index)?,Value::Lane) { return Err(unsupported("stores must index one scalar at AbsolutePosX")); }
+                if op.vector_size!=0 || op.unroll_factor!=1 { return Err(unsupported("stores must index one scalar")); }
                 let a=self.array(out.ok_or_else(||invalid("store output missing"))?,true)?;
+                let index=self.index(op.index)?;
+                if *index!=Index::Lane {
+                    if !self.partial_stores {return Err(unsupported("mapped stores require explicit partial-map compilation"));}
+                    if self.elements>1 && !index.injective() {return Err(unsupported("mapped stores must be provably injective"));}
+                    if self.loaded.contains(&a) {return Err(unsupported("mapped stores cannot read their output binding"));}
+                }
+                let size=self.p.bindings[a].size.map(|n|n as u64).unwrap_or(self.elements);
+                if self.elements!=0 && index.bounds(self.elements)?.1>=size {return Err(invalid("store may exceed the bound output"));}
                 if !self.wrote.insert(a){return Err(unsupported("multiple stores to one output"));}
+                self.p.store_indices.insert(a,index);
                 let v=self.vector(op.value)?;self.p.stores.push((a,v));Ok(())
             },
             Operation::Arithmetic(a)=>{
@@ -192,7 +202,7 @@ impl Lower {
                     let value=match index.as_ref(){Index::Lane=>Value::Lane,Index::Constant(n) if *n==self.elements=>Value::Length,Index::Constant(n)=>Value::Index(*n),_=>Value::Mapped(index)};
                     return self.assign(dst,value);
                 }
-                let binary=match a { Arithmetic::Add(op)=>Some((Binary::Add,op)),Arithmetic::Sub(op)=>Some((Binary::Sub,op)),Arithmetic::Mul(op)=>Some((Binary::Mul,op)),Arithmetic::Div(op)=>Some((Binary::Div,op)),_=>None };
+                let binary=match a { Arithmetic::Add(op)=>Some((Binary::Add,op)),Arithmetic::Sub(op)=>Some((Binary::Sub,op)),Arithmetic::Mul(op)=>Some((Binary::Mul,op)),Arithmetic::Div(op)=>Some((Binary::Div,op)),Arithmetic::Max(op)=>Some((Binary::Max,op)),_=>None };
                 if let Some((kind,op))=binary {let lhs=self.vector(op.lhs)?;let rhs=self.vector(op.rhs)?;return self.add(dst,Node::Binary(kind,lhs,rhs));}
                 let (kind,op)=match a { Arithmetic::Neg(op)=>(Unary::Neg,op),Arithmetic::Abs(op)=>(Unary::Abs,op),Arithmetic::Exp(op)=>(Unary::Exp,op),Arithmetic::Log(op)=>(Unary::Log,op),Arithmetic::Sqrt(op)=>(Unary::Sqrt,op),Arithmetic::InverseSqrt(op)=>(Unary::Rsqrt,op),Arithmetic::Recip(op)=>(Unary::Recip,op),_=>return Err(unsupported(format!("arithmetic {a:?}"))) };
                 let input=self.vector(op.input)?;self.add(dst,Node::Unary(kind,input))
@@ -202,7 +212,11 @@ impl Lower {
     }
 }
 
-pub(super) fn lower(mut k:KernelDefinition,elements:u64)->Result<Program> {
+#[cfg(test)]
+pub(super) fn lower(k:KernelDefinition,elements:u64)->Result<Program> {
+    lower_map(k,elements,false)
+}
+pub(super) fn lower_map(mut k:KernelDefinition,elements:u64,partial_stores:bool)->Result<Program> {
     if !ident(&k.options.kernel_name) {return Err(invalid("kernel entry must be a short ASCII identifier beginning with a letter"));}
     if k.options.debug_symbols || k.options.cluster_dim.is_some() {return Err(unsupported("debug symbols/clusters"));}
     if k.ruda_dim.x==0 || k.ruda_dim.y!=1 || k.ruda_dim.z!=1 {return Err(unsupported("only nonzero one-dimensional logical lane launch is accepted"));}
@@ -214,14 +228,14 @@ pub(super) fn lower(mut k:KernelDefinition,elements:u64)->Result<Program> {
         if !ids.insert(b.id){return Err(invalid("duplicate kernel buffer id"));}
         if b.size.is_some_and(|n|n as u64>u32::MAX as u64){return Err(unsupported("buffer length exceeds u32"));}
         if b.ty!=f32_type(){return Err(unsupported("only scalar FP32 buffers; no implicit precision changes"));}
-        if b.has_extended_meta|| (b.visibility==Visibility::ReadWrite && b.size.is_some_and(|n|n as u64!=elements)){return Err(unsupported("extended metadata or contiguous output size mismatch"));}
+        if b.has_extended_meta|| (!partial_stores && b.visibility==Visibility::ReadWrite && b.size.is_some_and(|n|n as u64!=elements)){return Err(unsupported("extended metadata or contiguous output size mismatch"));}
         if b.visibility==Visibility::Read {inputs+=1}else{outputs+=1}
     }
     if inputs>4||outputs==0||outputs>4{return Err(unsupported("at most four inputs/four outputs, and at least one output"));}
     // Read actual scope instructions. Unused local declarations carry no effects;
     // every operation, operand and referenced special storage is checked below.
     if k.body.instructions.len()>4096{return Err(unsupported("instruction limit exceeded"));}
-    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![],load_indices:HashMap::new(),index_values:vec![]},elements,values:HashMap::new(),loads:HashMap::new(),uniform_loads:HashMap::new(),loaded:HashSet::new(),constants:HashMap::new(),wrote:HashSet::new()};
+    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![],store_indices:HashMap::new(),load_indices:HashMap::new(),index_values:vec![]},elements,partial_stores,values:HashMap::new(),loads:HashMap::new(),uniform_loads:HashMap::new(),loaded:HashSet::new(),constants:HashMap::new(),wrote:HashSet::new()};
     for (n,i) in k.body.instructions.iter().enumerate(){l.instruction(i).map_err(|e|{
         let text=format!("instruction {n}: {e}");
         if matches!(e,ruda_core::compiler::CompilationError::UnsupportedInstruction{..}){unsupported(text)}else{invalid(text)}

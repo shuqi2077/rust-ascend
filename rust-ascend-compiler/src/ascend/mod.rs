@@ -15,6 +15,7 @@ pub mod row_programs;
 #[cfg(test)] mod row_tests;
 pub mod programs;
 pub mod rotary_programs;
+pub mod wide_programs;
 #[cfg(test)] mod tests;
 
 use ruda_core::{backtrace::BackTrace, compiler::{CompilationError, Compiler},
@@ -114,12 +115,29 @@ impl fmt::Display for AscendKernel {
 
 #[derive(Clone, Debug, Default)]
 pub struct AscendCompiler;
-impl AscendCompiler { pub const CACHE_VERSION: u32 = 7; }
+impl AscendCompiler {
+    pub const CACHE_VERSION: u32 = 8;
+    /// Explicit map compilation permitting partial, provably injective output patches.
+    /// Unwritten output values are retained; callers provide initialized output storage.
+    /// Ordinary `Compiler::compile` retains the complete contiguous-output contract.
+    pub fn compile_partial_map(&mut self,kernel:KernelDefinition,o:&AscendOptions,
+        mode:ExecutionMode,address:StorageType)->Result<AscendKernel> {
+        if o.row_width.is_some() {return Err(unsupported("partial-map stores cannot use row compilation"));}
+        compile_kernel(kernel,o,mode,address,true)
+    }
+}
 impl Compiler for AscendCompiler {
     type Representation = AscendKernel;
     type CompilationOptions = AscendOptions;
     fn compile(&mut self, kernel: KernelDefinition, o: &AscendOptions,
         mode: ExecutionMode, address: StorageType) -> Result<AscendKernel> {
+        compile_kernel(kernel,o,mode,address,false)
+    }
+    fn elem_size(&self, elem: ElemType) -> usize { elem.size() }
+    fn extension(&self) -> &'static str { "asc" }
+}
+fn compile_kernel(kernel:KernelDefinition,o:&AscendOptions,mode:ExecutionMode,address:StorageType,
+    partial_stores:bool)->Result<AscendKernel> {
         let target = o.validate()?;
         if mode == ExecutionMode::Validate || (mode==ExecutionMode::Unchecked && o.row_width.is_some()) {
             return Err(unsupported("Validate diagnostics and unchecked row mode are not implemented"));
@@ -136,22 +154,22 @@ impl Compiler for AscendCompiler {
                 row_width: Some(width), block_dim: o.vector_cores, tile_elements: width,
                 ub_bytes: alloc.ub_bytes, temporary_slots: alloc.slots, bindings, initialized_outputs:false });
         }
-        let p = lower::lower(kernel, o.elements)?;
+        let p = lower::lower_map(kernel, o.elements,partial_stores)?;
         let alloc = plan::allocate(&p, o.reuse_temporaries)?;
         let inplace=p.nodes.iter().filter(|n|matches!(n,lower::Node::Input(i) if p.bindings[*i].visibility==Visibility::ReadWrite)).count();
         let vectors = p.bindings.len().checked_add(alloc.slots).and_then(|n|n.checked_add(inplace)).ok_or_else(|| invalid("UB count overflow"))?;
         let gather = p.load_indices.values().any(|index| **index != index::Index::Lane)
             || p.nodes.iter().any(|node|matches!(node,lower::Node::UniformInput(..)));
-        let ub = vectors.checked_mul(o.tile_elements as usize).and_then(|n| n.checked_mul(4)).and_then(|n|n.checked_add(if gather {32}else{0}))
+        let scatter=p.store_indices.values().any(|index| **index!=index::Index::Lane);
+        let ub = vectors.checked_mul(o.tile_elements as usize).and_then(|n| n.checked_mul(4))
+            .and_then(|n|n.checked_add(if gather {32}else{0})).and_then(|n|n.checked_add(if scatter {32}else{0}))
             .ok_or_else(|| invalid("UB byte count overflow"))?;
         if ub > o.ub_limit_bytes as usize { return Err(unsupported(format!("kernel requires {ub} UB bytes, limit is {}", o.ub_limit_bytes))); }
         let source = emit::emit(&p, &alloc, o);
         Ok(AscendKernel { source, entrypoint: p.name, target, elements: o.elements, row_width: None,
             block_dim: o.vector_cores, tile_elements: o.tile_elements, ub_bytes: ub as u32,
-            temporary_slots: alloc.slots, initialized_outputs:inplace!=0,
+            temporary_slots: alloc.slots, initialized_outputs:inplace!=0 || p.bindings.iter().any(|b|
+                b.visibility==Visibility::ReadWrite && b.size.is_some_and(|n|n as u64!=o.elements)),
             bindings: p.bindings.iter().map(|b| AscendBinding { id: b.id,
                 writable: b.visibility == Visibility::ReadWrite, bytes: b.size.map(|n|n as u64).unwrap_or(o.elements) * 4 }).collect() })
-    }
-    fn elem_size(&self, elem: ElemType) -> usize { elem.size() }
-    fn extension(&self) -> &'static str { "asc" }
 }

@@ -9,6 +9,7 @@ mod elementwise;
 mod conversion;
 mod descriptor;
 mod rotary;
+mod wide_rows;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -181,7 +182,8 @@ impl AscendRuntime {
         rows::reduce_backward(client,input_shape,grad,true)
     }
 
-    /// Native FP32 Softmax along the last dimension (width 32..4096, multiple of 32).
+    /// Native FP32 last-axis Softmax. Width is positive and divisible by 32.
+    /// Widths above 4096 use tiled, device-side max/sum passes and normalized output patches.
     pub fn softmax(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
         rows::softmax(client, input, false)
     }
