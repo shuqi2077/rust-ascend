@@ -73,18 +73,17 @@ pub(super) fn linear_nt_backward(client: &Client, input: TensorBuffer, weight: T
     Ok([dx,dw])
 }
 
-fn mixed_linear_spec(x: &TensorLayout, w: &TensorLayout) -> Result<GemmSpec> {
-    if x.shape().len()!=2 || w.shape().len()!=2 || x.dtype()!=CannDType::F32 || w.dtype()!=CannDType::F32 {
-        return Err(error("BF16-compute FP32 linear requires rank-2 FP32 input and weight"));
+fn mixed_gemm_spec(a: &TensorLayout, b: &TensorLayout, ta: Transpose, tb: Transpose) -> Result<GemmSpec> {
+    if a.dtype()!=CannDType::F32 || b.dtype()!=CannDType::F32 {
+        return Err(error("BF16-compute FP32 matmul requires FP32 inputs"));
     }
-    let x=TensorLayout::contiguous(x.shape(),CannDType::BF16)?;
-    let w=TensorLayout::contiguous(w.shape(),CannDType::BF16)?;
-    GemmSpec::new(&x,&w,Transpose::No,Transpose::Yes,CannDType::F32)
+    let a=TensorLayout::contiguous(a.shape(),CannDType::BF16)?;
+    let b=TensorLayout::contiguous(b.shape(),CannDType::BF16)?;
+    GemmSpec::new(&a,&b,ta,tb,CannDType::F32)
 }
-
-pub(super) fn linear_bf16_fp32(client: &Client, input: TensorBuffer, weight: TensorBuffer)
-    -> Result<[TensorBuffer;3]> {
-    let spec=mixed_linear_spec(&layout(&input)?,&layout(&weight)?)?;
+pub(super) fn gemm_bf16_fp32(client: &Client, input: TensorBuffer, weight: TensorBuffer,
+    ta: Transpose, tb: Transpose) -> Result<[TensorBuffer;3]> {
+    let spec=mixed_gemm_spec(&layout(&input)?,&layout(&weight)?,ta,tb)?;
     // Cast allocations are independent snapshots, including when FP32 parameters alias.
     let input=super::conversion::cast(client,input,DType::BF16)?;
     let weight=super::conversion::cast(client,weight,DType::BF16)?;
@@ -93,26 +92,56 @@ pub(super) fn linear_bf16_fp32(client: &Client, input: TensorBuffer, weight: Ten
     Ok([output,input,weight])
 }
 
-fn mixed_linear_backward_specs(x: &TensorLayout, w: &TensorLayout, dy: &TensorLayout)
+fn mixed_gemm_backward_specs(x: &TensorLayout, w: &TensorLayout, dy: &TensorLayout,
+    ta: Transpose, tb: Transpose)
     -> Result<[GemmSpec;2]> {
-    let forward=GemmSpec::new(x,w,Transpose::No,Transpose::Yes,CannDType::F32)?;
-    if forward.kind()!=GemmKind::Dense || dy!=forward.output_layout() {
-        return Err(error("BF16-compute linear backward requires saved rank-2 BF16 X/W and matching FP32 dY"));
+    let forward=GemmSpec::new(x,w,ta,tb,CannDType::F32)?;
+    if dy!=forward.output_layout() {
+        return Err(error("BF16-compute matmul backward requires saved BF16 inputs and matching FP32 dY"));
     }
     let dy=TensorLayout::contiguous(dy.shape(),CannDType::BF16)?;
-    Ok([GemmSpec::new(&dy,w,Transpose::No,Transpose::No,CannDType::F32)?,
-        GemmSpec::new(&dy,x,Transpose::Yes,Transpose::No,CannDType::F32)?])
+    let opposite=|t|if t==Transpose::No {Transpose::Yes} else {Transpose::No};
+    let dx=if ta==Transpose::No {GemmSpec::new(&dy,w,Transpose::No,opposite(tb),CannDType::F32)?}
+        else {GemmSpec::new(w,&dy,tb,Transpose::Yes,CannDType::F32)?};
+    let dw=if tb==Transpose::No {GemmSpec::new(x,&dy,opposite(ta),Transpose::No,CannDType::F32)?}
+        else {GemmSpec::new(&dy,x,Transpose::Yes,ta,CannDType::F32)?};
+    Ok([dx,dw])
 }
-
-pub(super) fn linear_bf16_fp32_backward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
-    grad: TensorBuffer) -> Result<[TensorBuffer;2]> {
-    let [dx_spec,dw_spec]=mixed_linear_backward_specs(&layout(&input)?,&layout(&weight)?,&layout(&grad)?)?;
+pub(super) fn gemm_bf16_fp32_backward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
+    grad: TensorBuffer, ta: Transpose, tb: Transpose) -> Result<[TensorBuffer;2]> {
+    let [dx_spec,dw_spec]=mixed_gemm_backward_specs(&layout(&input)?,&layout(&weight)?,&layout(&grad)?,ta,tb)?;
     let grad=super::conversion::cast(client,grad,DType::BF16)?;
     let dx=allocate(client,dx_spec.output_layout());
     let dw=allocate(client,dw_spec.output_layout());
-    launch(client,dx_spec,&grad,&weight,&dx)?;
-    launch(client,dw_spec,&grad,&input,&dw)?;
+    let (dx_a,dx_b)=if ta==Transpose::No {(&grad,&weight)} else {(&weight,&grad)};
+    let (dw_a,dw_b)=if tb==Transpose::No {(&input,&grad)} else {(&grad,&input)};
+    launch(client,dx_spec,dx_a,dx_b,&dx)?;
+    launch(client,dw_spec,dw_a,dw_b,&dw)?;
     Ok([dx,dw])
+}
+
+fn mixed_linear_spec(x: &TensorLayout, w: &TensorLayout) -> Result<GemmSpec> {
+    if x.shape().len()!=2 || w.shape().len()!=2 {
+        return Err(error("BF16-compute FP32 linear requires rank-2 input and weight"));
+    }
+    mixed_gemm_spec(x,w,Transpose::No,Transpose::Yes)
+}
+pub(super) fn linear_bf16_fp32(client: &Client, input: TensorBuffer, weight: TensorBuffer)
+    -> Result<[TensorBuffer;3]> {
+    mixed_linear_spec(&layout(&input)?,&layout(&weight)?)?;
+    gemm_bf16_fp32(client,input,weight,Transpose::No,Transpose::Yes)
+}
+fn mixed_linear_backward_specs(x: &TensorLayout, w: &TensorLayout, dy: &TensorLayout)
+    -> Result<[GemmSpec;2]> {
+    if x.shape().len()!=2 || w.shape().len()!=2 {
+        return Err(error("BF16-compute linear backward requires saved rank-2 inputs"));
+    }
+    mixed_gemm_backward_specs(x,w,dy,Transpose::No,Transpose::Yes)
+}
+pub(super) fn linear_bf16_fp32_backward(client: &Client, input: TensorBuffer, weight: TensorBuffer,
+    grad: TensorBuffer) -> Result<[TensorBuffer;2]> {
+    mixed_linear_backward_specs(&layout(&input)?,&layout(&weight)?,&layout(&grad)?)?;
+    gemm_bf16_fp32_backward(client,input,weight,grad,Transpose::No,Transpose::Yes)
 }
 
 #[cfg(test)]
@@ -142,5 +171,22 @@ mod tests {
         assert!(mixed_linear_spec(&x,&t(&[48,32],CannDType::F32)).is_err());
         assert!(mixed_linear_backward_specs(&forward.a,&forward.b,&t(&[32,48],CannDType::BF16)).is_err());
         assert!(mixed_linear_backward_specs(&forward.a,&forward.b,&t(&[48,32],CannDType::F32)).is_err());
+    }
+
+    #[test]
+    fn mixed_gemm_all_transposes_restore_physical_gradient_layouts() {
+        for batch in [None,Some(2)] {for ta in [Transpose::No,Transpose::Yes] {for tb in [Transpose::No,Transpose::Yes] {
+            let mut a=if ta==Transpose::No {vec![32,16]} else {vec![16,32]};
+            let mut b=if tb==Transpose::No {vec![16,48]} else {vec![48,16]};
+            if let Some(batch)=batch {a.insert(0,batch);b.insert(0,batch);}
+            let a=TensorLayout::contiguous(&a,CannDType::F32).unwrap();
+            let b=TensorLayout::contiguous(&b,CannDType::F32).unwrap();
+            let forward=mixed_gemm_spec(&a,&b,ta,tb).unwrap();
+            let [da,db]=mixed_gemm_backward_specs(&forward.a,&forward.b,forward.output_layout(),ta,tb).unwrap();
+            assert_eq!(da.output_layout(),&a);assert_eq!(db.output_layout(),&b);
+            assert_eq!(da.dtype,CannDType::F32);assert_eq!(db.dtype,CannDType::F32);
+        }}}
+        let t=|shape:&[i64]|TensorLayout::contiguous(shape,CannDType::F32).unwrap();
+        assert!(mixed_gemm_spec(&t(&[2,32,16]),&t(&[1,16,48]),Transpose::No,Transpose::No).is_err());
     }
 }

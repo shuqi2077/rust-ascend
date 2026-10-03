@@ -71,6 +71,8 @@ let dx = x.grad(&gradients).unwrap();
 
 M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播或隐式 padding，不改变通用张量 `matmul` 的调度。对应运行时接口为 `AscendRuntime::linear_bf16_fp32` / `linear_bf16_fp32_backward`。调用见 [linear_tensor 示例](examples/linear_tensor.rs)：`cargo run --locked --release --example linear_tensor`。
 
+`nn::matmul_bf16_fp32(a, b, ta, tb)` 将相同显式精度模式扩展到 rank-2 Dense 与 batch 数相同的 rank-3 Batched，支持 NN／NT／TN／TT。反向保持两个输入各自的物理形状，不创建完整转置副本；FP32 梯度通过 RUDA 图累积。对应运行时接口为 `gemm_bf16_fp32` / `gemm_bf16_fp32_backward`，仍要求 M／N／K 为正且为 16 的倍数，不做 batch 广播。调用见 [matmul_tensor 示例](examples/matmul_tensor.rs)：`cargo run --locked --release --example matmul_tensor`。
+
 ## 原生 RMSNorm 公共 IR
 
 `AscendRuntime::rms_norm` 通过 RUDA `ComputeClient` 接收 `TensorBuffer` 的输入和共享 weight，返回 `[Y, rstd]`。`AscendRuntime::rms_norm_backward` 接收输入、weight、`dY` 及前向保存的 `rstd`，返回 `[dX, dWeight]`。`RowProgram::RmsNormWeightContributions` 生成逐元素 weight 梯度贡献，再在设备端归约所有前导行；空 batch 的 weight 梯度为零。

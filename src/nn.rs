@@ -1,5 +1,5 @@
 //! Native Ascend operations on RUDA tensors and RUDA's existing autodiff graph.
-use crate::{Ascend, Autodiff, driver::CannError, runtime::{AscendRuntime, TensorBuffer}};
+use crate::{Ascend, Autodiff, driver::CannError, runtime::{AscendRuntime, TensorBuffer, Transpose}};
 use ruda_autodiff::{checkpoint::{base::Checkpointer, strategy::CheckpointStrategy},
     grads::Gradients, ops::{Backward, Ops, OpsKind}};
 use ruda_core::tensor::{Metadata, Shape};
@@ -8,6 +8,24 @@ use ruda_tensor_device::RudaTensor;
 
 type Primitive = RudaTensor<AscendRuntime>;
 type Result<T> = std::result::Result<T, CannError>;
+
+/// Backend extension for explicitly selected BF16-compute Dense/Batched matmul.
+pub trait MatmulBf16Fp32Backend: Backend {
+    fn matmul_bf16_fp32(a:FloatTensor<Self>,b:FloatTensor<Self>,ta:Transpose,tb:Transpose)->Result<FloatTensor<Self>>;
+}
+
+/// Explicit BF16-compute matmul of contiguous FP32 rank-2 or matching-batch rank-3 tensors.
+/// Output and gradients are FP32; forward inputs and upstream gradients are cast to BF16.
+/// All four transpose combinations are supported without materializing transposed copies.
+pub fn matmul_bf16_fp32<B:MatmulBf16Fp32Backend,const D:usize>(a:Tensor<B,D>,b:Tensor<B,D>,
+    ta:Transpose,tb:Transpose)->Result<Tensor<B,D>> {
+    let unquantized=|primitive:TensorPrimitive<B>|match primitive {
+        TensorPrimitive::Float(tensor)=>Ok(tensor),
+        TensorPrimitive::QFloat(_)=>Err(CannError::InvalidTensor("BF16-compute matmul does not dequantize inputs implicitly".into())),
+    };
+    B::matmul_bf16_fp32(unquantized(a.into_primitive())?,unquantized(b.into_primitive())?,ta,tb)
+        .map(|output|Tensor::from_primitive(TensorPrimitive::Float(output)))
+}
 
 /// Backend extension for explicitly selected BF16-compute, FP32-storage linear operations.
 pub trait LinearBf16Fp32Backend: Backend {
@@ -339,6 +357,46 @@ impl<C:CheckpointStrategy> LinearBf16Fp32Backend for Autodiff<Ascend,C> {
         let [output,x,w]=linear_forward(input.primitive,weight.primitive)?;
         Ok(match LinearBf16Fp32Backward.prepare::<C>([input.node,weight.node]).compute_bound().stateful() {
             OpsKind::Tracked(prep)=>prep.finish((x,w),output),
+            OpsKind::UnTracked(prep)=>prep.finish(output),
+        })
+    }
+}
+
+fn matmul_forward(a:Primitive,b:Primitive,ta:Transpose,tb:Transpose)->Result<[Primitive;3]> {
+    check_queue(&a,&[&b],"BF16-compute matmul")?;
+    let client=a.client.clone();let device=a.device.clone();
+    let result=AscendRuntime::gemm_bf16_fp32(&client,buffer(a),buffer(b),ta,tb)?;
+    Ok(result.map(|b|Primitive::new(client.clone(),b.handle,Metadata::new(b.shape,b.strides),device.clone(),b.dtype)))
+}
+fn matmul_backward(a:Primitive,b:Primitive,grad:Primitive,ta:Transpose,tb:Transpose)->Result<[Primitive;2]> {
+    check_queue(&a,&[&b,&grad],"BF16-compute matmul backward")?;
+    let client=a.client.clone();let device=a.device.clone();
+    let result=AscendRuntime::gemm_bf16_fp32_backward(&client,buffer(a),buffer(b),buffer(grad),ta,tb)?;
+    Ok(result.map(|b|Primitive::new(client.clone(),b.handle,Metadata::new(b.shape,b.strides),device.clone(),b.dtype)))
+}
+impl MatmulBf16Fp32Backend for Ascend {
+    fn matmul_bf16_fp32(a:FloatTensor<Self>,b:FloatTensor<Self>,ta:Transpose,tb:Transpose)->Result<FloatTensor<Self>> {
+        matmul_forward(a,b,ta,tb).map(|[output,_,_]|output)
+    }
+}
+#[derive(Debug)]
+struct MatmulBf16Fp32Backward;
+impl Backward<Ascend,2> for MatmulBf16Fp32Backward {
+    type State=(Primitive,Primitive,Transpose,Transpose);
+    fn backward(self,ops:Ops<Self::State,2>,grads:&mut Gradients,_:&mut Checkpointer) {
+        let (a,b,ta,tb)=ops.state;
+        let grad=grads.consume::<Ascend>(&ops.node);
+        let derivatives=matmul_backward(a,b,grad,ta,tb).expect("Ascend BF16-compute matmul backward failed");
+        for (parent,gradient) in ops.parents.into_iter().zip(derivatives) {
+            if let Some(parent)=parent {grads.register::<Ascend>(parent.id,gradient);}
+        }
+    }
+}
+impl<C:CheckpointStrategy> MatmulBf16Fp32Backend for Autodiff<Ascend,C> {
+    fn matmul_bf16_fp32(a:FloatTensor<Self>,b:FloatTensor<Self>,ta:Transpose,tb:Transpose)->Result<FloatTensor<Self>> {
+        let [output,a_saved,b_saved]=matmul_forward(a.primitive,b.primitive,ta,tb)?;
+        Ok(match MatmulBf16Fp32Backward.prepare::<C>([a.node,b.node]).compute_bound().stateful() {
+            OpsKind::Tracked(prep)=>prep.finish((a_saved,b_saved,ta,tb),output),
             OpsKind::UnTracked(prep)=>prep.finish(output),
         })
     }

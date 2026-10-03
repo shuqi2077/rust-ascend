@@ -225,6 +225,21 @@ impl AscendRuntime {
         matrix::linear_bf16_fp32_backward(client,input,weight,grad)
     }
 
+    /// Explicit BF16-compute GEMM with contiguous FP32 rank-2 or equal-batch rank-3 inputs.
+    /// Returns [FP32 output, saved BF16 A, saved BF16 B], with NN/NT/TN/TT supported.
+    /// M/N/K must be positive multiples of 16; no batch broadcasting or implicit padding.
+    pub fn gemm_bf16_fp32(client: &ComputeClient<Self>, a: TensorBuffer, b: TensorBuffer,
+        ta: Transpose, tb: Transpose) -> Result<[TensorBuffer;3]> {
+        matrix::gemm_bf16_fp32(client,a,b,ta,tb)
+    }
+
+    /// FP32 gradients in the original physical A/B layouts, from saved BF16 inputs.
+    /// FP32 dY is converted to BF16 on-device; transpose flags match the forward call.
+    pub fn gemm_bf16_fp32_backward(client: &ComputeClient<Self>, a: TensorBuffer, b: TensorBuffer,
+        grad: TensorBuffer, ta: Transpose, tb: Transpose) -> Result<[TensorBuffer;2]> {
+        matrix::gemm_bf16_fp32_backward(client,a,b,grad,ta,tb)
+    }
+
     /// Native common-IR RMSNorm on contiguous FP32 tensors. Returns [output, rstd].
     /// The last dimension must be 32..4096 and divisible by 32.
     pub fn rms_norm(client: &ComputeClient<Self>, input: TensorBuffer,
