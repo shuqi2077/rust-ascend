@@ -10,7 +10,7 @@ pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Binary { Add, Sub, Mul, Div }
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Node { Input(usize), Constant(u32), IndexFloat(usize), Unary(Unary, usize), Binary(Binary, usize, usize) }
+pub(super) enum Node { Input(usize), UniformInput(usize,u64), Constant(u32), IndexFloat(usize), Unary(Unary, usize), Binary(Binary, usize, usize) }
 impl Node { pub fn inputs(&self) -> Vec<usize> { match self {
     Self::Unary(_, a) => vec![*a], Self::Binary(_, a,b) => vec![*a,*b], _ => vec![] } } }
 #[derive(Debug)]
@@ -27,7 +27,8 @@ fn is_index(ty: Type) -> bool { ty == Type::scalar(ElemType::UInt(UIntKind::U32)
 fn valid_local(v: Variable) -> bool { matches!(v.kind, VariableKind::LocalMut{..} | VariableKind::LocalConst{..} | VariableKind::Versioned{..}) }
 fn ident(s:&str)->bool { !["for","while","if","else","return","float","int","void","class","template","auto","const","extern","union","struct","namespace","operator","new","delete"].contains(&s) && !s.is_empty() && s.len()<=128 && s.as_bytes()[0].is_ascii_alphabetic() && s.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_') }
 
-struct Lower { p: Program, elements:u64, values: HashMap<Variable,Value>, loads: HashMap<usize,usize>, constants: HashMap<u32,usize>, wrote: HashSet<usize> }
+struct Lower { p: Program, elements:u64, values: HashMap<Variable,Value>, loads: HashMap<usize,usize>,
+    uniform_loads: HashMap<(usize,u64),usize>, loaded: HashSet<usize>, constants: HashMap<u32,usize>, wrote: HashSet<usize> }
 impl Lower {
     fn resolve(&self, v: Variable) -> Result<Value> {
         if matches!(v.kind, VariableKind::Builtin(Builtin::AbsolutePosX | Builtin::AbsolutePos)) && is_index(v.ty) { return Ok(Value::Lane); }
@@ -160,9 +161,19 @@ impl Lower {
                 let size=self.p.bindings[a].size.map(|n|n as u64).unwrap_or(self.elements);
                 if self.elements!=0 && index.bounds(self.elements)?.1>=size{return Err(invalid("layout load may exceed the bound buffer"));}
                 if self.p.bindings[a].visibility==Visibility::ReadWrite && *index!=Index::Lane{return Err(unsupported("mapped in-place reads require scatter dependency analysis"));}
+                if self.wrote.contains(&a){return Err(unsupported("load after store needs explicit ordering lowering"));}
+                self.loaded.insert(a);
+                if let Index::Constant(offset)=*index {
+                    // Readonly uniform slots may have different constant offsets in one binding.
+                    // Each is loaded on-device, not specialized from its value on the host.
+                    let id=if let Some(&id)=self.uniform_loads.get(&(a,offset)) {id} else {
+                        let id=self.p.nodes.len();self.p.nodes.push(Node::UniformInput(a,offset));
+                        self.uniform_loads.insert((a,offset),id);id
+                    };
+                    return self.assign(out.ok_or_else(||invalid("load output missing"))?,Value::Vector(id));
+                }
                 if self.p.load_indices.get(&a).is_some_and(|old|old!=&index){return Err(unsupported("multiple distinct layouts for one input binding"));}
                 self.p.load_indices.insert(a,index);
-                if self.wrote.contains(&a){return Err(unsupported("load after store needs explicit ordering lowering"));}
                 let id=if let Some(&n)=self.loads.get(&a){n}else{let n=self.p.nodes.len();self.p.nodes.push(Node::Input(a));self.loads.insert(a,n);n};
                 self.assign(out.ok_or_else(||invalid("load output missing"))?,Value::Vector(id))
             },
@@ -210,13 +221,13 @@ pub(super) fn lower(mut k:KernelDefinition,elements:u64)->Result<Program> {
     // Read actual scope instructions. Unused local declarations carry no effects;
     // every operation, operand and referenced special storage is checked below.
     if k.body.instructions.len()>4096{return Err(unsupported("instruction limit exceeded"));}
-    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![],load_indices:HashMap::new(),index_values:vec![]},elements,values:HashMap::new(),loads:HashMap::new(),constants:HashMap::new(),wrote:HashSet::new()};
+    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![],load_indices:HashMap::new(),index_values:vec![]},elements,values:HashMap::new(),loads:HashMap::new(),uniform_loads:HashMap::new(),loaded:HashSet::new(),constants:HashMap::new(),wrote:HashSet::new()};
     for (n,i) in k.body.instructions.iter().enumerate(){l.instruction(i).map_err(|e|{
         let text=format!("instruction {n}: {e}");
         if matches!(e,ruda_core::compiler::CompilationError::UnsupportedInstruction{..}){unsupported(text)}else{invalid(text)}
     })?;}
     if l.wrote.len()!=outputs{return Err(invalid("every declared output must be written exactly once"));}
-    if l.loads.len()>4{return Err(unsupported("at most four loaded buffers, including in-place inputs"));}
-    if l.p.bindings.iter().enumerate().any(|(i,b)|b.visibility==Visibility::Read&&!l.loads.contains_key(&i)){return Err(unsupported("unused input bindings must be removed before lowering"));}
+    if l.loaded.len()>8{return Err(unsupported("at most eight loaded buffers, including in-place inputs"));}
+    if l.p.bindings.iter().enumerate().any(|(i,b)|b.visibility==Visibility::Read&&!l.loaded.contains(&i)){return Err(unsupported("unused input bindings must be removed before lowering"));}
     Ok(l.p)
 }

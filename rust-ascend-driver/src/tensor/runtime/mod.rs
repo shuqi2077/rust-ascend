@@ -545,6 +545,9 @@ impl AscendServer {
             ..Default::default()
         };
         let compiled = if arguments.info.data.is_empty() {
+            if let Some(definition)=task.kernel_definition() {
+                if let Some(elements)=declared_map_elements(&definition) {options.elements=elements;}
+            }
             task.compile(&mut AscendCompiler, &options, mode, task.address_type())
         } else {
             use ruda_core::compiler::Compiler;
@@ -707,6 +710,15 @@ impl ComputeServer for AscendServer {
     }
 }
 
+fn declared_map_elements(definition:&ruda_core::kernel::KernelDefinition)->Option<u64> {
+    let mut outputs=definition.buffers.iter().filter(|b|b.visibility==ruda_core::kernel::Visibility::ReadWrite);
+    let first=outputs.next()?.size?;
+    // All explicit map outputs use the same full lane domain. Unsized/different
+    // domains retain the normal byte-derived contract and compiler validation.
+    if outputs.any(|output|output.size!=Some(first)) {return None;}
+    Some(first as u64)
+}
+
 fn contiguous(shape: &[usize], strides: &[usize]) -> bool {
     if shape.len() != strides.len() {
         return false;
@@ -806,5 +818,18 @@ mod tests {
         for grid in [(1, 1, 1), (3, 1, 1), (2, 2, 1), (0, 1, 1)] {
             assert!(validate_grid(grid, dim, &kernel).is_err());
         }
+    }
+
+    #[test]
+    fn readonly_uniform_buffer_length_does_not_expand_the_output_domain() {
+        use rust_ascend_compiler::ascend::programs::{MapProgram,definition};
+        use ruda_core::kernel::Visibility;
+        let mut kernel=definition(MapProgram::Add);
+        for elements in [0,1,65] {
+            for buffer in &mut kernel.buffers {buffer.size=Some(if buffer.visibility==Visibility::ReadWrite {elements} else {9});}
+            assert_eq!(declared_map_elements(&kernel),Some(elements as u64));
+        }
+        kernel.buffers.last_mut().unwrap().size=None;
+        assert_eq!(declared_map_elements(&kernel),None);
     }
 }

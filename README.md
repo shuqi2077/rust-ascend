@@ -147,6 +147,8 @@ cargo run --locked --release --example layer_norm -- ./target/layernorm-forward 
 
 `AdamWStorageStep` 显式提供学习率、beta、epsilon、weight decay、两个 bias correction、逆梯度 scale 和 clip multiplier。FP32 unscale 后再应用 clip；epsilon 加在 bias-corrected 平方根外。函数同步完成后返回，不隐式生成全局 step，不做 AMSGrad、低精度 master cast 或自动梯度检查。
 
+上述九个标量以原始 FP32 位模式上传为 36 字节设备参数缓冲区，内核从该缓冲区读取；同一元素数的更新不再因学习率、bias correction 或缩放值改变而生成不同源码／模块缓存键。参数、梯度与矩的布局和更新语义不变，不将梯度搬回主机。
+
 调用见 [adamw_storage 示例](examples/adamw_storage.rs)：`cargo run --locked --release --example adamw_storage`。
 
 `optim::adamw_tensor_step` 可直接更新现有 `Tensor<Ascend, D>` 参数与 FP32 矩；梯度可使用 `Autodiff<Ascend>` 返回的 inner tensor，不需要将梯度搬回主机。它原位修改已有存储及其外部别名，不构建优化器求导图。原生 RMSNorm → Mean loss → 自动求导 → AdamW 的训练调用见 [training 示例](examples/training.rs)：`cargo run --locked --release --example training`。

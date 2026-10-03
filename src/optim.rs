@@ -2,7 +2,7 @@
 use crate::{compiler::AscendCompiler, driver::CannError,
     runtime::{AscendRuntime, ComputeClient, TensorBuffer,
         portable::{id::KernelId, kernel::{KernelMetadata, KernelTask, RudaKernel}, server::{KernelArguments, RudaCount}}}};
-use ruda_core::{ir::{FloatKind, StorageType, Type, UIntKind}, kernel::KernelDefinition, tensor::DType};
+use ruda_core::{ir::{FloatKind, StorageType, Type, UIntKind,Instruction,Operator,IndexOperator}, kernel::KernelDefinition, tensor::DType};
 use ruda_kernel::dsl::{InfoBuilder, prelude::{AddressType, KernelBuilder, KernelSettings, NativeExpand, RudaDim, Tensor}};
 use ruda_tensor::{TensorPrimitive,api::Tensor as ApiTensor};
 
@@ -50,7 +50,7 @@ impl AdamWStorageStep {
     }
 }
 
-fn definition(elements: usize, step: AdamWStorageStep) -> KernelDefinition {
+fn definition(elements: usize) -> KernelDefinition {
     let mut builder=KernelBuilder::default();
     let address=AddressType::U64;
     address.register(&mut builder.scope);
@@ -58,32 +58,40 @@ fn definition(elements: usize, step: AdamWStorageStep) -> KernelDefinition {
     let gradient:NativeExpand<Tensor<f32>>=builder.input_tensor(Type::new(FloatKind::F32.into())).into();
     let first=builder.input_tensor(Type::new(FloatKind::F32.into()));
     let second=builder.input_tensor(Type::new(FloatKind::F32.into()));
+    let scalars=builder.input_tensor(Type::new(FloatKind::F32.into()));
     let _=(parameter,first,second);
     let parameter:NativeExpand<Tensor<f32>>=builder.inplace_output(0).into();
     let first:NativeExpand<Tensor<f32>>=builder.inplace_output(2).into();
     let second:NativeExpand<Tensor<f32>>=builder.inplace_output(3).into();
-    // The original RUDA algorithm owns all arithmetic. With separate_master=false,
-    // master is compile-time unused, so no fifth/unused binding is introduced.
+    let [lr,beta1,beta2,epsilon,decay,correction1,correction2,inverse_scale,clip]:[NativeExpand<f32>;9]=
+        std::array::from_fn(|index| {
+            let value=builder.scope.create_local(Type::new(FloatKind::F32.into()));
+            builder.scope.register(Instruction::new(Operator::Index(IndexOperator {list:*scalars,
+                index:(index as u64).into(),vector_size:0,unroll_factor:1}),*value));
+            value.into()
+        });
+    // The original RUDA algorithm owns all arithmetic; the fifth binding contains
+    // nine dynamic FP32 scalars, not a duplicated or separate master parameter.
     ruda_optim::fused_adamw::storage::adamw_scaled::expand::<f32>(&mut builder.scope,
         parameter.clone(),gradient,parameter,first,second,
-        step.learning_rate.into(),step.beta1.into(),step.beta2.into(),step.epsilon.into(),step.weight_decay.into(),
-        step.correction1.into(),step.correction2.into(),step.inverse_gradient_scale.into(),step.clip_multiplier.into(),false);
+        lr,beta1,beta2,epsilon,decay,correction1,correction2,inverse_scale,clip,false);
     let kernel=builder.build(KernelSettings::default().address_type(address)
         .ruda_dim(RudaDim::new_1d(64)).kernel_name("ruda_ascend_adamw_storage"));
     let mut info=InfoBuilder::default();
     for _ in 0..4 {info.metadata.register_tensor(1,elements as u64,elements as u64,vec![elements].into(),vec![1].into(),address);}
+    info.metadata.register_tensor(1,9,9,vec![9].into(),vec![1].into(),address);
     let info=info.finish(address);
     crate::compiler::arguments::specialize(kernel,&info.data,info.dynamic_metadata_offset,address.unsigned_type())
         .expect("internally constructed AdamW metadata must match RUDA's ABI")
 }
 
-struct AdamWKernel {elements: usize, step: AdamWStorageStep}
+struct AdamWKernel {elements: usize}
 impl KernelMetadata for AdamWKernel {
-    fn id(&self) -> KernelId {KernelId::new::<Self>().info((self.elements,self.step.bits()))}
+    fn id(&self) -> KernelId {KernelId::new::<Self>().info(self.elements)}
     fn address_type(&self) -> StorageType {UIntKind::U64.into()}
 }
 impl RudaKernel for AdamWKernel {
-    fn define(&self) -> KernelDefinition {definition(self.elements,self.step)}
+    fn define(&self) -> KernelDefinition {definition(self.elements)}
 }
 
 fn elements(tensor: &TensorBuffer) -> Result<usize> {
@@ -121,10 +129,11 @@ pub fn adamw_step(client: &ComputeClient<AscendRuntime>, parameter: &TensorBuffe
     if count==0 {return client.flush().map_err(error);}
     let binding=|tensor:&TensorBuffer|tensor.handle.clone()
         .offset_end(tensor.handle.size_in_used()-count as u64*4).binding();
-    client.launch(Box::new(KernelTask::<AscendCompiler,_>::new(AdamWKernel {elements:count,step})),
+    let scalars=client.create_from_slice(&step.bits().into_iter().flat_map(u32::to_ne_bytes).collect::<Vec<_>>());
+    client.launch(Box::new(KernelTask::<AscendCompiler,_>::new(AdamWKernel {elements:count})),
         RudaCount::Static(count.div_ceil(64) as u32,1,1),
         KernelArguments::new().with_buffer(binding(parameter)).with_buffer(binding(gradient))
-            .with_buffer(binding(first)).with_buffer(binding(second)));
+            .with_buffer(binding(first)).with_buffer(binding(second)).with_buffer(scalars.clone().binding()));
     client.flush().map_err(error)
 }
 
@@ -163,13 +172,15 @@ mod tests {
     #[test]
     fn actual_ruda_adamw_storage_ir_compiles_without_duplicate_master_binding() {
         for n in [0,1,65,1025] {
-            let kernel=AscendCompiler.compile(definition(n,step()),&AscendOptions {target:Some(AscendTarget::Ascend950DT),
+            let kernel=AscendCompiler.compile(definition(n),&AscendOptions {target:Some(AscendTarget::Ascend950DT),
                 elements:n as u64,..Default::default()},ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
-            assert_eq!(kernel.bindings().len(),4);
-            assert_eq!(kernel.bindings().iter().map(|b|b.writable).collect::<Vec<_>>(),[true,false,true,true]);
-            assert!(kernel.bindings().iter().all(|b|b.bytes==n as u64*4));
+            assert_eq!(kernel.bindings().len(),5);
+            assert_eq!(kernel.bindings().iter().map(|b|b.writable).collect::<Vec<_>>(),[true,false,true,true,false]);
+            assert!(kernel.bindings()[..4].iter().all(|b|b.bytes==n as u64*4));
+            assert_eq!(kernel.bindings()[4].bytes,36);
             assert!(kernel.requires_initialized_outputs());
             assert!(kernel.source().contains("AscendC::Sqrt"));
+            for index in 0..9 {assert!(kernel.source().contains(&format!("g4[{index}ULL]")));}
         }
     }
     #[test]

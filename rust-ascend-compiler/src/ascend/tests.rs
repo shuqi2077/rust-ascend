@@ -66,12 +66,38 @@ assert!(compile(k,9).unwrap().source().contains("0x80000000U"));}
 }
 /// Test-only reference of checked SSA expressions, never linked to a device executor.
 fn reference(op:MapProgram,x:&[f32],y:&[f32],dy:&[f32])->Vec<Vec<f32>>{
-    let p=lower::lower(definition(op),x.len()as u64).unwrap();let inputs=[x,y,dy];let mut nodes:Vec<Vec<f32>>=vec![];
+    evaluate(definition(op),x.len(),[x,y,dy])
+}
+fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])->Vec<Vec<f32>>{
+    let p=lower::lower(kernel,elements as u64).unwrap();let mut nodes:Vec<Vec<f32>>=vec![];
     for node in &p.nodes{let z:Vec<f32>=match *node{
-        Node::Input(i)=>inputs[i].to_vec(),Node::Constant(bits)=>vec![f32::from_bits(bits);x.len()],
-        Node::IndexFloat(i)=>(0..x.len() as u64).map(|lane|p.index_values[i].eval(lane) as f32).collect(),
+        Node::Input(i)=>(0..elements as u64).map(|lane|inputs[i][p.load_indices[&i].eval(lane) as usize]).collect(),
+        Node::UniformInput(i,offset)=>vec![inputs[i][offset as usize];elements],
+        Node::Constant(bits)=>vec![f32::from_bits(bits);elements],
+        Node::IndexFloat(i)=>(0..elements as u64).map(|lane|p.index_values[i].eval(lane) as f32).collect(),
         Node::Unary(u,a)=>nodes[a].iter().map(|&v|match u{Unary::Neg=>-v,Unary::Abs=>v.abs(),Unary::Exp=>v.exp(),Unary::Log=>v.ln(),Unary::Sqrt=>v.sqrt(),Unary::Rsqrt=>1.0/v.sqrt(),Unary::Recip=>1.0/v}).collect(),
         Node::Binary(b,a,c)=>nodes[a].iter().zip(&nodes[c]).map(|(&v,&w)|match b{Binary::Add=>v+w,Binary::Sub=>v-w,Binary::Mul=>v*w,Binary::Div=>v/w}).collect()};nodes.push(z);}
     p.stores.iter().map(|&(_,v)|nodes[v].clone()).collect()
+}
+#[test]fn readonly_uniform_slots_are_dynamic_and_keep_distinct_offsets(){
+    let mut kernel=definition(MapProgram::Add);kernel.buffers[1].size=Some(9);
+    if let Operation::Operator(Operator::Index(read))=&mut kernel.body.instructions[1].operation {read.index=0u64.into();}
+    let scalar=v(998);let result=v(999);let sum=kernel.body.instructions[2].out.unwrap();
+    kernel.body.instructions.insert(3,Instruction::new(Operator::Index(IndexOperator {
+        list:Variable::new(VariableKind::GlobalInputArray(1),f()),index:8u64.into(),vector_size:0,unroll_factor:1}),scalar));
+    kernel.body.instructions.insert(4,Instruction::new(Arithmetic::Mul(BinaryOperator {lhs:sum,rhs:scalar}),result));
+    if let Operation::Operator(Operator::IndexAssign(write))=&mut kernel.body.instructions[5].operation {write.value=result;}
+    for elements in [1,65] {
+        let compiled=compile(kernel.clone(),elements).unwrap();
+        assert!(compiled.source().contains("g1[0ULL]"));assert!(compiled.source().contains("g1[8ULL]"));
+        assert_eq!(compiled.bindings()[1].bytes,36);
+        let x:Vec<f32>=(0..elements).map(|i|i as f32*0.125).collect();
+        for (shift,scale) in [(-0.25,0.5),(1.5,-2.)] {
+            let mut parameters=vec![0f32;9];parameters[0]=shift;parameters[8]=scale;
+            let observed=evaluate(kernel.clone(),elements as usize,[&x,&parameters,&[]]);
+            assert_eq!(observed[0],x.iter().map(|&x|(x+shift)*scale).collect::<Vec<_>>());
+        }
+    }
+    kernel.buffers[1].size=Some(8);assert!(compile(kernel,1).is_err());
 }
 #[test]fn backward_equations_match_finite_differences(){let x=[-2.0,-0.3,0.2,1.7];let up=[1.2,0.7,-0.9,2.0];let dy=[0.5,-1.0,0.2,0.8];let grads=reference(MapProgram::SiluMulBackward,&x,&up,&dy);let h=0.001;for j in 0..4{let mut hi=x;let mut lo=x;hi[j]+=h;lo[j]-=h;let a=reference(MapProgram::SiluMul,&hi,&up,&[]);let b=reference(MapProgram::SiluMul,&lo,&up,&[]);let finite=(a[0][j]-b[0][j])/(2.0*h)*dy[j];assert!((grads[0][j]-finite).abs()<0.001);let expected=dy[j]*x[j]/(1.0+(-x[j]).exp());assert!((grads[1][j]-expected).abs()<1e-6);}}

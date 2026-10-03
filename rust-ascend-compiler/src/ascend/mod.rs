@@ -114,7 +114,7 @@ impl fmt::Display for AscendKernel {
 
 #[derive(Clone, Debug, Default)]
 pub struct AscendCompiler;
-impl AscendCompiler { pub const CACHE_VERSION: u32 = 6; }
+impl AscendCompiler { pub const CACHE_VERSION: u32 = 7; }
 impl Compiler for AscendCompiler {
     type Representation = AscendKernel;
     type CompilationOptions = AscendOptions;
@@ -140,7 +140,8 @@ impl Compiler for AscendCompiler {
         let alloc = plan::allocate(&p, o.reuse_temporaries)?;
         let inplace=p.nodes.iter().filter(|n|matches!(n,lower::Node::Input(i) if p.bindings[*i].visibility==Visibility::ReadWrite)).count();
         let vectors = p.bindings.len().checked_add(alloc.slots).and_then(|n|n.checked_add(inplace)).ok_or_else(|| invalid("UB count overflow"))?;
-        let gather = p.load_indices.values().any(|index| **index != index::Index::Lane);
+        let gather = p.load_indices.values().any(|index| **index != index::Index::Lane)
+            || p.nodes.iter().any(|node|matches!(node,lower::Node::UniformInput(..)));
         let ub = vectors.checked_mul(o.tile_elements as usize).and_then(|n| n.checked_mul(4)).and_then(|n|n.checked_add(if gather {32}else{0}))
             .ok_or_else(|| invalid("UB byte count overflow"))?;
         if ub > o.ub_limit_bytes as usize { return Err(unsupported(format!("kernel requires {ub} UB bytes, limit is {}", o.ub_limit_bytes))); }

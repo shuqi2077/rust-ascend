@@ -85,9 +85,11 @@ mod tests {
     use ruda_core::{compiler::Compiler,launch::ExecutionMode};
     fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];4])->Vec<f32> {
         let p=lower::lower(kernel,elements as u64).unwrap();let mut values:Vec<Vec<f32>>=vec![];
+        if elements==0 {return vec![];}
         for node in &p.nodes {
             let value=match *node {
                 Node::Input(id)=>(0..elements as u64).map(|lane|inputs[id][p.load_indices[&id].eval(lane) as usize]).collect(),
+                Node::UniformInput(id,offset)=>vec![inputs[id][offset as usize];elements],
                 Node::Constant(bits)=>vec![f32::from_bits(bits);elements],
                 Node::IndexFloat(id)=>(0..elements as u64).map(|lane|p.index_values[id].eval(lane) as f32).collect(),
                 Node::Binary(op,a,b)=>values[a].iter().zip(&values[b]).map(|(&a,&b)|match op {
