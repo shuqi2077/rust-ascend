@@ -10,7 +10,7 @@ pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Binary { Add, Sub, Mul, Div }
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Node { Input(usize), Constant(u32), Unary(Unary, usize), Binary(Binary, usize, usize) }
+pub(super) enum Node { Input(usize), Constant(u32), IndexFloat(usize), Unary(Unary, usize), Binary(Binary, usize, usize) }
 impl Node { pub fn inputs(&self) -> Vec<usize> { match self {
     Self::Unary(_, a) => vec![*a], Self::Binary(_, a,b) => vec![*a,*b], _ => vec![] } } }
 #[derive(Debug)]
@@ -18,6 +18,7 @@ pub(super) struct Program {
     pub name: String, pub bindings: Vec<KernelArg>, pub nodes: Vec<Node>,
     pub stores: Vec<(usize, usize)>,
     pub load_indices: HashMap<usize, Rc<Index>>,
+    pub index_values: Vec<Rc<Index>>,
 }
 #[derive(Clone, Debug)]
 enum Value { Lane, Length, Inside, Outside, Index(u64), Mapped(Rc<Index>), Vector(usize) }
@@ -120,6 +121,14 @@ impl Lower {
                     if let Value::Index(n)=value {let n=if dst.ty==Type::new(UIntKind::U32.into()){n as u32 as u64}else{n};value=if n==self.elements{Value::Length}else{Value::Index(n)};}
                     return self.assign(dst,value);
                 }
+                if dst.ty==f32_type() && is_index(op.input.ty) {
+                    let index=self.index(op.input)?;
+                    if index.bounds(self.elements)?.1>(1u64<<24) {
+                        return Err(unsupported("integer-to-FP32 index cast must be provably exact (0..=2^24)"));
+                    }
+                    let id=self.p.index_values.len();self.p.index_values.push(index);
+                    return self.add(dst,Node::IndexFloat(id));
+                }
                 Err(unsupported("non-identity data cast"))
             },
             Operation::Operator(Operator::Reinterpret(op))=>{
@@ -201,7 +210,7 @@ pub(super) fn lower(mut k:KernelDefinition,elements:u64)->Result<Program> {
     // Read actual scope instructions. Unused local declarations carry no effects;
     // every operation, operand and referenced special storage is checked below.
     if k.body.instructions.len()>4096{return Err(unsupported("instruction limit exceeded"));}
-    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![],load_indices:HashMap::new()},elements,values:HashMap::new(),loads:HashMap::new(),constants:HashMap::new(),wrote:HashSet::new()};
+    let mut l=Lower{p:Program{name:k.options.kernel_name,bindings:k.buffers,nodes:vec![],stores:vec![],load_indices:HashMap::new(),index_values:vec![]},elements,values:HashMap::new(),loads:HashMap::new(),constants:HashMap::new(),wrote:HashSet::new()};
     for (n,i) in k.body.instructions.iter().enumerate(){l.instruction(i).map_err(|e|{
         let text=format!("instruction {n}: {e}");
         if matches!(e,ruda_core::compiler::CompilationError::UnsupportedInstruction{..}){unsupported(text)}else{invalid(text)}

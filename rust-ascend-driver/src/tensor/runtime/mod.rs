@@ -8,6 +8,7 @@ mod rows;
 mod elementwise;
 mod conversion;
 mod descriptor;
+mod rotary;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -39,6 +40,7 @@ use ruda_runtime::runtime::{
 pub use ruda_runtime::runtime::{client::ComputeClient, compiler::RudaTask};
 pub use ruda_runtime::runtime::normalization::TensorBuffer;
 pub use crate::tensor::deepgemm::Transpose;
+pub use rust_ascend_compiler::ascend::rotary_programs::RotaryLayout;
 use rust_ascend_compiler::ascend::{AscendCompiler, AscendOptions, AscendTarget};
 use std::{
     ffi::OsString,
@@ -121,6 +123,18 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
+    /// Native FP32 full last-axis rotary encoding using explicit same-row cos/sin tables.
+    /// Width is positive/even; each contiguous table has the input shape with width halved.
+    pub fn rotary(client: &ComputeClient<Self>, input: TensorBuffer, cos: TensorBuffer,
+        sin: TensorBuffer, layout: RotaryLayout) -> Result<TensorBuffer> {
+        rotary::rotate(client,input,cos,sin,layout,false)
+    }
+
+    /// Native input gradient from upstream gradient and fixed tables; no saved input values.
+    pub fn rotary_backward(client: &ComputeClient<Self>, grad: TensorBuffer, cos: TensorBuffer,
+        sin: TensorBuffer, layout: RotaryLayout) -> Result<TensorBuffer> {
+        rotary::rotate(client,grad,cos,sin,layout,true)
+    }
     /// Explicit device-side FP32/FP16/BF16 conversion through CANN ACLNN Cast.
     /// Shape is retained; input and output must be contiguous. No host data conversion.
     pub fn cast(client: &ComputeClient<Self>, input: TensorBuffer, dtype: ruda_core::tensor::DType)

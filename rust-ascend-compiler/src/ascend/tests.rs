@@ -52,11 +52,24 @@ assert!(compile(k,9).unwrap().source().contains("0x80000000U"));}
         let a=compile(k,1025).unwrap();assert!(p.source.contains(".entry"));assert!(a.source().contains("AscendC::Mul"));
     }
 }
+#[test]fn index_to_fp32_cast_requires_an_exact_integer_domain(){
+    let mut kernel=definition(MapProgram::Copy);
+    let output=v(999);
+    let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());
+    kernel.body.instructions.insert(1,Instruction::new(Operator::Cast(UnaryOperator{input:lane}),output));
+    if let Operation::Operator(Operator::IndexAssign(store))=&mut kernel.body.instructions[2].operation {store.value=output;}
+    let compiled=compile(kernel.clone(),65).unwrap();
+    assert!(compiled.source().contains("static_cast<float>((offset + lane))"));
+    assert!(compiled.source().contains("ruda_map_sync<AscendC::HardEvent::S_V>"));
+    assert!(compile(kernel.clone(),(1<<24)+1).is_ok());
+    assert!(compile(kernel,(1<<24)+2).is_err());
+}
 /// Test-only reference of checked SSA expressions, never linked to a device executor.
 fn reference(op:MapProgram,x:&[f32],y:&[f32],dy:&[f32])->Vec<Vec<f32>>{
     let p=lower::lower(definition(op),x.len()as u64).unwrap();let inputs=[x,y,dy];let mut nodes:Vec<Vec<f32>>=vec![];
     for node in &p.nodes{let z:Vec<f32>=match *node{
         Node::Input(i)=>inputs[i].to_vec(),Node::Constant(bits)=>vec![f32::from_bits(bits);x.len()],
+        Node::IndexFloat(i)=>(0..x.len() as u64).map(|lane|p.index_values[i].eval(lane) as f32).collect(),
         Node::Unary(u,a)=>nodes[a].iter().map(|&v|match u{Unary::Neg=>-v,Unary::Abs=>v.abs(),Unary::Exp=>v.exp(),Unary::Log=>v.ln(),Unary::Sqrt=>v.sqrt(),Unary::Rsqrt=>1.0/v.sqrt(),Unary::Recip=>1.0/v}).collect(),
         Node::Binary(b,a,c)=>nodes[a].iter().zip(&nodes[c]).map(|(&v,&w)|match b{Binary::Add=>v+w,Binary::Sub=>v-w,Binary::Mul=>v*w,Binary::Div=>v/w}).collect()};nodes.push(z);}
     p.stores.iter().map(|&(_,v)|nodes[v].clone()).collect()

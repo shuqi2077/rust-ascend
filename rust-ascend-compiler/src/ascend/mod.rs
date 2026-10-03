@@ -14,6 +14,7 @@ mod row_emit;
 pub mod row_programs;
 #[cfg(test)] mod row_tests;
 pub mod programs;
+pub mod rotary_programs;
 #[cfg(test)] mod tests;
 
 use ruda_core::{backtrace::BackTrace, compiler::{CompilationError, Compiler},
@@ -113,7 +114,7 @@ impl fmt::Display for AscendKernel {
 
 #[derive(Clone, Debug, Default)]
 pub struct AscendCompiler;
-impl AscendCompiler { pub const CACHE_VERSION: u32 = 5; }
+impl AscendCompiler { pub const CACHE_VERSION: u32 = 6; }
 impl Compiler for AscendCompiler {
     type Representation = AscendKernel;
     type CompilationOptions = AscendOptions;
