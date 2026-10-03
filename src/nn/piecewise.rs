@@ -39,6 +39,19 @@ pub fn hard_sigmoid<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>,alpha:f3
 pub fn hard_swish<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>)->Result<Tensor<B,D>> {
     Ok(input.clone()*hard_sigmoid(input,1f32/6.,0.5)?)
 }
+/// FP32 ELU with RUDA's X <= 0 exponential branch, including the zero-boundary alpha derivative.
+pub fn elu<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>,alpha:f32)->Result<Tensor<B,D>> {
+    apply(input,PiecewiseActivation::Elu {alpha})
+}
+/// FP32 CELU: divide X by alpha before Exp, subtract one, multiply by alpha, then select X <= 0.
+/// Backward retains the original scalar reciprocal multiplication; alpha is not normalized or restricted.
+pub fn celu<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>,alpha:f32)->Result<Tensor<B,D>> {
+    apply(input,PiecewiseActivation::Celu {alpha})
+}
+/// FP32 SELU with RUDA's full-precision constants and X >= 0 positive branch.
+pub fn selu<B:PiecewiseBackend,const D:usize>(input:Tensor<B,D>)->Result<Tensor<B,D>> {
+    apply(input,PiecewiseActivation::Selu)
+}
 fn forward(input:Primitive,activation:PiecewiseActivation)->Result<Primitive> {
     let client=input.client.clone();let device=input.device.clone();
     let out=AscendRuntime::piecewise_activation(&client,buffer(input),activation)?;

@@ -183,6 +183,8 @@ M／N／K 必须为正且为 16 的倍数；此入口不含 bias、batch 广播�
 
 `nn::leaky_relu(input, negative_slope)` 在严格负值处缩放输入，零值／NaN 比较不进入负分支；原生反向保留 RUDA 的两条 masked 梯度分支、scalar 乘法与共享输入累加顺序，不将非有限 slope 的算术改为条件跳过。`nn::hard_sigmoid(input, alpha, beta)` 原生执行独立的 FP32 `alpha * X`、`+ beta` 和 `[0,1]` Clamp，反向在相等边界保留 `alpha` 导数；`nn::hard_swish(input)` 复用该入口与现有 RUDA 乘法／求导图，计算 `X * HardSigmoid(X, 1/6, 1/2)`。这些入口沿用相同的 FP32、rank 1～8、空轴／尾部域，不设置默认 LeakyReLU slope 或 HardSigmoid 参数，也不替换已有模块的调度。
 
+`nn::elu(input, alpha)`、`nn::celu(input, alpha)` 和 `nn::selu(input)` 提供同域的原生 FP32 前后向。ELU／CELU 在 `X <= 0` 进入指数分支，SELU 在 `X >= 0` 进入线性分支；保持 RUDA 的 `Exp - 1` 运算顺序与 SELU 原常数乘积，不改成 `expm1`。ELU／CELU 的 `alpha` 显式传入，不增加默认值或参数限制；CELU 先做 `X / alpha`，反向按原图乘以 FP32 `1 / alpha`。反向保留两条 masked 分支及共享输入累加，不跳过未选分支上的非有限算术。调用见 [exp_piecewise_tensor 示例](examples/exp_piecewise_tensor.rs)：`cargo run --locked --release --example exp_piecewise_tensor`。
+
 公共逐元素编译支持 FP32 `Erf`、`Tanh` 和标量常量整数幂 `Powi`。Erf／Tanh 使用独立、计入 UB 预算的数学库 workspace；整数幂使用乘法平方展开，负指数先取倒数，保留负底数的整数奇偶语义。现有 `Tensor::erf()`、`tanh()`、整数 `powf_scalar()` 以及 `ruda_nn::Gelu::new()`／`new_approximate()` 直接复用 RUDA 张量与求导定义，不另建模型专用接口。调用见 [activation_tensor 示例](examples/activation_tensor.rs)：`cargo run --locked --release --example activation_tensor`。
 
 `AscendRuntime::silu_mul` / `silu_mul_backward` 使用已有公共逐元素 IR，计算 `SiLU(gate) * up` 与两路输入梯度。输入为形状相同的连续 FP32 缓冲区，支持任意元素数、非对齐尾部与空张量；不做隐式广播或低精度转换。

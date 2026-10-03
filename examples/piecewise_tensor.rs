@@ -14,12 +14,15 @@ fn expected(x:f32,activation:nn::PiecewiseActivation)->(f32,bool) {
             let value=x*alpha+beta;let hi=value>1.;let upper=if hi {1.} else {value};let lo=upper<0.;
             (if lo {0.} else {upper},hi||lo)
         },
+        _=>unreachable!("exponential activation references live in exp_piecewise_tensor"),
     }
 }
 fn apply<B:nn::PiecewiseBackend,const D:usize>(input:Tensor<B,D>,activation:nn::PiecewiseActivation)->Result<Tensor<B,D>,rust_ascend::driver::CannError> {
     match activation {nn::PiecewiseActivation::Relu=>nn::relu(input),nn::PiecewiseActivation::Clamp {min,max}=>nn::clamp(input,min,max),
         nn::PiecewiseActivation::LeakyRelu {negative_slope}=>nn::leaky_relu(input,negative_slope),
-        nn::PiecewiseActivation::HardSigmoid {alpha,beta}=>nn::hard_sigmoid(input,alpha,beta)}
+        nn::PiecewiseActivation::HardSigmoid {alpha,beta}=>nn::hard_sigmoid(input,alpha,beta),
+        nn::PiecewiseActivation::Elu {alpha}=>nn::elu(input,alpha),nn::PiecewiseActivation::Celu {alpha}=>nn::celu(input,alpha),
+        nn::PiecewiseActivation::Selu=>nn::selu(input)}
 }
 fn bits(actual:&[f32],expected:&[f32],name:&str)->Result<(),Box<dyn std::error::Error>> {
     if actual.len()!=expected.len() {return Err(format!("{name}: length mismatch").into());}

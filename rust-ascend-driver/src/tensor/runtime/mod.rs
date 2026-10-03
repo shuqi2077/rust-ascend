@@ -136,7 +136,7 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone)]
 pub struct AscendRuntime;
 impl AscendRuntime {
-    /// Explicit native rank 1..8 contiguous FP32 ReLU, LeakyReLU, Clamp or HardSigmoid.
+    /// Explicit native rank 1..8 contiguous FP32 piecewise activations, including ELU/CELU/SELU.
     /// Empty axes and logical tails are retained; bounds are specialized from their exact FP32 bits.
     pub fn piecewise_activation(client:&ComputeClient<Self>,input:TensorBuffer,activation:PiecewiseActivation)->Result<TensorBuffer> {
         piecewise::execute(client,input,None,activation)

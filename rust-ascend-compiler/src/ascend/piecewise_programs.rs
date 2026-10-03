@@ -3,7 +3,8 @@ use super::{Result,invalid};
 use ruda_core::{ir::*,kernel::{KernelArg,KernelDefinition,KernelOptions,Visibility},launch::RudaDim};
 
 #[derive(Clone,Copy,Debug,PartialEq)]
-pub enum PiecewiseActivation {Relu,Clamp {min:f32,max:f32},LeakyRelu {negative_slope:f32},HardSigmoid {alpha:f32,beta:f32}}
+pub enum PiecewiseActivation {Relu,Clamp {min:f32,max:f32},LeakyRelu {negative_slope:f32},HardSigmoid {alpha:f32,beta:f32},
+    Elu {alpha:f32},Celu {alpha:f32},Selu}
 fn f()->Type {Type::new(FloatKind::F32.into())}
 pub fn definition(activation:PiecewiseActivation,elements:u64,backward:bool)->Result<KernelDefinition> {
     if elements>u32::MAX as u64 {return Err(invalid("piecewise activation domain exceeds u32"));}
@@ -16,6 +17,9 @@ pub fn definition(activation:PiecewiseActivation,elements:u64,backward:bool)->Re
             (PiecewiseActivation::Clamp {..},false)=>"ruda_cann_clamp",(PiecewiseActivation::Clamp {..},true)=>"ruda_cann_clamp_backward",
             (PiecewiseActivation::LeakyRelu {..},false)=>"ruda_cann_leaky_relu",(PiecewiseActivation::LeakyRelu {..},true)=>"ruda_cann_leaky_relu_backward",
             (PiecewiseActivation::HardSigmoid {..},false)=>"ruda_cann_hard_sigmoid",(PiecewiseActivation::HardSigmoid {..},true)=>"ruda_cann_hard_sigmoid_backward",
+            (PiecewiseActivation::Elu {..},false)=>"ruda_cann_elu",(PiecewiseActivation::Elu {..},true)=>"ruda_cann_elu_backward",
+            (PiecewiseActivation::Celu {..},false)=>"ruda_cann_celu",(PiecewiseActivation::Celu {..},true)=>"ruda_cann_celu_backward",
+            (PiecewiseActivation::Selu,false)=>"ruda_cann_selu",(PiecewiseActivation::Selu,true)=>"ruda_cann_selu_backward",
         }.into(),..Default::default()}};
     let lane=Variable::builtin(Builtin::AbsolutePosX,UIntKind::U64.into());let mut next=0;
     let mut op=|operation:Operation,ty:Type| {
@@ -44,6 +48,38 @@ pub fn definition(activation:PiecewiseActivation,elements:u64,backward:bool)->Re
             } else {
                 let scaled=op(Arithmetic::Mul(BinaryOperator {lhs:x,rhs:slope}).into(),f());
                 op(Operator::Select(Select {cond:mask,then:scaled,or_else:x}).into(),f())
+            }
+        },
+        PiecewiseActivation::Elu {..}|PiecewiseActivation::Celu {..}|PiecewiseActivation::Selu=>{
+            const SELU_ALPHA:f64=1.6732632423543772848170429916717;
+            const SELU_GAMMA:f64=1.0507009873554804934193349852946;
+            let selu=matches!(activation,PiecewiseActivation::Selu);let celu=matches!(activation,PiecewiseActivation::Celu {..});
+            let coefficient=match activation {PiecewiseActivation::Elu {alpha}|PiecewiseActivation::Celu {alpha}=>alpha,
+                PiecewiseActivation::Selu=>(SELU_ALPHA*SELU_GAMMA) as f32,_=>unreachable!()};
+            let coefficient_node=op(bits(coefficient).into(),f());
+            let mask=op((if selu {Comparison::GreaterEqual(BinaryOperator {lhs:x,rhs:zero})}
+                else {Comparison::LowerEqual(BinaryOperator {lhs:x,rhs:zero})}).into(),bool_type);
+            let exponent=if celu {op(Arithmetic::Div(BinaryOperator {lhs:x,rhs:coefficient_node}).into(),f())} else {x};
+            let exponential=op(Arithmetic::Exp(UnaryOperator {input:exponent}).into(),f());
+            if let Some(grad)=grad {
+                let negative_grad=op(Operator::Select(Select {cond:mask,then:if selu {zero} else {grad},or_else:if selu {grad} else {zero}}).into(),f());
+                let direct_grad=op(Operator::Select(Select {cond:mask,then:if selu {grad} else {zero},or_else:if selu {zero} else {grad}}).into(),f());
+                let scaled_grad=op(Arithmetic::Mul(BinaryOperator {lhs:negative_grad,rhs:coefficient_node}).into(),f());
+                let mut negative_grad=op(Arithmetic::Mul(BinaryOperator {lhs:scaled_grad,rhs:exponential}).into(),f());
+                if celu {
+                    // RUDA DivScalar backward specializes the FP32 reciprocal, then multiplies.
+                    let reciprocal=op(bits(1f32/coefficient).into(),f());
+                    negative_grad=op(Arithmetic::Mul(BinaryOperator {lhs:negative_grad,rhs:reciprocal}).into(),f());
+                }
+                let direct_grad=if selu {let gamma=op(bits(SELU_GAMMA as f32).into(),f());
+                    op(Arithmetic::Mul(BinaryOperator {lhs:direct_grad,rhs:gamma}).into(),f())} else {direct_grad};
+                op(Arithmetic::Add(BinaryOperator {lhs:negative_grad,rhs:direct_grad}).into(),f())
+            } else {
+                let one=op(bits(1.).into(),f());let shifted=op(Arithmetic::Sub(BinaryOperator {lhs:exponential,rhs:one}).into(),f());
+                let negative=op(Arithmetic::Mul(BinaryOperator {lhs:shifted,rhs:coefficient_node}).into(),f());
+                let positive=if selu {let gamma=op(bits(SELU_GAMMA as f32).into(),f());
+                    op(Arithmetic::Mul(BinaryOperator {lhs:x,rhs:gamma}).into(),f())} else {x};
+                op(Operator::Select(Select {cond:mask,then:if selu {positive} else {negative},or_else:if selu {negative} else {positive}}).into(),f())
             }
         },
         PiecewiseActivation::Clamp {..}|PiecewiseActivation::HardSigmoid {..}=>{
@@ -93,7 +129,7 @@ mod tests {
                         let hi=x>max;let upper=if hi {max} else {x};let lo=upper<min;
                         if backward {if hi || lo {0.} else {grad}} else if lo {min} else {upper}
                     },
-                    PiecewiseActivation::LeakyRelu {..}|PiecewiseActivation::HardSigmoid {..}=>unreachable!(),
+                    _=>unreachable!(),
                 };assert_eq!(actual[0][lane].to_bits(),expected.to_bits());}
                 let compiled=AscendCompiler.compile(kernel,&AscendOptions {target:Some(AscendTarget::Ascend950DT),elements:count as u64,..Default::default()},
                     ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
@@ -143,5 +179,36 @@ mod tests {
                 assert!(compiled.source().contains("AscendC::CMPMODE::GT"));assert!(compiled.source().contains("AscendC::CMPMODE::LT"));
             }}
         }
+    }
+    #[test]
+    fn exponential_piecewise_maps_keep_source_masks_coefficients_and_backward_order() {
+        const ALPHA:f64=1.6732632423543772848170429916717;const GAMMA:f64=1.0507009873554804934193349852946;
+        let values=[f32::NEG_INFINITY,-2.,-0.,0.,2.,90.,f32::INFINITY,f32::from_bits(0x7fc12345)];
+        let mut activations=vec![PiecewiseActivation::Selu];
+        for alpha in [0.1f32,1.,-0.5,0.,f32::INFINITY,f32::NAN] {
+            activations.push(PiecewiseActivation::Elu {alpha});activations.push(PiecewiseActivation::Celu {alpha});
+        }
+        for activation in activations {for count in [0usize,1,7,65,257] {for backward in [false,true] {
+            let x:Vec<f32>=(0..count).map(|i|values[i%values.len()]).collect();
+            let grad:Vec<f32>=(0..count).map(|i|if i%3==0 {-0.} else {(i%7) as f32-3.}).collect();
+            let kernel=definition(activation,count as u64,backward).unwrap();let actual=evaluate(kernel.clone(),count,[&x,&grad,&[]]);
+            for lane in 0..count {
+                let (coefficient,exponential,negative,positive_scale)=match activation {
+                    PiecewiseActivation::Elu {alpha}=>(alpha,x[lane].exp(),x[lane]<=0.,None),
+                    PiecewiseActivation::Celu {alpha}=>(alpha,(x[lane]/alpha).exp(),x[lane]<=0.,None),
+                    PiecewiseActivation::Selu=>((ALPHA*GAMMA) as f32,x[lane].exp(),!(x[lane]>=0.),Some(GAMMA as f32)),_=>unreachable!(),
+                };
+                let expected=if backward {
+                    let direct=if negative {0.} else {grad[lane]};let direct=if let Some(gamma)=positive_scale {direct*gamma} else {direct};
+                    let masked=if negative {grad[lane]} else {0.};let mut scaled=(masked*coefficient)*exponential;
+                    if matches!(activation,PiecewiseActivation::Celu {..}) {scaled*=1f32/coefficient;}scaled+direct
+                } else if negative {(exponential-1.)*coefficient} else if let Some(gamma)=positive_scale {x[lane]*gamma} else {x[lane]};
+                let result=actual[0][lane];assert!(result.to_bits()==expected.to_bits() || result.is_nan() && expected.is_nan());
+            }
+            let compiled=AscendCompiler.compile(kernel,&AscendOptions {target:Some(AscendTarget::Ascend950DT),elements:count as u64,..Default::default()},
+                ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+            assert!(compiled.source().contains("AscendC::Exp("));assert_eq!(compiled.source().contains("AscendC::Div("),matches!(activation,PiecewiseActivation::Celu {..}));
+            assert!(compiled.source().contains(if matches!(activation,PiecewiseActivation::Selu) {"CMPMODE::GE"} else {"CMPMODE::LE"}));
+        }}}
     }
 }
