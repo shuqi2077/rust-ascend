@@ -183,14 +183,14 @@ mod tests {
             for logarithmic in [false,true] {
                 let mut y=vec![f32::NAN;n];
                 for (start,columns,exp) in &tiles {
-                    tile(if logarithmic {WideStage::LogSoftmaxTile} else {WideStage::SoftmaxTile},rows,width,*start,*columns,
-                        if logarithmic {&[&x,&maximum,&total]} else {&[exp,&total]},&mut y);
+                    if logarithmic {tile(WideStage::LogSoftmaxTile,rows,width,*start,*columns,&[&x,&maximum,&total],&mut y);}
+                    else {tile(WideStage::SoftmaxTile,rows,width,*start,*columns,&[exp,&total],&mut y);}
                 }
                 let mut dot=vec![0.;rows];
                 for (start,columns,_) in &tiles {
                     let mut product=vec![0.;rows*columns];
-                    tile(if logarithmic {WideStage::CopyTile} else {WideStage::DotTile},rows,width,*start,*columns,
-                        if logarithmic {&[&grad]} else {&[&y,&grad]},&mut product);
+                    if logarithmic {tile(WideStage::CopyTile,rows,width,*start,*columns,&[&grad],&mut product);}
+                    else {tile(WideStage::DotTile,rows,width,*start,*columns,&[&y,&grad],&mut product);}
                     for row in 0..rows {dot[row]+=product[row*columns..(row+1)*columns].iter().sum::<f32>();}
                 }
                 let mut dx=vec![f32::NAN;n];
