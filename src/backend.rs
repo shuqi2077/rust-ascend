@@ -4,12 +4,12 @@ use crate::{
     runtime::{AscendRuntime, TensorBuffer},
 };
 use ruda_core::tensor::{
-    BoolDType, DTypeUsageSet, FloatDType, IntDType, Metadata, Shape, Slice,
+    BoolDType, FloatDType, IntDType, Metadata, Shape, Slice,
     quantization::QuantScheme,
 };
 use ruda_tensor::{
-    Backend, Distribution, ExecutionError, Scalar, TensorData, TensorMetadata,
-    backend::BackendTypes,
+    Backend, Distribution, ExecutionError, Scalar, TensorData,
+    backend::{BackendTypes, DTypeUsageSet},
     ops::*,
     tensor::{
         BoolTensor, Device, FloatTensor, IntTensor, QuantizedTensor,
