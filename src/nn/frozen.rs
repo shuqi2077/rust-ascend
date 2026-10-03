@@ -2,14 +2,14 @@ use super::{Primitive,Result,buffer,check_queue,LinearBf16Fp32Backend,SiluMulBac
 use crate::{Ascend,Autodiff,driver::CannError,runtime::AscendRuntime};
 use ruda_autodiff::{checkpoint::{base::Checkpointer,strategy::CheckpointStrategy},grads::Gradients,ops::{Backward,Ops,OpsKind}};
 use ruda_core::tensor::{Metadata,Shape};
-use ruda_tensor::{Backend,TensorPrimitive,api::{Tensor,Int},tensor::{FloatTensor,IntTensor}};
+use ruda_tensor::{Backend,TensorPrimitive,api::{Tensor,Int},tensor::{FloatTensor,IntTensor,Device}};
 use crate::tensor::DType;
 
 /// Explicit input-only differentiation with a fixed, already BF16-stored weight.
-pub trait FrozenLinearBf16Fp32Backend:Backend {
+pub trait FrozenLinearBf16Fp32Backend:Backend<Device=Device<Ascend>> {
     fn linear_frozen_bf16_fp32(input:FloatTensor<Self>,weight:FloatTensor<Ascend>)->Result<FloatTensor<Self>>;
 }
-pub trait FrozenEmbeddingBf16Fp32Backend:Backend {
+pub trait FrozenEmbeddingBf16Fp32Backend:Backend<Device=Device<Ascend>> {
     fn embedding_frozen_bf16_fp32(weight:FloatTensor<Ascend>,indices:IntTensor<Self>)->Result<FloatTensor<Self>>;
 }
 /// Fixed BF16 table[V,H] and INT32/INT64 IDs[B,S] produce FP32 activations[B,S,H].
