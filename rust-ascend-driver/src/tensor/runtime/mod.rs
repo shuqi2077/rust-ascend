@@ -66,7 +66,7 @@ use std::{
     time::Duration,
 };
 pub use worker::AscendResource;
-pub use typed::TensorBinaryOp;
+pub use typed::{TensorBinaryOp, TensorReduceOp};
 use worker::Worker;
 
 type Result<T> = std::result::Result<T, CannError>;

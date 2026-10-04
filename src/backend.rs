@@ -1,7 +1,7 @@
 //! Native dispatch for generic RUDA modules. The original Ascend alias is unchanged.
 use crate::{
     Ascend,
-    runtime::{AscendRuntime, TensorBinaryOp, TensorBuffer},
+    runtime::{AscendRuntime, TensorBinaryOp, TensorBuffer, TensorReduceOp},
 };
 use ruda_core::tensor::{
     BoolDType, BoolStore, DType, FloatDType, IntDType, Metadata, Shape, Slice,
@@ -220,6 +220,101 @@ fn reshape(value: Primitive, shape: Shape) -> Primitive {
     ));
     value
 }
+fn reduce(value: Primitive, dim: usize, op: TensorReduceOp) -> Primitive {
+    let out = AscendRuntime::tensor_reduce(&value.client, buffer(value.clone()), dim, op)
+        .expect("native Ascend typed reduction failed");
+    wrap(&value, out)
+}
+fn reduce_all(value: Primitive, op: TensorReduceOp) -> Primitive {
+    let elements = value.meta.shape().num_elements();
+    reduce(reshape(value, Shape::new([elements])), 0, op)
+}
+fn indexed(value: Primitive, indices: Primitive, dim: usize, select: bool) -> Primitive {
+    same_device(&value, &indices);
+    let dispatch = if select {
+        AscendRuntime::tensor_select
+    } else {
+        AscendRuntime::tensor_gather
+    };
+    let out = dispatch(&value.client, buffer(value.clone()), buffer(indices), dim)
+        .expect("native Ascend typed indexing failed");
+    wrap(&value, out)
+}
+fn index_add(
+    value: Primitive,
+    indices: Primitive,
+    source: Primitive,
+    dim: usize,
+    select: bool,
+) -> Primitive {
+    same_device(&value, &indices);
+    same_device(&value, &source);
+    let dispatch = if select {
+        AscendRuntime::tensor_select_add
+    } else {
+        AscendRuntime::tensor_scatter_add
+    };
+    let out = dispatch(
+        &value.client,
+        buffer(value.clone()),
+        buffer(indices),
+        buffer(source),
+        dim,
+    )
+    .expect("native Ascend typed index accumulation failed");
+    wrap(&value, out)
+}
+macro_rules! indexing {
+    ($slice:ident, $assign:ident, $gather:ident, $select:ident, $flip:ident) => {
+        fn $slice(value: Primitive, slices: &[Slice]) -> Primitive {
+            let out = AscendRuntime::tensor_slice(&value.client, buffer(value.clone()), slices)
+                .expect("native Ascend typed slice failed");
+            wrap(&value, out)
+        }
+        fn $assign(value: Primitive, slices: &[Slice], source: Primitive) -> Primitive {
+            same_device(&value, &source);
+            let out = AscendRuntime::tensor_slice_assign(
+                &value.client,
+                buffer(value.clone()),
+                slices,
+                buffer(source),
+            )
+            .expect("native Ascend typed slice assignment failed");
+            wrap(&value, out)
+        }
+        fn $gather(dim: usize, value: Primitive, indices: Primitive) -> Primitive {
+            indexed(value, indices, dim, false)
+        }
+        fn $select(value: Primitive, dim: usize, indices: Primitive) -> Primitive {
+            indexed(value, indices, dim, true)
+        }
+        fn $flip(value: Primitive, axes: &[usize]) -> Primitive {
+            let out = AscendRuntime::tensor_flip(&value.client, buffer(value.clone()), axes)
+                .expect("native Ascend typed flip failed");
+            wrap(&value, out)
+        }
+    };
+}
+macro_rules! index_updates {
+    ($scatter:ident, $select:ident) => {
+        fn $scatter(
+            dim: usize,
+            value: Primitive,
+            indices: Primitive,
+            source: Primitive,
+        ) -> Primitive {
+            index_add(value, indices, source, dim, false)
+        }
+        fn $select(
+            value: Primitive,
+            dim: usize,
+            indices: Primitive,
+            source: Primitive,
+        ) -> Primitive {
+            index_add(value, indices, source, dim, true)
+        }
+    };
+}
 macro_rules! comparisons {
     ($($name:ident, $scalar_name:ident => $op:ident;)*) => { $(
         fn $name(a: Primitive, b: Primitive, dtype: BoolDType) -> Primitive {
@@ -279,13 +374,6 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_recip(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_swap_dims(tensor: FloatTensor<Self>, dim1: usize, dim2: usize) -> FloatTensor<Self>;
         fn float_permute(tensor: FloatTensor<Self>, axes: &[usize]) -> FloatTensor<Self>;
-        fn float_flip(tensor: FloatTensor<Self>, axes: &[usize]) -> FloatTensor<Self>;
-        fn float_gather(dim: usize, tensor: FloatTensor<Self>, indices: IntTensor<Self>) -> FloatTensor<Self>;
-        fn float_scatter_add( dim: usize, tensor: FloatTensor<Self>, indices: IntTensor<Self>, value: FloatTensor<Self>, ) -> FloatTensor<Self>;
-        fn float_select(tensor: FloatTensor<Self>, dim: usize, indices: IntTensor<Self>) -> FloatTensor<Self>;
-        fn float_select_add( tensor: FloatTensor<Self>, dim: usize, indices: IntTensor<Self>, value: FloatTensor<Self>, ) -> FloatTensor<Self>;
-        fn float_slice(tensor: FloatTensor<Self>, slices: &[Slice]) -> FloatTensor<Self>;
-        fn float_slice_assign( tensor: FloatTensor<Self>, slices: &[Slice], value: FloatTensor<Self>, ) -> FloatTensor<Self>;
         fn float_cumsum(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cumprod(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cummin(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
@@ -329,6 +417,14 @@ impl FloatTensorOps<Self> for RudaAscend {
         float_lower, float_lower_elem => Lower;
         float_lower_equal, float_lower_equal_elem => LowerEqual;
     }
+    indexing!(
+        float_slice,
+        float_slice_assign,
+        float_gather,
+        float_select,
+        float_flip
+    );
+    index_updates!(float_scatter_add, float_select_add);
     async fn float_into_data(value: Primitive) -> Result<TensorData, ExecutionError> {
         Ascend::float_into_data(contiguous(value)).await
     }
@@ -401,6 +497,18 @@ impl FloatTensorOps<Self> for RudaAscend {
         let elements = value.meta.shape().num_elements();
         axis_op(reshape(value, Shape::new([elements])), 0, 2)
     }
+    fn float_min(value: Primitive) -> Primitive {
+        reduce_all(value, TensorReduceOp::Min)
+    }
+    fn float_min_dim(value: Primitive, dim: usize) -> Primitive {
+        reduce(value, dim, TensorReduceOp::Min)
+    }
+    fn float_prod(value: Primitive) -> Primitive {
+        reduce_all(value, TensorReduceOp::Prod)
+    }
+    fn float_prod_dim(value: Primitive, dim: usize) -> Primitive {
+        reduce(value, dim, TensorReduceOp::Prod)
+    }
     fn float_clamp(value: Primitive, min: Scalar, max: Scalar) -> Primitive {
         piecewise(
             value,
@@ -422,6 +530,38 @@ impl FloatTensorOps<Self> for RudaAscend {
 }
 
 impl IntTensorOps<Self> for RudaAscend {
+    indexing!(
+        int_slice,
+        int_slice_assign,
+        int_gather,
+        int_select,
+        int_flip
+    );
+    index_updates!(int_scatter_add, int_select_add);
+    fn int_sum(value: Primitive) -> Primitive {
+        reduce_all(value, TensorReduceOp::Sum)
+    }
+    fn int_sum_dim(value: Primitive, dim: usize) -> Primitive {
+        reduce(value, dim, TensorReduceOp::Sum)
+    }
+    fn int_prod(value: Primitive) -> Primitive {
+        reduce_all(value, TensorReduceOp::Prod)
+    }
+    fn int_prod_dim(value: Primitive, dim: usize) -> Primitive {
+        reduce(value, dim, TensorReduceOp::Prod)
+    }
+    fn int_min(value: Primitive) -> Primitive {
+        reduce_all(value, TensorReduceOp::Min)
+    }
+    fn int_min_dim(value: Primitive, dim: usize) -> Primitive {
+        reduce(value, dim, TensorReduceOp::Min)
+    }
+    fn int_max(value: Primitive) -> Primitive {
+        reduce_all(value, TensorReduceOp::Max)
+    }
+    fn int_max_dim(value: Primitive, dim: usize) -> Primitive {
+        reduce(value, dim, TensorReduceOp::Max)
+    }
     comparisons! {
         int_equal, int_equal_elem => Equal;
         int_greater, int_greater_elem => Greater;
@@ -501,21 +641,11 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_from_data(data: TensorData, device: &Device<Self>) -> IntTensor<Self>;
         fn int_device(tensor: &IntTensor<Self>) -> Device<Self>;
         fn int_to_device(tensor: IntTensor<Self>, device: &Device<Self>) -> IntTensor<Self>;
-        fn int_slice(tensor: IntTensor<Self>, slices: &[Slice]) -> IntTensor<Self>;
-        fn int_slice_assign( tensor: IntTensor<Self>, slices: &[Slice], value: IntTensor<Self>, ) -> IntTensor<Self>;
-        fn int_gather(dim: usize, tensor: IntTensor<Self>, indices: IntTensor<Self>) -> IntTensor<Self>;
-        fn int_scatter_add( dim: usize, tensor: IntTensor<Self>, indices: IntTensor<Self>, value: IntTensor<Self>, ) -> IntTensor<Self>;
-        fn int_select(tensor: IntTensor<Self>, dim: usize, indices: IntTensor<Self>) -> IntTensor<Self>;
-        fn int_select_add( tensor: IntTensor<Self>, dim: usize, indices: IntTensor<Self>, value: IntTensor<Self>, ) -> IntTensor<Self>;
         fn int_div(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
         fn int_div_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn int_remainder(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
         fn int_remainder_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn int_matmul(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn int_sum(tensor: IntTensor<Self>) -> IntTensor<Self>;
-        fn int_sum_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
-        fn int_prod(tensor: IntTensor<Self>) -> IntTensor<Self>;
-        fn int_prod_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_mean_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cumsum(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cumprod(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
@@ -527,7 +657,6 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_abs(tensor: IntTensor<Self>) -> IntTensor<Self>;
         fn int_swap_dims(tensor: IntTensor<Self>, dim1: usize, dim2: usize) -> IntTensor<Self>;
         fn int_permute(tensor: IntTensor<Self>, axes: &[usize]) -> IntTensor<Self>;
-        fn int_flip(tensor: IntTensor<Self>, axes: &[usize]) -> IntTensor<Self>;
         fn int_random( shape: Shape, distribution: Distribution, device: &Device<Self>, dtype: IntDType, ) -> IntTensor<Self>;
         fn int_expand(tensor: IntTensor<Self>, shape: Shape) -> IntTensor<Self>;
         fn bitwise_and(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
@@ -546,6 +675,13 @@ impl IntTensorOps<Self> for RudaAscend {
 }
 
 impl BoolTensorOps<Self> for RudaAscend {
+    indexing!(
+        bool_slice,
+        bool_slice_assign,
+        bool_gather,
+        bool_select,
+        bool_flip
+    );
     async fn bool_into_data(value: Primitive) -> Result<TensorData, ExecutionError> {
         Ascend::bool_into_data(contiguous(value)).await
     }
@@ -594,15 +730,10 @@ impl BoolTensorOps<Self> for RudaAscend {
         fn bool_from_data(data: TensorData, device: &Device<Self>) -> BoolTensor<Self>;
         fn bool_device(tensor: &BoolTensor<Self>) -> Device<Self>;
         fn bool_to_device(tensor: BoolTensor<Self>, device: &Device<Self>) -> BoolTensor<Self>;
-        fn bool_slice(tensor: BoolTensor<Self>, slices: &[Slice]) -> BoolTensor<Self>;
-        fn bool_slice_assign( tensor: BoolTensor<Self>, slices: &[Slice], value: BoolTensor<Self>, ) -> BoolTensor<Self>;
-        fn bool_gather(dim: usize, tensor: BoolTensor<Self>, indices: IntTensor<Self>) -> BoolTensor<Self>;
         fn bool_scatter_or( dim: usize, tensor: BoolTensor<Self>, indices: IntTensor<Self>, value: BoolTensor<Self>, ) -> BoolTensor<Self>;
-        fn bool_select(tensor: BoolTensor<Self>, dim: usize, indices: IntTensor<Self>) -> BoolTensor<Self>;
         fn bool_select_or( tensor: BoolTensor<Self>, dim: usize, indices: IntTensor<Self>, value: BoolTensor<Self>, ) -> BoolTensor<Self>;
         fn bool_swap_dims(tensor: BoolTensor<Self>, dim1: usize, dim2: usize) -> BoolTensor<Self>;
         fn bool_permute(tensor: BoolTensor<Self>, axes: &[usize]) -> BoolTensor<Self>;
-        fn bool_flip(tensor: BoolTensor<Self>, axes: &[usize]) -> BoolTensor<Self>;
         fn bool_expand(tensor: BoolTensor<Self>, shape: Shape) -> BoolTensor<Self>;
         fn bool_unfold(tensor: BoolTensor<Self>, dim: usize, size: usize, step: usize) -> BoolTensor<Self>;
     }

@@ -6,10 +6,10 @@ use super::{
 };
 use crate::tensor::{
     DType as CannDType, ScalarValue, TensorLayout,
-    ffi::{AclOpExecutor, AclScalar, AclTensor},
+    ffi::{AclIntArray, AclOpExecutor, AclScalar, AclTensor},
     layout::broadcast,
 };
-use ruda_core::tensor::{BoolStore, DType, Shape, Strides};
+use ruda_core::tensor::{BoolStore, DType, Shape, Slice, Strides};
 use std::ffi::{CStr, c_void};
 
 /// Same-dtype tensor operations. Comparisons/logical operations produce Bool(U8).
@@ -27,6 +27,14 @@ pub enum TensorBinaryOp {
     Mul,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TensorReduceOp {
+    Sum,
+    Prod,
+    Max,
+    Min,
+}
+
 #[derive(Clone)]
 enum Operation {
     Binary(TensorBinaryOp),
@@ -34,6 +42,15 @@ enum Operation {
     Copy,
     Cast(CannDType),
     Where,
+    Reduce {
+        dim: usize,
+        op: TensorReduceOp,
+    },
+    Gather(usize),
+    Select(usize),
+    ScatterAdd(usize),
+    SelectAdd(usize),
+    CopyTo(TensorLayout),
     Fill(TensorLayout, ScalarValue),
     Arange {
         layout: TensorLayout,
@@ -152,6 +169,13 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
             let input = unary()?;
             TensorLayout::contiguous(input.shape(), input.dtype())
         }
+        Operation::CopyTo(target) => {
+            let input = unary()?;
+            if input.dtype() != target.dtype() || input.shape() != target.shape() {
+                return Err(error("slice assignment shape/dtype mismatch"));
+            }
+            Ok(target.clone())
+        }
         Operation::Cast(kind) => TensorLayout::contiguous(unary()?.shape(), *kind),
         Operation::Where => {
             if inputs.len() != 3
@@ -162,6 +186,72 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
             }
             let values = broadcast(inputs[1].shape(), inputs[2].shape())?;
             TensorLayout::contiguous(&broadcast(inputs[0].shape(), &values)?, inputs[1].dtype())
+        }
+        Operation::Reduce { dim, op } => {
+            let input = unary()?;
+            if !numeric(input.dtype()) || *dim >= input.shape().len() {
+                return Err(error("native reduction axis/dtype mismatch"));
+            }
+            if input.shape()[*dim] == 0 && matches!(op, TensorReduceOp::Max | TensorReduceOp::Min) {
+                return Err(error("min/max cannot reduce an empty axis"));
+            }
+            let mut shape = input.shape().to_vec();
+            shape[*dim] = 1;
+            TensorLayout::contiguous(&shape, input.dtype())
+        }
+        Operation::Gather(dim)
+        | Operation::Select(dim)
+        | Operation::ScatterAdd(dim)
+        | Operation::SelectAdd(dim) => {
+            let update = matches!(
+                operation,
+                Operation::ScatterAdd(_) | Operation::SelectAdd(_)
+            );
+            let select = matches!(operation, Operation::Select(_) | Operation::SelectAdd(_));
+            if inputs.len() != if update { 3 } else { 2 } {
+                return Err(error("native indexing binding count mismatch"));
+            }
+            let input = &inputs[0];
+            let indices = &inputs[1];
+            if *dim >= input.shape().len()
+                || !matches!(indices.dtype(), CannDType::I32 | CannDType::I64)
+            {
+                return Err(error("native indexing axis/index dtype mismatch"));
+            }
+            let shape = if select {
+                if indices.shape().len() != 1 {
+                    return Err(error("index_select needs one-dimensional indices"));
+                }
+                let mut shape = input.shape().to_vec();
+                shape[*dim] = indices.shape()[0];
+                shape
+            } else {
+                if indices.shape().len() != input.shape().len()
+                    || indices
+                        .shape()
+                        .iter()
+                        .zip(input.shape())
+                        .enumerate()
+                        .any(|(i, (&n, &d))| i != *dim && n > d)
+                {
+                    return Err(error("gather/scatter index shape mismatch"));
+                }
+                indices.shape().to_vec()
+            };
+            if input.shape()[*dim] == 0 && !shape.contains(&0) {
+                return Err(error("cannot index a nonempty result from an empty axis"));
+            }
+            if update {
+                if !numeric(input.dtype())
+                    || inputs[2].dtype() != input.dtype()
+                    || inputs[2].shape() != shape
+                {
+                    return Err(error("index-add/scatter-add source shape/dtype mismatch"));
+                }
+                TensorLayout::contiguous(input.shape(), input.dtype())
+            } else {
+                TensorLayout::contiguous(&shape, input.dtype())
+            }
         }
         Operation::Fill(target, _) | Operation::Arange { layout: target, .. } => {
             if !inputs.is_empty() {
@@ -180,19 +270,30 @@ fn execute(
     let mut layouts = inputs.iter().map(layout).collect::<Result<Vec<_>>>()?;
     let target = output_layout(&operation, &layouts)?;
     let output = allocate(client, &target);
+    submit(client, operation, inputs, &output, &mut layouts, target)?;
+    Ok(output)
+}
+fn submit(
+    client: &ComputeClient<AscendRuntime>,
+    operation: Operation,
+    inputs: &[TensorBuffer],
+    output: &TensorBuffer,
+    layouts: &mut Vec<TensorLayout>,
+    target: TensorLayout,
+) -> Result<()> {
     client.flush().map_err(error)?;
     if target.byte_len() == 0 {
-        return Ok(output);
+        return Ok(());
     }
     layouts.push(target);
     let guards = inputs
         .iter()
-        .chain(std::iter::once(&output))
+        .chain(std::iter::once(output))
         .map(|value| client.get_resource(value.handle.clone()).map_err(error))
         .collect::<Result<Vec<_>>>()?;
     let resources = guards
         .iter()
-        .zip(&layouts)
+        .zip(layouts.iter())
         .map(|(guard, layout)| {
             let mut resource = guard.resource().clone();
             if resource.byte_len() < layout.byte_len() {
@@ -206,13 +307,255 @@ fn execute(
         .get()
         .ok_or_else(|| error("Ascend runtime is not initialized"))?
         .1
-        .call(move |state| state.typed_tensor(operation, layouts, resources));
+        .call({
+            let layouts = layouts.clone();
+            move |state| state.typed_tensor(operation, layouts, resources)
+        });
     drop(guards);
-    result?;
-    Ok(output)
+    result
+}
+
+struct SlicePlan {
+    shape: Shape,
+    strides: Strides,
+    offset: usize,
+    reversed: Vec<usize>,
+}
+fn slice_plan(
+    dims: &[usize],
+    strides: &[usize],
+    dtype: DType,
+    slices: &[Slice],
+) -> Result<SlicePlan> {
+    if dims.len() != strides.len()
+        || slices.len() > dims.len()
+        || slices.iter().any(|s| s.step == 0)
+    {
+        return Err(error("slice rank/step mismatch"));
+    }
+    let mut shape = Vec::with_capacity(dims.len());
+    let mut output_strides = Vec::with_capacity(dims.len());
+    let mut reversed = Vec::new();
+    let mut offset = 0usize;
+    for (axis, (&size, &stride)) in dims.iter().zip(strides).enumerate() {
+        let slice = slices.get(axis).copied().unwrap_or_else(Slice::full);
+        let bounds = slice.to_range(size);
+        let step = slice.step.unsigned_abs();
+        let count = bounds.end.saturating_sub(bounds.start).div_ceil(step);
+        shape.push(count);
+        output_strides.push(
+            stride
+                .checked_mul(step)
+                .ok_or_else(|| error("slice stride overflow"))?,
+        );
+        if count != 0 {
+            let first = if slice.step < 0 {
+                reversed.push(axis);
+                bounds.end - 1 - (count - 1) * step
+            } else {
+                bounds.start
+            };
+            offset = offset
+                .checked_add(
+                    first
+                        .checked_mul(stride)
+                        .ok_or_else(|| error("slice offset overflow"))?,
+                )
+                .ok_or_else(|| error("slice offset overflow"))?;
+        }
+    }
+    if shape.contains(&0) {
+        offset = 0;
+    }
+    let offset = offset
+        .checked_mul(dtype.size())
+        .ok_or_else(|| error("slice byte offset overflow"))?;
+    Ok(SlicePlan {
+        shape: shape.into(),
+        strides: output_strides.into(),
+        offset,
+        reversed,
+    })
 }
 
 impl AscendRuntime {
+    pub fn tensor_reduce(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        dim: usize,
+        op: TensorReduceOp,
+    ) -> Result<TensorBuffer> {
+        let source = layout(&input)?;
+        let target = output_layout(&Operation::Reduce { dim, op }, &[source.clone()])?;
+        if source.shape()[dim] == 0 {
+            let value = if op == TensorReduceOp::Prod { 1 } else { 0 };
+            return execute(
+                client,
+                Operation::Fill(target, ScalarValue::I64(value)),
+                &[],
+            );
+        }
+        execute(client, Operation::Reduce { dim, op }, &[input])
+    }
+    pub fn tensor_gather(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        indices: TensorBuffer,
+        dim: usize,
+    ) -> Result<TensorBuffer> {
+        execute(client, Operation::Gather(dim), &[input, indices])
+    }
+    pub fn tensor_select(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        indices: TensorBuffer,
+        dim: usize,
+    ) -> Result<TensorBuffer> {
+        execute(client, Operation::Select(dim), &[input, indices])
+    }
+    pub fn tensor_scatter_add(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        indices: TensorBuffer,
+        source: TensorBuffer,
+        dim: usize,
+    ) -> Result<TensorBuffer> {
+        let operation = Operation::ScatterAdd(dim);
+        output_layout(
+            &operation,
+            &[layout(&input)?, layout(&indices)?, layout(&source)?],
+        )?;
+        if indices.shape.contains(&0) {
+            return Self::materialize(client, input);
+        }
+        execute(client, operation, &[input, indices, source])
+    }
+    pub fn tensor_select_add(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        indices: TensorBuffer,
+        source: TensorBuffer,
+        dim: usize,
+    ) -> Result<TensorBuffer> {
+        let operation = Operation::SelectAdd(dim);
+        output_layout(
+            &operation,
+            &[layout(&input)?, layout(&indices)?, layout(&source)?],
+        )?;
+        if indices.shape.contains(&0) {
+            return Self::materialize(client, input);
+        }
+        execute(client, operation, &[input, indices, source])
+    }
+    pub fn tensor_slice(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        slices: &[Slice],
+    ) -> Result<TensorBuffer> {
+        layout(&input)?;
+        let plan = slice_plan(&input.shape, &input.strides, input.dtype, slices)?;
+        if plan.shape.contains(&0) {
+            return Self::tensor_full(client, plan.shape, input.dtype, ScalarValue::I64(0));
+        }
+        let mut output = input;
+        for &axis in &plan.reversed {
+            let count = plan.shape[axis];
+            let bound = slices[axis].to_range(output.shape[axis]);
+            let indices = Self::tensor_arange(
+                client,
+                0,
+                i64::try_from(count).map_err(error)?,
+                1,
+                DType::I64,
+            )?;
+            let scale = Self::tensor_full(
+                client,
+                Shape::new([1]),
+                DType::I64,
+                ScalarValue::I64(slices[axis].step as i64),
+            )?;
+            let indices = Self::tensor_binary(client, indices, scale, TensorBinaryOp::Mul)?;
+            let offset = Self::tensor_full(
+                client,
+                Shape::new([1]),
+                DType::I64,
+                ScalarValue::I64(i64::try_from(bound.end - 1).map_err(error)?),
+            )?;
+            let indices = Self::tensor_binary(client, indices, offset, TensorBinaryOp::Add)?;
+            output = Self::tensor_select(client, output, indices, axis)?;
+        }
+        let mut positive = slices.to_vec();
+        for &axis in &plan.reversed {
+            positive[axis] = Slice::full();
+        }
+        let plan = slice_plan(&output.shape, &output.strides, output.dtype, &positive)?;
+        let view = TensorBuffer {
+            handle: output.handle.offset_start(plan.offset as u64),
+            shape: plan.shape,
+            strides: plan.strides,
+            dtype: output.dtype,
+        };
+        Self::materialize(client, view)
+    }
+    pub fn tensor_slice_assign(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        slices: &[Slice],
+        value: TensorBuffer,
+    ) -> Result<TensorBuffer> {
+        layout(&input)?;
+        layout(&value)?;
+        let plan = slice_plan(&input.shape, &input.strides, input.dtype, slices)?;
+        if value.shape != plan.shape || value.dtype != input.dtype {
+            return Err(error(
+                "slice assignment requires the exact selected shape and dtype",
+            ));
+        }
+        let output = Self::materialize(client, input)?;
+        if plan.shape.contains(&0) {
+            return Ok(output);
+        }
+        let plan = slice_plan(&output.shape, &output.strides, output.dtype, slices)?;
+        let mut value = value;
+        for &axis in &plan.reversed {
+            value = Self::tensor_flip(client, value, &[axis])?;
+        }
+        let target = TensorBuffer {
+            handle: output.handle.clone().offset_start(plan.offset as u64),
+            shape: plan.shape,
+            strides: plan.strides,
+            dtype: output.dtype,
+        };
+        let mut layouts = vec![layout(&value)?];
+        let target_layout = layout(&target)?;
+        let operation = Operation::CopyTo(target_layout.clone());
+        output_layout(&operation, &layouts)?;
+        submit(
+            client,
+            operation,
+            &[value],
+            &target,
+            &mut layouts,
+            target_layout,
+        )?;
+        Ok(output)
+    }
+    pub fn tensor_flip(
+        client: &ComputeClient<Self>,
+        mut input: TensorBuffer,
+        axes: &[usize],
+    ) -> Result<TensorBuffer> {
+        layout(&input)?;
+        for &axis in axes {
+            if axis >= input.shape.len() {
+                return Err(error("flip axis out of bounds"));
+            }
+            let mut slices = vec![Slice::full(); input.shape.len()];
+            slices[axis].step = -1;
+            input = Self::tensor_slice(client, input, &slices)?;
+        }
+        Ok(input)
+    }
     /// Materialize a strided/broadcast view in its original dtype on the device.
     pub fn materialize(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
         execute(client, Operation::Copy, &[input])
@@ -350,6 +693,7 @@ impl State {
             .collect::<Result<Vec<_>>>()?;
         ranges(&addresses, &layouts)?;
         self.session.bind()?;
+        let kind = layouts[0].dtype() as i32;
         let descriptors = layouts
             .into_iter()
             .zip(addresses)
@@ -406,7 +750,7 @@ impl State {
                             plan(handle(0), out, size, executor)
                         })
                 }
-                Operation::Copy => {
+                Operation::Copy | Operation::CopyTo(_) => {
                     type Plan = unsafe extern "C" fn(
                         *mut AclTensor,
                         *const AclTensor,
@@ -443,6 +787,146 @@ impl State {
                     self.session.execute("aclnnSWhere", run, |size, executor| {
                         plan(handle(0), handle(1), handle(2), out, size, executor)
                     })
+                }
+                Operation::Reduce { dim, op } => match op {
+                    TensorReduceOp::Sum => {
+                        type Plan = unsafe extern "C" fn(
+                            *const AclTensor,
+                            *const AclIntArray,
+                            bool,
+                            i32,
+                            *mut AclTensor,
+                            *mut u64,
+                            *mut *mut AclOpExecutor,
+                        ) -> i32;
+                        let dims = self.session.int_array(&[dim as i64])?;
+                        let plan: Plan = self.session.ops.get(c"aclnnReduceSumGetWorkspaceSize")?;
+                        let run = self.session.ops.get(c"aclnnReduceSum")?;
+                        self.session
+                            .execute("aclnnReduceSum", run, |size, executor| {
+                                plan(
+                                    handle(0),
+                                    dims.handle.as_ptr(),
+                                    true,
+                                    kind,
+                                    out,
+                                    size,
+                                    executor,
+                                )
+                            })
+                    }
+                    TensorReduceOp::Prod => {
+                        type Plan = unsafe extern "C" fn(
+                            *const AclTensor,
+                            i64,
+                            bool,
+                            i32,
+                            *mut AclTensor,
+                            *mut u64,
+                            *mut *mut AclOpExecutor,
+                        ) -> i32;
+                        let plan: Plan = self.session.ops.get(c"aclnnProdDimGetWorkspaceSize")?;
+                        let run = self.session.ops.get(c"aclnnProdDim")?;
+                        self.session.execute("aclnnProdDim", run, |size, executor| {
+                            plan(handle(0), dim as i64, true, kind, out, size, executor)
+                        })
+                    }
+                    TensorReduceOp::Max | TensorReduceOp::Min => {
+                        type Plan = unsafe extern "C" fn(
+                            *const AclTensor,
+                            *const AclIntArray,
+                            bool,
+                            *mut AclTensor,
+                            *mut u64,
+                            *mut *mut AclOpExecutor,
+                        ) -> i32;
+                        let dims = self.session.int_array(&[dim as i64])?;
+                        let (plan_name, run_name) = if op == TensorReduceOp::Max {
+                            (c"aclnnAmaxGetWorkspaceSize", c"aclnnAmax")
+                        } else {
+                            (c"aclnnAminGetWorkspaceSize", c"aclnnAmin")
+                        };
+                        let plan: Plan = self.session.ops.get(plan_name)?;
+                        let run = self.session.ops.get(run_name)?;
+                        self.session
+                            .execute("aclnnAmax/Amin", run, |size, executor| {
+                                plan(handle(0), dims.handle.as_ptr(), true, out, size, executor)
+                            })
+                    }
+                },
+                Operation::Gather(dim) | Operation::Select(dim) => {
+                    type Plan = unsafe extern "C" fn(
+                        *const AclTensor,
+                        i64,
+                        *const AclTensor,
+                        *mut AclTensor,
+                        *mut u64,
+                        *mut *mut AclOpExecutor,
+                    ) -> i32;
+                    let (plan_name, run_name) = if matches!(operation, Operation::Gather(_)) {
+                        (c"aclnnGatherGetWorkspaceSize", c"aclnnGather")
+                    } else {
+                        (c"aclnnIndexSelectGetWorkspaceSize", c"aclnnIndexSelect")
+                    };
+                    let plan: Plan = self.session.ops.get(plan_name)?;
+                    let run = self.session.ops.get(run_name)?;
+                    self.session
+                        .execute("aclnnGather/IndexSelect", run, |size, executor| {
+                            plan(handle(0), dim as i64, handle(1), out, size, executor)
+                        })
+                }
+                Operation::ScatterAdd(dim) => {
+                    type Plan = unsafe extern "C" fn(
+                        *const AclTensor,
+                        i64,
+                        *const AclTensor,
+                        *const AclTensor,
+                        *mut AclTensor,
+                        *mut u64,
+                        *mut *mut AclOpExecutor,
+                    ) -> i32;
+                    let plan: Plan = self.session.ops.get(c"aclnnScatterAddGetWorkspaceSize")?;
+                    let run = self.session.ops.get(c"aclnnScatterAdd")?;
+                    self.session
+                        .execute("aclnnScatterAdd", run, |size, executor| {
+                            plan(
+                                handle(0),
+                                dim as i64,
+                                handle(1),
+                                handle(2),
+                                out,
+                                size,
+                                executor,
+                            )
+                        })
+                }
+                Operation::SelectAdd(dim) => {
+                    type Plan = unsafe extern "C" fn(
+                        *const AclTensor,
+                        i64,
+                        *const AclTensor,
+                        *const AclTensor,
+                        *const AclScalar,
+                        *mut AclTensor,
+                        *mut u64,
+                        *mut *mut AclOpExecutor,
+                    ) -> i32;
+                    let alpha = self.session.scalar(&mut ScalarValue::I64(1))?;
+                    let plan: Plan = self.session.ops.get(c"aclnnIndexAddGetWorkspaceSize")?;
+                    let run = self.session.ops.get(c"aclnnIndexAdd")?;
+                    self.session
+                        .execute("aclnnIndexAdd", run, |size, executor| {
+                            plan(
+                                handle(0),
+                                dim as i64,
+                                handle(1),
+                                handle(2),
+                                alpha.handle.as_ptr(),
+                                out,
+                                size,
+                                executor,
+                            )
+                        })
                 }
                 Operation::Fill(_, mut value) => {
                     type Plan = unsafe extern "C" fn(
@@ -517,6 +1001,121 @@ fn ranges(addresses: &[usize], layouts: &[TensorLayout]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn typed_indexing_and_reduction_keep_original_dtypes_and_shapes() {
+        let layout = |shape: &[i64], dtype| TensorLayout::contiguous(shape, dtype).unwrap();
+        let values = layout(&[2, 5, 3], CannDType::I64);
+        let indices = layout(&[4], CannDType::I32);
+        let selected =
+            output_layout(&Operation::Select(1), &[values.clone(), indices.clone()]).unwrap();
+        assert_eq!(selected.shape(), &[2, 4, 3]);
+        assert_eq!(selected.dtype(), CannDType::I64);
+        let updated = output_layout(
+            &Operation::SelectAdd(1),
+            &[values.clone(), indices, selected],
+        )
+        .unwrap();
+        assert_eq!(updated, values);
+        let indices = layout(&[2, 1, 3], CannDType::I64);
+        assert_eq!(
+            output_layout(&Operation::Gather(1), &[values.clone(), indices])
+                .unwrap()
+                .shape(),
+            &[2, 1, 3]
+        );
+        for op in [
+            TensorReduceOp::Sum,
+            TensorReduceOp::Prod,
+            TensorReduceOp::Max,
+            TensorReduceOp::Min,
+        ] {
+            let reduced =
+                output_layout(&Operation::Reduce { dim: 1, op }, &[values.clone()]).unwrap();
+            assert_eq!(reduced.shape(), &[2, 1, 3]);
+            assert_eq!(reduced.dtype(), CannDType::I64);
+        }
+        assert!(
+            output_layout(
+                &Operation::Gather(1),
+                &[values, layout(&[3, 1, 3], CannDType::I64)]
+            )
+            .is_err()
+        );
+        let empty = layout(&[2, 0, 3], CannDType::I32);
+        assert!(
+            output_layout(
+                &Operation::Reduce {
+                    dim: 1,
+                    op: TensorReduceOp::Max
+                },
+                &[empty.clone()]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            output_layout(
+                &Operation::Reduce {
+                    dim: 1,
+                    op: TensorReduceOp::Sum
+                },
+                &[empty]
+            )
+            .unwrap()
+            .shape(),
+            &[2, 1, 3]
+        );
+    }
+    #[test]
+    fn stepped_slice_views_and_reversed_assignment_match_ruda_ranges() {
+        let plan = slice_plan(
+            &[3, 8],
+            &[8, 1],
+            DType::I64,
+            &[Slice::new(1, Some(3), 1), Slice::new(1, Some(8), -3)],
+        )
+        .unwrap();
+        assert_eq!(&*plan.shape, &[2, 3]);
+        assert_eq!(&*plan.strides, &[8, 3]);
+        assert_eq!(plan.offset, 9 * 8);
+        assert_eq!(plan.reversed, vec![1]);
+        for row in 0..2 {
+            for col in 0..3 {
+                let physical =
+                    plan.offset / 8 + row * plan.strides[0] + (2 - col) * plan.strides[1];
+                assert_eq!(physical, (1 + row) * 8 + 7 - col * 3);
+            }
+        }
+        let plan = slice_plan(
+            &[3, 8],
+            &[1, 3],
+            DType::F32,
+            &[Slice::new(-2, None, 1), Slice::new(1, Some(-1), 2)],
+        )
+        .unwrap();
+        assert_eq!(&*plan.shape, &[2, 3]);
+        assert_eq!(&*plan.strides, &[1, 6]);
+        assert_eq!(plan.offset, 16);
+        assert!(plan.reversed.is_empty());
+        assert_eq!(
+            slice_plan(&[0, 8], &[8, 1], DType::I64, &[])
+                .unwrap()
+                .offset,
+            0
+        );
+        assert!(
+            slice_plan(
+                &[3],
+                &[1],
+                DType::I32,
+                &[Slice {
+                    start: 0,
+                    end: None,
+                    step: 0
+                }]
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn typed_broadcast_masks_and_integer_precision_contracts() {
         let int = |dims: &[i64]| TensorLayout::contiguous(dims, CannDType::I64).unwrap();

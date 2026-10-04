@@ -86,9 +86,9 @@ impl Drop for Scalar {
         }
     }
 }
-struct IntArray {
+pub(super) struct IntArray {
     session: Rc<CannSession>,
-    handle: NonNull<AclIntArray>,
+    pub(super) handle: NonNull<AclIntArray>,
     destroy: unsafe extern "C" fn(*const AclIntArray) -> Status,
 }
 impl Drop for IntArray {
@@ -129,7 +129,7 @@ impl CannSession {
         }
     }
 
-    fn int_array(self: &Rc<Self>, values: &[i64]) -> Result<IntArray, CannError> {
+    pub(super) fn int_array(self: &Rc<Self>, values: &[i64]) -> Result<IntArray, CannError> {
         type Create = unsafe extern "C" fn(*const i64, u64) -> *mut AclIntArray;
         // SAFETY: exact SDK signatures, valid host data for the creation call.
         unsafe {
