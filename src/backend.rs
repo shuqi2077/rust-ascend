@@ -600,7 +600,6 @@ impl BoolTensorOps<Self> for RudaAscend {
         fn bool_scatter_or( dim: usize, tensor: BoolTensor<Self>, indices: IntTensor<Self>, value: BoolTensor<Self>, ) -> BoolTensor<Self>;
         fn bool_select(tensor: BoolTensor<Self>, dim: usize, indices: IntTensor<Self>) -> BoolTensor<Self>;
         fn bool_select_or( tensor: BoolTensor<Self>, dim: usize, indices: IntTensor<Self>, value: BoolTensor<Self>, ) -> BoolTensor<Self>;
-        fn bool_equal_elem(lhs: BoolTensor<Self>, rhs: Scalar) -> BoolTensor<Self>;
         fn bool_swap_dims(tensor: BoolTensor<Self>, dim1: usize, dim2: usize) -> BoolTensor<Self>;
         fn bool_permute(tensor: BoolTensor<Self>, axes: &[usize]) -> BoolTensor<Self>;
         fn bool_flip(tensor: BoolTensor<Self>, axes: &[usize]) -> BoolTensor<Self>;
