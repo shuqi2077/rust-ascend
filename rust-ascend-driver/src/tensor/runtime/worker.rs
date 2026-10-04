@@ -115,7 +115,7 @@ impl AscendResource {
 }
 
 pub(super) struct State {
-    session: Rc<CannSession>,
+    pub(super) session: Rc<CannSession>,
     tools: Toolchain,
     buffers: HashMap<StorageId, Buffer>,
     programs: HashMap<String, CannProgram>,
@@ -327,7 +327,7 @@ impl State {
             .ok_or_else(|| error("unknown device allocation"))?;
         Ok(())
     }
-    fn pointer(&self, resource: &AscendResource) -> Result<*mut c_void> {
+    pub(super) fn pointer(&self, resource: &AscendResource) -> Result<*mut c_void> {
         let buffer = self
             .buffers
             .get(&resource.id)

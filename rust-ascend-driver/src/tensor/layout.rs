@@ -41,6 +41,22 @@ pub struct TensorLayout {
 }
 
 impl TensorLayout {
+    /// A nonnegative-stride view. `byte_len` bounds its reachable storage, not
+    /// its logical volume; zero strides represent broadcast axes.
+    pub fn strided(shape: &[i64], strides: &[i64], dtype: DType) -> Result<Self, CannError> {
+        if shape.len() != strides.len() || shape.iter().chain(strides).any(|&n| n < 0) {
+            return Err(invalid("invalid strided tensor metadata"));
+        }
+        let elements = if shape.contains(&0) { 0 } else {
+            shape.iter().zip(strides).try_fold(1i64, |span, (&dim, &stride)| {
+                (dim - 1).checked_mul(stride).and_then(|n| span.checked_add(n))
+            }).ok_or_else(|| invalid("strided tensor storage span overflow"))?
+        };
+        let bytes = usize::try_from(elements).ok()
+            .and_then(|n| n.checked_mul(dtype.bytes()))
+            .ok_or_else(|| invalid("strided tensor byte count overflow"))?;
+        Ok(Self { shape: shape.to_vec(), strides: strides.to_vec(), dtype, bytes })
+    }
     pub fn contiguous(shape: &[i64], dtype: DType) -> Result<Self, CannError> {
         if shape.iter().any(|&d| d < 0) {
             return Err(invalid("negative tensor dimension"));

@@ -24,6 +24,16 @@ fn generic_ruda_modules_and_training_contracts_share_ascend_primitives() {
     let _: Option<rust_ascend::collective::tensor_device::TensorDevice<RudaAscend>> = None;
 }
 
+#[test]
+fn native_typed_model_tensor_entrypoints_are_available() {
+    use rust_ascend::{runtime::{AscendRuntime, ComputeClient, TensorBuffer, TensorBinaryOp},
+        tensor::DType, driver::CannError};
+    let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer) -> Result<TensorBuffer, CannError> = AscendRuntime::materialize;
+    let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer, DType) -> Result<TensorBuffer, CannError> = AscendRuntime::tensor_cast;
+    let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer, TensorBuffer, TensorBinaryOp) -> Result<TensorBuffer, CannError> = AscendRuntime::tensor_binary;
+    let _: fn(&ComputeClient<AscendRuntime>, TensorBuffer, TensorBuffer, TensorBuffer) -> Result<TensorBuffer, CannError> = AscendRuntime::tensor_where;
+}
+
 #[cfg(feature = "models")]
 #[test]
 fn original_model_loader_and_causal_adapter_are_available() {

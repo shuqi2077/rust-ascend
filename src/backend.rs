@@ -1,15 +1,15 @@
 //! Native dispatch for generic RUDA modules. The original Ascend alias is unchanged.
 use crate::{
     Ascend,
-    runtime::{AscendRuntime, TensorBuffer},
+    runtime::{AscendRuntime, TensorBinaryOp, TensorBuffer},
 };
 use ruda_core::tensor::{
-    BoolDType, FloatDType, IntDType, Metadata, Shape, Slice,
+    BoolDType, BoolStore, DType, FloatDType, IntDType, Metadata, Shape, Slice,
     quantization::QuantScheme,
 };
 use ruda_tensor::{
     Backend, Distribution, ExecutionError, Scalar, TensorData,
-    backend::{BackendTypes, DTypeUsageSet},
+    backend::{BackendTypes, DTypeUsage, DTypeUsageSet},
     ops::*,
     tensor::{
         BoolTensor, Device, FloatTensor, IntTensor, QuantizedTensor,
@@ -58,7 +58,19 @@ impl Backend for RudaAscend {
         Ascend::sync(device)
     }
     fn dtype_usage(device: &Self::Device, dtype: ruda_tensor::DType) -> DTypeUsageSet {
-        Ascend::dtype_usage(device, dtype)
+        let mut usage = Ascend::dtype_usage(device, dtype);
+        if matches!(
+            dtype,
+            DType::F32
+                | DType::F16
+                | DType::BF16
+                | DType::I32
+                | DType::I64
+                | DType::Bool(BoolStore::U8)
+        ) {
+            usage |= DTypeUsage::Storage;
+        }
+        usage
     }
     fn device_count(type_id: u16) -> usize {
         Ascend::device_count(type_id)
@@ -110,7 +122,114 @@ fn wrap(reference: &Primitive, value: TensorBuffer) -> Primitive {
     )
 }
 fn contiguous(value: Primitive) -> Primitive {
-    ruda_kernel::tensor::contiguous::into_contiguous(value)
+    if value.is_contiguous() {
+        return value;
+    }
+    let output = AscendRuntime::materialize(&value.client, buffer(value.clone()))
+        .expect("native Ascend view materialization failed");
+    wrap(&value, output)
+}
+fn same_device(a: &Primitive, b: &Primitive) {
+    assert_eq!(a.device, b.device, "native tensor device mismatch");
+    assert!(
+        a.client.same_execution_queue(&b.client),
+        "native tensor execution queue mismatch"
+    );
+}
+fn scalar(value: Scalar) -> crate::driver::tensor::ScalarValue {
+    use crate::driver::tensor::ScalarValue as V;
+    match value {
+        Scalar::Float(n) => V::F64(n),
+        Scalar::Int(n) => V::I64(n),
+        Scalar::UInt(n) => V::U64(n),
+        Scalar::Bool(n) => V::Bool(n),
+    }
+}
+fn filled(
+    shape: Shape,
+    value: Scalar,
+    device: &crate::runtime::AscendDevice,
+    dtype: DType,
+) -> Primitive {
+    use crate::runtime::portable::backend::Runtime;
+    let client = AscendRuntime::client(device);
+    let out = AscendRuntime::tensor_full(&client, shape, dtype, scalar(value))
+        .expect("native Ascend tensor fill failed");
+    Primitive::new(
+        client,
+        out.handle,
+        Metadata::new(out.shape, out.strides),
+        device.clone(),
+        out.dtype,
+    )
+}
+fn scalar_like(reference: &Primitive, value: Scalar) -> Primitive {
+    let out = AscendRuntime::tensor_full(
+        &reference.client,
+        Shape::new([1]),
+        reference.dtype,
+        scalar(value),
+    )
+    .expect("native Ascend scalar tensor fill failed");
+    wrap(reference, out)
+}
+fn binary(a: Primitive, b: Primitive, op: TensorBinaryOp) -> Primitive {
+    same_device(&a, &b);
+    let out = AscendRuntime::tensor_binary(&a.client, buffer(a.clone()), buffer(b), op)
+        .expect("native Ascend typed tensor operation failed");
+    wrap(&a, out)
+}
+fn compare(a: Primitive, b: Primitive, op: TensorBinaryOp, dtype: BoolDType) -> Primitive {
+    assert_eq!(
+        dtype,
+        BoolDType::U8,
+        "Ascend comparisons require byte Bool storage"
+    );
+    binary(a, b, op)
+}
+fn cast(value: Primitive, dtype: DType) -> Primitive {
+    if value.dtype == dtype {
+        return value;
+    }
+    let out = AscendRuntime::tensor_cast(&value.client, buffer(value.clone()), dtype)
+        .expect("native Ascend typed cast failed");
+    wrap(&value, out)
+}
+fn mask_where(value: Primitive, mask: Primitive, replacement: Primitive) -> Primitive {
+    same_device(&value, &mask);
+    same_device(&value, &replacement);
+    let out = AscendRuntime::tensor_where(
+        &value.client,
+        buffer(mask),
+        buffer(replacement),
+        buffer(value.clone()),
+    )
+    .expect("native Ascend tensor mask failed");
+    wrap(&value, out)
+}
+fn reshape(value: Primitive, shape: Shape) -> Primitive {
+    assert_eq!(
+        value.meta.shape().num_elements(),
+        shape.num_elements(),
+        "reshape element count mismatch"
+    );
+    let mut value = contiguous(value);
+    value.meta = Box::new(Metadata::new(
+        shape.clone(),
+        ruda_core::tensor::contiguous_strides(&shape),
+    ));
+    value
+}
+macro_rules! comparisons {
+    ($($name:ident, $scalar_name:ident => $op:ident;)*) => { $(
+        fn $name(a: Primitive, b: Primitive, dtype: BoolDType) -> Primitive {
+            compare(a, b, TensorBinaryOp::$op, dtype)
+        }
+        fn $scalar_name(a: Primitive, b: Scalar, dtype: BoolDType) -> Primitive {
+            let b = scalar_like(&a, b);
+            compare(a, b, TensorBinaryOp::$op, dtype)
+        }
+    )* };
 }
 fn axis_op(value: Primitive, dim: usize, op: u8) -> Primitive {
     let last = value
@@ -143,10 +262,8 @@ impl FloatTensorOps<Self> for RudaAscend {
     forward! { FloatTensorOps;
         fn float_from_data(data: TensorData, device: &Device<Self>) -> FloatTensor<Self>;
         fn float_random( shape: Shape, distribution: Distribution, device: &Device<Self>, dtype: FloatDType, ) -> FloatTensor<Self>;
-        fn float_into_data( tensor: FloatTensor<Self>, ) -> impl Future<Output = Result<TensorData, ExecutionError>> + Send;
         fn float_device(tensor: &FloatTensor<Self>) -> Device<Self>;
         fn float_to_device(tensor: FloatTensor<Self>, device: &Device<Self>) -> FloatTensor<Self>;
-        fn float_into_int(tensor: FloatTensor<Self>, out_dtype: IntDType) -> IntTensor<Self>;
         fn float_empty(shape: Shape, device: &Device<Self>, dtype: FloatDType) -> FloatTensor<Self>;
         fn float_add(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_add_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self>;
@@ -163,25 +280,12 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_swap_dims(tensor: FloatTensor<Self>, dim1: usize, dim2: usize) -> FloatTensor<Self>;
         fn float_permute(tensor: FloatTensor<Self>, axes: &[usize]) -> FloatTensor<Self>;
         fn float_flip(tensor: FloatTensor<Self>, axes: &[usize]) -> FloatTensor<Self>;
-        fn float_reshape(tensor: FloatTensor<Self>, shape: Shape) -> FloatTensor<Self>;
         fn float_gather(dim: usize, tensor: FloatTensor<Self>, indices: IntTensor<Self>) -> FloatTensor<Self>;
         fn float_scatter_add( dim: usize, tensor: FloatTensor<Self>, indices: IntTensor<Self>, value: FloatTensor<Self>, ) -> FloatTensor<Self>;
         fn float_select(tensor: FloatTensor<Self>, dim: usize, indices: IntTensor<Self>) -> FloatTensor<Self>;
         fn float_select_add( tensor: FloatTensor<Self>, dim: usize, indices: IntTensor<Self>, value: FloatTensor<Self>, ) -> FloatTensor<Self>;
         fn float_slice(tensor: FloatTensor<Self>, slices: &[Slice]) -> FloatTensor<Self>;
         fn float_slice_assign( tensor: FloatTensor<Self>, slices: &[Slice], value: FloatTensor<Self>, ) -> FloatTensor<Self>;
-        fn float_mask_where( tensor: FloatTensor<Self>, mask: BoolTensor<Self>, value: FloatTensor<Self>, ) -> FloatTensor<Self>;
-        fn float_mask_fill( tensor: FloatTensor<Self>, mask: BoolTensor<Self>, value: Scalar, ) -> FloatTensor<Self>;
-        fn float_equal(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn float_equal_elem(lhs: FloatTensor<Self>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn float_greater( lhs: FloatTensor<Self>, rhs: FloatTensor<Self>, out_dtype: BoolDType, ) -> BoolTensor<Self>;
-        fn float_greater_elem(lhs: FloatTensor<Self>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn float_greater_equal( lhs: FloatTensor<Self>, rhs: FloatTensor<Self>, out_dtype: BoolDType, ) -> BoolTensor<Self>;
-        fn float_greater_equal_elem( lhs: FloatTensor<Self>, rhs: Scalar, out_dtype: BoolDType, ) -> BoolTensor<Self>;
-        fn float_lower(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn float_lower_elem(lhs: FloatTensor<Self>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn float_lower_equal( lhs: FloatTensor<Self>, rhs: FloatTensor<Self>, out_dtype: BoolDType, ) -> BoolTensor<Self>;
-        fn float_lower_equal_elem( lhs: FloatTensor<Self>, rhs: Scalar, out_dtype: BoolDType, ) -> BoolTensor<Self>;
         fn float_cumsum(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cumprod(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cummin(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
@@ -218,6 +322,43 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_unfold(tensor: FloatTensor<Self>, dim: usize, size: usize, step: usize) -> FloatTensor<Self>;
     }
 
+    comparisons! {
+        float_equal, float_equal_elem => Equal;
+        float_greater, float_greater_elem => Greater;
+        float_greater_equal, float_greater_equal_elem => GreaterEqual;
+        float_lower, float_lower_elem => Lower;
+        float_lower_equal, float_lower_equal_elem => LowerEqual;
+    }
+    async fn float_into_data(value: Primitive) -> Result<TensorData, ExecutionError> {
+        Ascend::float_into_data(contiguous(value)).await
+    }
+    fn float_zeros(shape: Shape, device: &Device<Self>, dtype: FloatDType) -> Primitive {
+        filled(shape, 0.into(), device, dtype.into())
+    }
+    fn float_ones(shape: Shape, device: &Device<Self>, dtype: FloatDType) -> Primitive {
+        filled(shape, 1.into(), device, dtype.into())
+    }
+    fn float_full(
+        shape: Shape,
+        value: Scalar,
+        device: &Device<Self>,
+        dtype: FloatDType,
+    ) -> Primitive {
+        filled(shape, value, device, dtype.into())
+    }
+    fn float_into_int(value: Primitive, dtype: IntDType) -> Primitive {
+        cast(value, dtype.into())
+    }
+    fn float_reshape(value: Primitive, shape: Shape) -> Primitive {
+        reshape(value, shape)
+    }
+    fn float_mask_where(value: Primitive, mask: Primitive, replacement: Primitive) -> Primitive {
+        mask_where(value, mask, replacement)
+    }
+    fn float_mask_fill(value: Primitive, mask: Primitive, replacement: Scalar) -> Primitive {
+        let replacement = scalar_like(&value, replacement);
+        mask_where(value, mask, replacement)
+    }
     fn float_matmul(a: Primitive, b: Primitive) -> Primitive {
         assert_eq!(a.device, b.device, "matmul device mismatch");
         assert!(
@@ -231,20 +372,14 @@ impl FloatTensorOps<Self> for RudaAscend {
         wrap(&a, out)
     }
     fn float_cast(value: Primitive, dtype: FloatDType) -> Primitive {
-        if value.dtype == dtype.into() {
-            return value;
-        }
-        let value = contiguous(value);
-        let out = AscendRuntime::cast(&value.client, buffer(value.clone()), dtype.into())
-            .expect("native Ascend cast failed");
-        wrap(&value, out)
+        cast(value, dtype.into())
     }
     fn float_sum(value: Primitive) -> Primitive {
         let elements = value.meta.shape().num_elements();
         if elements == 0 {
             return Self::float_zeros(Shape::new([1]), &value.device, value.dtype.into());
         }
-        let value = Ascend::float_reshape(value, Shape::new([elements]));
+        let value = reshape(value, Shape::new([elements]));
         axis_op(value, 0, 0)
     }
     fn float_sum_dim(value: Primitive, dim: usize) -> Primitive {
@@ -264,7 +399,7 @@ impl FloatTensorOps<Self> for RudaAscend {
     }
     fn float_max(value: Primitive) -> Primitive {
         let elements = value.meta.shape().num_elements();
-        axis_op(Ascend::float_reshape(value, Shape::new([elements])), 0, 2)
+        axis_op(reshape(value, Shape::new([elements])), 0, 2)
     }
     fn float_clamp(value: Primitive, min: Scalar, max: Scalar) -> Primitive {
         piecewise(
@@ -287,38 +422,91 @@ impl FloatTensorOps<Self> for RudaAscend {
 }
 
 impl IntTensorOps<Self> for RudaAscend {
+    comparisons! {
+        int_equal, int_equal_elem => Equal;
+        int_greater, int_greater_elem => Greater;
+        int_greater_equal, int_greater_equal_elem => GreaterEqual;
+        int_lower, int_lower_elem => Lower;
+        int_lower_equal, int_lower_equal_elem => LowerEqual;
+    }
+    async fn int_into_data(value: Primitive) -> Result<TensorData, ExecutionError> {
+        Ascend::int_into_data(contiguous(value)).await
+    }
+    fn int_zeros(shape: Shape, device: &Device<Self>, dtype: IntDType) -> Primitive {
+        filled(shape, 0.into(), device, dtype.into())
+    }
+    fn int_ones(shape: Shape, device: &Device<Self>, dtype: IntDType) -> Primitive {
+        filled(shape, 1.into(), device, dtype.into())
+    }
+    fn int_full(shape: Shape, value: Scalar, device: &Device<Self>, dtype: IntDType) -> Primitive {
+        filled(shape, value, device, dtype.into())
+    }
+    fn int_arange_step(
+        range: std::ops::Range<i64>,
+        step: usize,
+        device: &Device<Self>,
+        dtype: IntDType,
+    ) -> Primitive {
+        use crate::runtime::portable::backend::Runtime;
+        let client = AscendRuntime::client(device);
+        let out = AscendRuntime::tensor_arange(&client, range.start, range.end, step, dtype.into())
+            .expect("native Ascend integer range failed");
+        Primitive::new(
+            client,
+            out.handle,
+            Metadata::new(out.shape, out.strides),
+            device.clone(),
+            out.dtype,
+        )
+    }
+    fn int_add(a: Primitive, b: Primitive) -> Primitive {
+        binary(a, b, TensorBinaryOp::Add)
+    }
+    fn int_sub(a: Primitive, b: Primitive) -> Primitive {
+        binary(a, b, TensorBinaryOp::Sub)
+    }
+    fn int_mul(a: Primitive, b: Primitive) -> Primitive {
+        binary(a, b, TensorBinaryOp::Mul)
+    }
+    fn int_add_scalar(a: Primitive, b: Scalar) -> Primitive {
+        let b = scalar_like(&a, b);
+        binary(a, b, TensorBinaryOp::Add)
+    }
+    fn int_sub_scalar(a: Primitive, b: Scalar) -> Primitive {
+        let b = scalar_like(&a, b);
+        binary(a, b, TensorBinaryOp::Sub)
+    }
+    fn int_mul_scalar(a: Primitive, b: Scalar) -> Primitive {
+        let b = scalar_like(&a, b);
+        binary(a, b, TensorBinaryOp::Mul)
+    }
+    fn int_cast(value: Primitive, dtype: IntDType) -> Primitive {
+        cast(value, dtype.into())
+    }
+    fn int_into_float(value: Primitive, dtype: FloatDType) -> Primitive {
+        cast(value, dtype.into())
+    }
+    fn int_reshape(value: Primitive, shape: Shape) -> Primitive {
+        reshape(value, shape)
+    }
+    fn int_mask_where(value: Primitive, mask: Primitive, replacement: Primitive) -> Primitive {
+        mask_where(value, mask, replacement)
+    }
+    fn int_mask_fill(value: Primitive, mask: Primitive, replacement: Scalar) -> Primitive {
+        let replacement = scalar_like(&value, replacement);
+        mask_where(value, mask, replacement)
+    }
     forward! { IntTensorOps;
         fn int_empty(shape: Shape, device: &Device<Self>, dtype: IntDType) -> IntTensor<Self>;
-        fn int_into_data( tensor: IntTensor<Self>, ) -> impl Future<Output = Result<TensorData, ExecutionError>> + Send;
         fn int_from_data(data: TensorData, device: &Device<Self>) -> IntTensor<Self>;
         fn int_device(tensor: &IntTensor<Self>) -> Device<Self>;
         fn int_to_device(tensor: IntTensor<Self>, device: &Device<Self>) -> IntTensor<Self>;
-        fn int_reshape(tensor: IntTensor<Self>, shape: Shape) -> IntTensor<Self>;
         fn int_slice(tensor: IntTensor<Self>, slices: &[Slice]) -> IntTensor<Self>;
         fn int_slice_assign( tensor: IntTensor<Self>, slices: &[Slice], value: IntTensor<Self>, ) -> IntTensor<Self>;
-        fn int_into_float(tensor: IntTensor<Self>, out_dtype: FloatDType) -> FloatTensor<Self>;
-        fn int_mask_where( tensor: IntTensor<Self>, mask: BoolTensor<Self>, value: IntTensor<Self>, ) -> IntTensor<Self>;
-        fn int_mask_fill(tensor: IntTensor<Self>, mask: BoolTensor<Self>, value: Scalar) -> IntTensor<Self>;
         fn int_gather(dim: usize, tensor: IntTensor<Self>, indices: IntTensor<Self>) -> IntTensor<Self>;
         fn int_scatter_add( dim: usize, tensor: IntTensor<Self>, indices: IntTensor<Self>, value: IntTensor<Self>, ) -> IntTensor<Self>;
         fn int_select(tensor: IntTensor<Self>, dim: usize, indices: IntTensor<Self>) -> IntTensor<Self>;
         fn int_select_add( tensor: IntTensor<Self>, dim: usize, indices: IntTensor<Self>, value: IntTensor<Self>, ) -> IntTensor<Self>;
-        fn int_equal(lhs: IntTensor<Self>, rhs: IntTensor<Self>, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn int_equal_elem(lhs: IntTensor<Self>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn int_greater(lhs: IntTensor<Self>, rhs: IntTensor<Self>, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn int_greater_elem(lhs: IntTensor<Self>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn int_greater_equal( lhs: IntTensor<Self>, rhs: IntTensor<Self>, out_dtype: BoolDType, ) -> BoolTensor<Self>;
-        fn int_greater_equal_elem( lhs: IntTensor<Self>, rhs: Scalar, out_dtype: BoolDType, ) -> BoolTensor<Self>;
-        fn int_lower(lhs: IntTensor<Self>, rhs: IntTensor<Self>, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn int_lower_elem(lhs: IntTensor<Self>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn int_lower_equal(lhs: IntTensor<Self>, rhs: IntTensor<Self>, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn int_lower_equal_elem(lhs: IntTensor<Self>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<Self>;
-        fn int_add(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn int_add_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
-        fn int_sub(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn int_sub_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
-        fn int_mul(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn int_mul_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn int_div(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
         fn int_div_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn int_remainder(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
@@ -353,36 +541,66 @@ impl IntTensorOps<Self> for RudaAscend {
         fn bitwise_left_shift_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn bitwise_right_shift(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
         fn bitwise_right_shift_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
-        fn int_cast(tensor: IntTensor<Self>, dtype: IntDType) -> IntTensor<Self>;
         fn int_unfold(tensor: IntTensor<Self>, dim: usize, size: usize, step: usize) -> IntTensor<Self>;
     }
 }
 
 impl BoolTensorOps<Self> for RudaAscend {
+    async fn bool_into_data(value: Primitive) -> Result<TensorData, ExecutionError> {
+        Ascend::bool_into_data(contiguous(value)).await
+    }
+    fn bool_zeros(shape: Shape, device: &Device<Self>, dtype: BoolDType) -> Primitive {
+        filled(shape, false.into(), device, dtype.into())
+    }
+    fn bool_ones(shape: Shape, device: &Device<Self>, dtype: BoolDType) -> Primitive {
+        filled(shape, true.into(), device, dtype.into())
+    }
+    fn bool_equal(a: Primitive, b: Primitive) -> Primitive {
+        binary(a, b, TensorBinaryOp::Equal)
+    }
+    fn bool_equal_elem(a: Primitive, b: Scalar) -> Primitive {
+        let b = scalar_like(&a, b);
+        binary(a, b, TensorBinaryOp::Equal)
+    }
+    fn bool_and(a: Primitive, b: Primitive) -> Primitive {
+        binary(a, b, TensorBinaryOp::And)
+    }
+    fn bool_or(a: Primitive, b: Primitive) -> Primitive {
+        binary(a, b, TensorBinaryOp::Or)
+    }
+    fn bool_not(value: Primitive) -> Primitive {
+        let out = AscendRuntime::tensor_not(&value.client, buffer(value.clone()))
+            .expect("native Ascend logical not failed");
+        wrap(&value, out)
+    }
+    fn bool_into_int(value: Primitive, dtype: IntDType) -> Primitive {
+        cast(value, dtype.into())
+    }
+    fn bool_into_float(value: Primitive, dtype: FloatDType) -> Primitive {
+        cast(value, dtype.into())
+    }
+    fn bool_reshape(value: Primitive, shape: Shape) -> Primitive {
+        reshape(value, shape)
+    }
+    fn bool_mask_where(value: Primitive, mask: Primitive, replacement: Primitive) -> Primitive {
+        mask_where(value, mask, replacement)
+    }
+    fn bool_mask_fill(value: Primitive, mask: Primitive, replacement: Scalar) -> Primitive {
+        let replacement = scalar_like(&value, replacement);
+        mask_where(value, mask, replacement)
+    }
     forward! { BoolTensorOps;
         fn bool_empty(shape: Shape, device: &Device<Self>, dtype: BoolDType) -> BoolTensor<Self>;
-        fn bool_zeros(shape: Shape, device: &Device<Self>, dtype: BoolDType) -> BoolTensor<Self>;
-        fn bool_ones(shape: Shape, device: &Device<Self>, dtype: BoolDType) -> BoolTensor<Self>;
-        fn bool_into_data( tensor: BoolTensor<Self>, ) -> impl Future<Output = Result<TensorData, ExecutionError>> + Send;
         fn bool_from_data(data: TensorData, device: &Device<Self>) -> BoolTensor<Self>;
-        fn bool_into_int(tensor: BoolTensor<Self>, out_dtype: IntDType) -> IntTensor<Self>;
-        fn bool_into_float(tensor: BoolTensor<Self>, out_dtype: FloatDType) -> FloatTensor<Self>;
         fn bool_device(tensor: &BoolTensor<Self>) -> Device<Self>;
         fn bool_to_device(tensor: BoolTensor<Self>, device: &Device<Self>) -> BoolTensor<Self>;
-        fn bool_reshape(tensor: BoolTensor<Self>, shape: Shape) -> BoolTensor<Self>;
         fn bool_slice(tensor: BoolTensor<Self>, slices: &[Slice]) -> BoolTensor<Self>;
         fn bool_slice_assign( tensor: BoolTensor<Self>, slices: &[Slice], value: BoolTensor<Self>, ) -> BoolTensor<Self>;
-        fn bool_mask_where( tensor: BoolTensor<Self>, mask: BoolTensor<Self>, value: BoolTensor<Self>, ) -> BoolTensor<Self>;
-        fn bool_mask_fill(tensor: BoolTensor<Self>, mask: BoolTensor<Self>, value: Scalar) -> BoolTensor<Self>;
         fn bool_gather(dim: usize, tensor: BoolTensor<Self>, indices: IntTensor<Self>) -> BoolTensor<Self>;
         fn bool_scatter_or( dim: usize, tensor: BoolTensor<Self>, indices: IntTensor<Self>, value: BoolTensor<Self>, ) -> BoolTensor<Self>;
         fn bool_select(tensor: BoolTensor<Self>, dim: usize, indices: IntTensor<Self>) -> BoolTensor<Self>;
         fn bool_select_or( tensor: BoolTensor<Self>, dim: usize, indices: IntTensor<Self>, value: BoolTensor<Self>, ) -> BoolTensor<Self>;
-        fn bool_equal(lhs: BoolTensor<Self>, rhs: BoolTensor<Self>) -> BoolTensor<Self>;
         fn bool_equal_elem(lhs: BoolTensor<Self>, rhs: Scalar) -> BoolTensor<Self>;
-        fn bool_not(tensor: BoolTensor<Self>) -> BoolTensor<Self>;
-        fn bool_and(lhs: BoolTensor<Self>, rhs: BoolTensor<Self>) -> BoolTensor<Self>;
-        fn bool_or(lhs: BoolTensor<Self>, rhs: BoolTensor<Self>) -> BoolTensor<Self>;
         fn bool_swap_dims(tensor: BoolTensor<Self>, dim1: usize, dim2: usize) -> BoolTensor<Self>;
         fn bool_permute(tensor: BoolTensor<Self>, axes: &[usize]) -> BoolTensor<Self>;
         fn bool_flip(tensor: BoolTensor<Self>, axes: &[usize]) -> BoolTensor<Self>;

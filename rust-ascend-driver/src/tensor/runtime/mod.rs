@@ -19,6 +19,7 @@ mod affine;
 mod piecewise;
 mod window;
 mod generic_matrix;
+mod typed;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -65,6 +66,7 @@ use std::{
     time::Duration,
 };
 pub use worker::AscendResource;
+pub use typed::TensorBinaryOp;
 use worker::Worker;
 
 type Result<T> = std::result::Result<T, CannError>;

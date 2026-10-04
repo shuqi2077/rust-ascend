@@ -71,9 +71,9 @@ type SumPlan = unsafe extern "C" fn(
     *mut *mut AclOpExecutor,
 ) -> Status;
 
-struct Scalar {
+pub(super) struct Scalar {
     session: Rc<CannSession>,
-    handle: NonNull<AclScalar>,
+    pub(super) handle: NonNull<AclScalar>,
     destroy: unsafe extern "C" fn(*const AclScalar) -> Status,
 }
 impl Drop for Scalar {
@@ -145,7 +145,7 @@ impl CannSession {
         }
     }
 
-    fn scalar(self: &Rc<Self>, value: &mut ScalarValue) -> Result<Scalar, CannError> {
+    pub(super) fn scalar(self: &Rc<Self>, value: &mut ScalarValue) -> Result<Scalar, CannError> {
         type Create = unsafe extern "C" fn(*mut c_void, i32) -> *mut AclScalar;
         // SAFETY: exact SDK signatures; the host scalar is copied by aclCreateScalar.
         unsafe {
