@@ -35,6 +35,13 @@ pub enum TensorReduceOp {
     Min,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TensorRandomDistribution {
+    Uniform { low: f64, high: f64 },
+    Normal { mean: f32, std: f32 },
+    Bernoulli { probability: f64 },
+}
+
 #[derive(Clone)]
 enum Operation {
     Binary(TensorBinaryOp),
@@ -51,6 +58,12 @@ enum Operation {
     ScatterAdd(usize),
     SelectAdd(usize),
     CopyTo(TensorLayout),
+    Random {
+        layout: TensorLayout,
+        distribution: TensorRandomDistribution,
+        seed: i64,
+        offset: i64,
+    },
     Fill(TensorLayout, ScalarValue),
     Arange {
         layout: TensorLayout,
@@ -253,6 +266,40 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
                 TensorLayout::contiguous(&shape, input.dtype())
             }
         }
+        Operation::Random {
+            layout: target,
+            distribution,
+            offset,
+            ..
+        } => {
+            if !inputs.is_empty()
+                || !matches!(
+                    target.dtype(),
+                    CannDType::F32 | CannDType::F16 | CannDType::BF16
+                )
+                || *offset < 0
+                || *offset % 4 != 0
+            {
+                return Err(error(
+                    "native random tensors require floating storage and a nonnegative four-aligned offset",
+                ));
+            }
+            let valid = match distribution {
+                TensorRandomDistribution::Uniform { low, high } => {
+                    low.is_finite() && high.is_finite() && low <= high
+                }
+                TensorRandomDistribution::Normal { mean, std } => {
+                    mean.is_finite() && std.is_finite() && *std >= 0.
+                }
+                TensorRandomDistribution::Bernoulli { probability } => {
+                    (0. ..=1.).contains(probability)
+                }
+            };
+            if !valid {
+                return Err(error("invalid native random distribution parameters"));
+            }
+            Ok(target.clone())
+        }
         Operation::Fill(target, _) | Operation::Arange { layout: target, .. } => {
             if !inputs.is_empty() {
                 return Err(error("native tensor initialization has unexpected inputs"));
@@ -379,6 +426,26 @@ fn slice_plan(
 }
 
 impl AscendRuntime {
+    pub fn tensor_random(
+        client: &ComputeClient<Self>,
+        dims: Shape,
+        target: DType,
+        distribution: TensorRandomDistribution,
+        seed: i64,
+        offset: i64,
+    ) -> Result<TensorBuffer> {
+        let layout = TensorLayout::contiguous(&shape(&dims)?, dtype(target)?)?;
+        execute(
+            client,
+            Operation::Random {
+                layout,
+                distribution,
+                seed,
+                offset,
+            },
+            &[],
+        )
+    }
     pub fn tensor_reduce(
         client: &ComputeClient<Self>,
         input: TensorBuffer,
@@ -946,6 +1013,81 @@ impl State {
                             plan(out, value.handle.as_ptr(), size, executor)
                         })
                 }
+                Operation::Random {
+                    distribution,
+                    seed,
+                    offset,
+                    ..
+                } => match distribution {
+                    TensorRandomDistribution::Uniform { low, high } => {
+                        type Plan = unsafe extern "C" fn(
+                            *const AclTensor,
+                            f64,
+                            f64,
+                            u64,
+                            u64,
+                            *mut u64,
+                            *mut *mut AclOpExecutor,
+                        ) -> i32;
+                        let plan: Plan = self
+                            .session
+                            .ops
+                            .get(c"aclnnInplaceUniformGetWorkspaceSize")?;
+                        let run = self.session.ops.get(c"aclnnInplaceUniform")?;
+                        self.session
+                            .execute("aclnnInplaceUniform", run, |size, executor| {
+                                plan(out, low, high, seed as u64, offset as u64, size, executor)
+                            })
+                    }
+                    TensorRandomDistribution::Normal { mean, std } => {
+                        type Plan = unsafe extern "C" fn(
+                            *const AclTensor,
+                            f32,
+                            f32,
+                            i64,
+                            i64,
+                            *mut u64,
+                            *mut *mut AclOpExecutor,
+                        ) -> i32;
+                        let plan: Plan = self
+                            .session
+                            .ops
+                            .get(c"aclnnInplaceNormalGetWorkspaceSize")?;
+                        let run = self.session.ops.get(c"aclnnInplaceNormal")?;
+                        self.session
+                            .execute("aclnnInplaceNormal", run, |size, executor| {
+                                plan(out, mean, std, seed, offset, size, executor)
+                            })
+                    }
+                    TensorRandomDistribution::Bernoulli { probability } => {
+                        type Plan = unsafe extern "C" fn(
+                            *const AclTensor,
+                            *const AclScalar,
+                            i64,
+                            i64,
+                            *mut u64,
+                            *mut *mut AclOpExecutor,
+                        ) -> i32;
+                        let probability =
+                            self.session.scalar(&mut ScalarValue::F64(probability))?;
+                        let plan: Plan = self
+                            .session
+                            .ops
+                            .get(c"aclnnInplaceBernoulliGetWorkspaceSize")?;
+                        let run = self.session.ops.get(c"aclnnInplaceBernoulli")?;
+                        self.session
+                            .execute("aclnnInplaceBernoulli", run, |size, executor| {
+                                plan(
+                                    out,
+                                    probability.handle.as_ptr(),
+                                    seed,
+                                    offset,
+                                    size,
+                                    executor,
+                                )
+                            })
+                    }
+                },
                 Operation::Arange {
                     start, end, step, ..
                 } => {
@@ -1001,6 +1143,36 @@ fn ranges(addresses: &[usize], layouts: &[TensorLayout]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_random_contracts_use_floating_storage_and_aligned_stream_offsets() {
+        let target = TensorLayout::contiguous(&[2, 3], CannDType::BF16).unwrap();
+        let operation = |distribution, offset| Operation::Random {
+            layout: target.clone(),
+            distribution,
+            seed: -1,
+            offset,
+        };
+        for distribution in [
+            TensorRandomDistribution::Uniform { low: -2., high: 3. },
+            TensorRandomDistribution::Normal { mean: 0., std: 1. },
+            TensorRandomDistribution::Bernoulli { probability: 0.5 },
+        ] {
+            assert_eq!(
+                output_layout(&operation(distribution, 4), &[]).unwrap(),
+                target
+            );
+            assert!(output_layout(&operation(distribution, 1), &[]).is_err());
+        }
+        for distribution in [
+            TensorRandomDistribution::Uniform { low: 3., high: -2. },
+            TensorRandomDistribution::Normal { mean: 0., std: -1. },
+            TensorRandomDistribution::Bernoulli {
+                probability: f64::NAN,
+            },
+        ] {
+            assert!(output_layout(&operation(distribution, 0), &[]).is_err());
+        }
+    }
     #[test]
     fn typed_indexing_and_reduction_keep_original_dtypes_and_shapes() {
         let layout = |shape: &[i64], dtype| TensorLayout::contiguous(shape, dtype).unwrap();

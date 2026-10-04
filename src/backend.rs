@@ -1,7 +1,9 @@
 //! Native dispatch for generic RUDA modules. The original Ascend alias is unchanged.
 use crate::{
     Ascend,
-    runtime::{AscendRuntime, TensorBinaryOp, TensorBuffer, TensorReduceOp},
+    runtime::{
+        AscendRuntime, TensorBinaryOp, TensorBuffer, TensorRandomDistribution, TensorReduceOp,
+    },
 };
 use ruda_core::tensor::{
     BoolDType, BoolStore, DType, FloatDType, IntDType, Metadata, Shape, Slice,
@@ -354,9 +356,41 @@ fn piecewise(value: Primitive, op: crate::runtime::PiecewiseActivation) -> Primi
 }
 
 impl FloatTensorOps<Self> for RudaAscend {
+    fn float_random(
+        shape: Shape,
+        distribution: Distribution,
+        device: &Device<Self>,
+        dtype: FloatDType,
+    ) -> Primitive {
+        use crate::runtime::portable::backend::Runtime;
+        let distribution = match distribution {
+            Distribution::Default => TensorRandomDistribution::Uniform { low: 0., high: 1. },
+            Distribution::Uniform(low, high) => TensorRandomDistribution::Uniform { low, high },
+            Distribution::Normal(mean, std) => TensorRandomDistribution::Normal {
+                mean: mean as f32,
+                std: std as f32,
+            },
+            Distribution::Bernoulli(probability) => {
+                TensorRandomDistribution::Bernoulli { probability }
+            }
+        };
+        let [a, b, c, d] = rurand::get_seeds();
+        let seed = (a as u64 | (b as u64) << 32) as i64;
+        let offset = ((c as u64 | (d as u64) << 32) & (i64::MAX as u64 & !3)) as i64;
+        let client = AscendRuntime::client(device);
+        let out =
+            AscendRuntime::tensor_random(&client, shape, dtype.into(), distribution, seed, offset)
+                .expect("native Ascend random tensor generation failed");
+        Primitive::new(
+            client,
+            out.handle,
+            Metadata::new(out.shape, out.strides),
+            device.clone(),
+            out.dtype,
+        )
+    }
     forward! { FloatTensorOps;
         fn float_from_data(data: TensorData, device: &Device<Self>) -> FloatTensor<Self>;
-        fn float_random( shape: Shape, distribution: Distribution, device: &Device<Self>, dtype: FloatDType, ) -> FloatTensor<Self>;
         fn float_device(tensor: &FloatTensor<Self>) -> Device<Self>;
         fn float_to_device(tensor: FloatTensor<Self>, device: &Device<Self>) -> FloatTensor<Self>;
         fn float_empty(shape: Shape, device: &Device<Self>, dtype: FloatDType) -> FloatTensor<Self>;
