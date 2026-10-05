@@ -962,6 +962,9 @@ impl ModuleOps<Self> for RudaAscend {
         )
     }
     fn embedding(weight: Primitive, indices: Primitive) -> Primitive {
+        if half(&weight) {
+            return ruda_tensor::ops::embedding::embedding::<Self>(weight, indices);
+        }
         assert_eq!(weight.device, indices.device, "embedding device mismatch");
         assert!(
             weight.client.same_execution_queue(&indices.client),
@@ -974,6 +977,9 @@ impl ModuleOps<Self> for RudaAscend {
         wrap(&weight, output)
     }
     fn embedding_backward(weight: Primitive, grad: Primitive, indices: Primitive) -> Primitive {
+        if half(&weight) || half(&grad) {
+            return ruda_tensor::ops::embedding::embedding_backward::<Self>(weight, grad, indices);
+        }
         assert_eq!(
             weight.device, indices.device,
             "embedding backward device mismatch"
