@@ -6,7 +6,8 @@ use rust_ascend::{
     },
     nn::modules::{LinearConfig, LoRALinear, LoRALinearConfig},
     optim::{
-        AdamWConfig, AdamWState, Fp32MasterOptimizer, Fp32MasterState, GradientsParams, Optimizer,
+        AdamWConfig, AdamWState, Fp32MasterOptimizer, Fp32MasterState, GradientsAccumulator,
+        GradientsParams, Optimizer,
     },
     runtime::{AscendRuntime, RuntimeOptions},
     tensor::{Backend, DType, FloatDType, api::Tensor},
@@ -39,15 +40,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let base_id = model.base.weight.id;
         let a_id = model.adapter_a.weight.id;
         let b_id = model.adapter_b.weight.id;
-        let mut optimizer =
-            Fp32MasterOptimizer::new(AdamWConfig::new().build()).init::<B, LoRALinear<B>>();
+        let loss_scale = 16.;
+        let mut optimizer = Fp32MasterOptimizer::new(AdamWConfig::new().build())
+            .with_gradient_scale(loss_scale)
+            .init::<B, LoRALinear<B>>();
+        let mut accumulator = GradientsAccumulator::new();
         for _ in 0..3 {
-            let input = Tensor::<B, 2>::from_data([[1., 2.], [2., 1.]], &device).cast(dtype);
-            let prediction = model.forward(input);
-            assert_eq!(prediction.dtype(), dtype);
-            let loss = prediction.cast(DType::F32).square().mean();
-            assert!(loss.clone().into_scalar().is_finite());
-            let gradients = GradientsParams::from_grads(loss.backward(), &model);
+            for input in [[[1., 2.]], [[2., 1.]]] {
+                let input = Tensor::<B, 2>::from_data(input, &device).cast(dtype);
+                let prediction = model.forward(input);
+                assert_eq!(prediction.dtype(), dtype);
+                let loss = prediction.cast(DType::F32).square().mean() / 2.;
+                assert!(loss.clone().into_scalar().is_finite());
+                let gradients = GradientsParams::from_grads((loss * loss_scale).backward(), &model);
+                accumulator.accumulate_with_dtype(&model, gradients, FloatDType::F32);
+            }
+            let gradients = accumulator.grads();
+            for id in [a_id, b_id] {
+                assert_eq!(
+                    gradients.get::<RudaAscend, 2>(id).unwrap().dtype(),
+                    DType::F32
+                );
+            }
             model = optimizer.step(0.001, model, gradients);
             assert_eq!(model.base.weight.id, base_id);
             assert_eq!(model.adapter_a.weight.id, a_id);
@@ -88,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             optimizer = optimizer.load_record(restored);
         }
         println!(
-            "{dtype:?}: original LoRA module, FP32-master AdamW and optimizer record continuation passed"
+            "{dtype:?}: original LoRA module, FP32 accumulation, master AdamW and optimizer record continuation passed"
         );
     }
     Ok(())
