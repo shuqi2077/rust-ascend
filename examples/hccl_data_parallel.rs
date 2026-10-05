@@ -75,6 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let communicator = unsafe { HcclCommunicator::initialize(control, library)? };
     check_sharded_collectives(&communicator, &device)?;
     check_sharded_gradients(&communicator, &device)?;
+    check_hidden_axis_gradients(&communicator, &device)?;
     let root = world - 1;
     for dtype in [FloatDType::F16, FloatDType::BF16] {
         let model = Replica {
@@ -154,6 +155,91 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join()
             .map_err(|_| "rendezvous thread panicked")??;
     }
+    Ok(())
+}
+
+fn check_hidden_axis_gradients(
+    communicator: &HcclCommunicator,
+    device: &AscendDevice,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rust_ascend::distributed::{
+        all_gather_dim, reduce_scatter_mean_dim, reduce_scatter_sum_dim,
+    };
+    let rank = communicator.rank();
+    let world = communicator.world_size() as usize;
+    let rank_sum = (world * (world + 1) / 2) as f32;
+    let close = |values: Vec<f32>, expected: Vec<f32>| {
+        assert_eq!(values.len(), expected.len());
+        for (actual, expected) in values.iter().zip(&expected) {
+            assert!((actual - expected).abs() <= 0.02 * (1. + expected.abs()));
+        }
+    };
+    for dtype in [FloatDType::F32, FloatDType::F16, FloatDType::BF16] {
+        let input = Tensor::<B, 2>::from_data([[rank as f32 + 1., 2.], [3., 4.]], device)
+            .cast(dtype)
+            .swap_dims(0, 1)
+            .detach()
+            .require_grad();
+        let output = all_gather_dim(input.clone(), communicator.clone(), -1i64)?;
+        assert_eq!(output.dims(), [2, 2 * world]);
+        assert_eq!(output.dtype(), dtype.into());
+        let expected = (0..world)
+            .flat_map(|rank| [rank as f32 + 1., 3.])
+            .chain((0..world).flat_map(|_| [2., 4.]))
+            .collect::<Vec<_>>();
+        close(
+            output
+                .clone()
+                .cast(FloatDType::F32)
+                .into_data()
+                .to_vec::<f32>()?,
+            expected,
+        );
+        let weights = Tensor::<B, 2>::full([2, 2 * world], rank + 1, device).cast(dtype);
+        let gradients = (output * weights).sum().backward();
+        let gradient = input
+            .grad(&gradients)
+            .ok_or("missing hidden-axis gather gradient")?;
+        assert_eq!(gradient.dims(), [2, 2]);
+        assert_eq!(gradient.dtype(), dtype.into());
+        close(
+            gradient.cast(FloatDType::F32).into_data().to_vec::<f32>()?,
+            vec![rank_sum; 4],
+        );
+        for mean in [false, true] {
+            let input = Tensor::<B, 2>::full([2 * world, 2], rank + 1, device)
+                .cast(dtype)
+                .swap_dims(0, 1)
+                .detach()
+                .require_grad();
+            let output = if mean {
+                reduce_scatter_mean_dim(input.clone(), communicator.clone(), 1)?
+            } else {
+                reduce_scatter_sum_dim(input.clone(), communicator.clone(), 1)?
+            };
+            assert_eq!(output.dims(), [2, 2]);
+            let weights = Tensor::<B, 2>::full([2, 2], rank + 1, device).cast(dtype);
+            let gradients = (output * weights).sum().backward();
+            let gradient = input
+                .grad(&gradients)
+                .ok_or("missing hidden-axis scatter gradient")?;
+            assert_eq!(gradient.dims(), [2, 2 * world]);
+            assert_eq!(gradient.dtype(), dtype.into());
+            let expected = (0..2)
+                .flat_map(|_| {
+                    (0..world).flat_map(|rank| {
+                        let value = (rank + 1) as f32 / if mean { world as f32 } else { 1. };
+                        [value; 2]
+                    })
+                })
+                .collect::<Vec<_>>();
+            close(
+                gradient.cast(FloatDType::F32).into_data().to_vec::<f32>()?,
+                expected,
+            );
+        }
+    }
+    println!("rank {rank}/{world}: native hidden-axis sharding and shared RUDA gradients passed");
     Ok(())
 }
 

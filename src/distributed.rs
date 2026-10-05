@@ -17,7 +17,10 @@ use std::ffi::OsStr;
 type Primitive = RudaTensor<crate::runtime::AscendRuntime>;
 type Control = RankCommunicator<TensorDevice<RudaAscend>>;
 
-pub use ruda_autodiff::collective::{all_gather, reduce_scatter_mean, reduce_scatter_sum};
+pub use ruda_autodiff::collective::{
+    all_gather, all_gather_dim, reduce_scatter_mean, reduce_scatter_mean_dim, reduce_scatter_sum,
+    reduce_scatter_sum_dim,
+};
 
 impl ruda_tensor::collective::TensorCollective<RudaAscend> for HcclCommunicator {
     type Error = TensorDeviceError;
