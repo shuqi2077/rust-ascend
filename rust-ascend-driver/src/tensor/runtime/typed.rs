@@ -90,6 +90,10 @@ enum Operation {
         dtype: CannDType,
     },
     Cumsum(usize),
+    Sort {
+        dim: usize,
+        descending: bool,
+    },
     Gather(usize),
     Select(usize),
     ScatterAdd(usize),
@@ -305,6 +309,15 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
             shape[*dim] = 1;
             TensorLayout::contiguous(&shape, input.dtype())
         }
+        Operation::Sort { dim, .. } => {
+            let input = unary()?;
+            if !numeric(input.dtype()) || *dim >= input.shape().len() {
+                return Err(error(
+                    "native sort requires a numeric tensor and a valid axis",
+                ));
+            }
+            TensorLayout::contiguous(input.shape(), input.dtype())
+        }
         Operation::Cumsum(dim) => {
             let input = unary()?;
             if !numeric(input.dtype()) || *dim >= input.shape().len() {
@@ -443,14 +456,34 @@ fn submit(
     layouts: &mut Vec<TensorLayout>,
     target: TensorLayout,
 ) -> Result<()> {
+    submit_outputs(
+        client,
+        operation,
+        inputs,
+        std::slice::from_ref(output),
+        layouts,
+        &[target],
+    )
+}
+fn submit_outputs(
+    client: &ComputeClient<AscendRuntime>,
+    operation: Operation,
+    inputs: &[TensorBuffer],
+    outputs: &[TensorBuffer],
+    layouts: &mut Vec<TensorLayout>,
+    targets: &[TensorLayout],
+) -> Result<()> {
     client.flush().map_err(error)?;
-    if target.byte_len() == 0 {
+    if outputs.len() != targets.len() || outputs.is_empty() {
+        return Err(error("native tensor output binding count mismatch"));
+    }
+    if targets.iter().all(|target| target.byte_len() == 0) {
         return Ok(());
     }
-    layouts.push(target);
+    layouts.extend_from_slice(targets);
     let guards = inputs
         .iter()
-        .chain(std::iter::once(output))
+        .chain(outputs)
         .map(|value| client.get_resource(value.handle.clone()).map_err(error))
         .collect::<Result<Vec<_>>>()?;
     let resources = guards
@@ -541,6 +574,30 @@ fn slice_plan(
 }
 
 impl AscendRuntime {
+    /// Stable native axis sort. Values keep their dtype; indices are I64.
+    /// Equal values retain their original axis coordinates in either direction.
+    pub fn tensor_sort(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        dim: usize,
+        descending: bool,
+    ) -> Result<(TensorBuffer, TensorBuffer)> {
+        let operation = Operation::Sort { dim, descending };
+        let mut layouts = vec![layout(&input)?];
+        let values_layout = output_layout(&operation, &layouts)?;
+        let indices_layout = TensorLayout::contiguous(values_layout.shape(), CannDType::I64)?;
+        let values = allocate(client, &values_layout);
+        let indices = allocate(client, &indices_layout);
+        submit_outputs(
+            client,
+            operation,
+            &[input],
+            &[values.clone(), indices.clone()],
+            &mut layouts,
+            &[values_layout, indices_layout],
+        )?;
+        Ok((values, indices))
+    }
     /// Inclusive cumulative sum along an axis, preserving input shape and dtype.
     pub fn tensor_cumsum(
         client: &ComputeClient<Self>,
@@ -944,9 +1001,14 @@ impl State {
         layouts: Vec<TensorLayout>,
         resources: Vec<AscendResource>,
     ) -> Result<()> {
+        let output_count = if matches!(&operation, Operation::Sort { .. }) {
+            2
+        } else {
+            1
+        };
         let output_index = layouts
             .len()
-            .checked_sub(1)
+            .checked_sub(output_count)
             .ok_or_else(|| error("missing native tensor output"))?;
         if resources.len() != layouts.len()
             || resources
@@ -954,6 +1016,9 @@ impl State {
                 .zip(&layouts)
                 .any(|(r, l)| r.size != l.byte_len())
             || output_layout(&operation, &layouts[..output_index])? != layouts[output_index]
+            || (output_count == 2
+                && TensorLayout::contiguous(layouts[output_index].shape(), CannDType::I64)?
+                    != layouts[output_index + 1])
         {
             return Err(error("native tensor layout/resource contract mismatch"));
         }
@@ -962,6 +1027,9 @@ impl State {
             .map(|r| self.pointer(r).map(|p| p as usize))
             .collect::<Result<Vec<_>>>()?;
         ranges(&addresses, &layouts)?;
+        if output_count == 2 {
+            ranges(&addresses[..output_index + 1], &layouts[..output_index + 1])?;
+        }
         self.session.bind()?;
         let kind = layouts[0].dtype() as i32;
         let descriptors = layouts
@@ -978,6 +1046,32 @@ impl State {
         // SAFETY: every symbol below has the documented ACLNN ABI, not an IR fallback.
         unsafe {
             match operation {
+                Operation::Sort { dim, descending } => {
+                    type Plan = unsafe extern "C" fn(
+                        *const AclTensor,
+                        bool,
+                        i64,
+                        bool,
+                        *mut AclTensor,
+                        *mut AclTensor,
+                        *mut u64,
+                        *mut *mut AclOpExecutor,
+                    ) -> i32;
+                    let plan: Plan = self.session.ops.get(c"aclnnSortGetWorkspaceSize")?;
+                    let run = self.session.ops.get(c"aclnnSort")?;
+                    self.session.execute("aclnnSort", run, |size, executor| {
+                        plan(
+                            handle(0),
+                            true,
+                            dim as i64,
+                            descending,
+                            out,
+                            handle(output_index + 1),
+                            size,
+                            executor,
+                        )
+                    })
+                }
                 Operation::Binary(op) => {
                     let (plan_name, run_name) = binary_symbols(op);
                     let run = self.session.ops.get(run_name)?;
@@ -1544,6 +1638,61 @@ fn ranges(addresses: &[usize], layouts: &[TensorLayout]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_sort_accepts_strided_numeric_axes_and_preserves_value_width() {
+        for dtype in [
+            CannDType::F32,
+            CannDType::F16,
+            CannDType::BF16,
+            CannDType::I32,
+            CannDType::I64,
+        ] {
+            let input = TensorLayout::strided(&[3, 2], &[1, 3], dtype).unwrap();
+            for dim in [0, 1] {
+                for descending in [false, true] {
+                    let output =
+                        output_layout(&Operation::Sort { dim, descending }, &[input.clone()])
+                            .unwrap();
+                    assert_eq!(output, TensorLayout::contiguous(&[3, 2], dtype).unwrap());
+                    let indices = TensorLayout::contiguous(output.shape(), CannDType::I64).unwrap();
+                    assert_eq!(indices.shape(), output.shape());
+                }
+            }
+            assert!(
+                output_layout(
+                    &Operation::Sort {
+                        dim: 2,
+                        descending: false
+                    },
+                    &[input]
+                )
+                .is_err()
+            );
+            let empty = TensorLayout::contiguous(&[3, 0], dtype).unwrap();
+            assert_eq!(
+                output_layout(
+                    &Operation::Sort {
+                        dim: 1,
+                        descending: true
+                    },
+                    &[empty.clone()]
+                )
+                .unwrap(),
+                empty
+            );
+        }
+        let boolean = TensorLayout::contiguous(&[2, 3], CannDType::Bool).unwrap();
+        assert!(
+            output_layout(
+                &Operation::Sort {
+                    dim: 1,
+                    descending: false
+                },
+                &[boolean]
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn integer_division_preserves_broadcast_shape_and_integer_width() {
         for dtype in [CannDType::I32, CannDType::I64] {

@@ -251,6 +251,33 @@ fn cumsum(value: Primitive, dim: usize) -> Primitive {
         .expect("native Ascend cumulative sum failed");
     wrap(&value, out)
 }
+fn sorted(
+    value: Primitive,
+    dim: usize,
+    descending: bool,
+    index_dtype: IntDType,
+) -> (Primitive, Primitive) {
+    let (values, indices) =
+        AscendRuntime::tensor_sort(&value.client, buffer(value.clone()), dim, descending)
+            .expect("native Ascend stable sort failed");
+    (
+        wrap(&value, values),
+        cast(wrap(&value, indices), index_dtype.into()),
+    )
+}
+fn top_indices(value: Primitive, dim: usize, k: usize, index_dtype: IntDType) -> Primitive {
+    let shape = value.meta.shape();
+    assert!(
+        dim < shape.len() && k <= shape[dim],
+        "invalid Top-K axis/count"
+    );
+    let indices = sorted(value, dim, true, index_dtype).1;
+    let mut slices = vec![Slice::full(); indices.meta.shape().len()];
+    slices[dim] = Slice::from(0..k);
+    let out = AscendRuntime::tensor_slice(&indices.client, buffer(indices.clone()), &slices)
+        .expect("native Ascend Top-K index slice failed");
+    wrap(&indices, out)
+}
 macro_rules! floating_binary {
     ($($method:ident, $scalar_method:ident => $op:ident;)*) => { $(
         fn $method(a: Primitive, b: Primitive) -> Primitive {
@@ -435,6 +462,44 @@ impl FloatTensorOps<Self> for RudaAscend {
             Ascend::float_argmin(value, dim, out_dtype)
         }
     }
+    fn float_argtopk(value: Primitive, dim: usize, k: usize, out_dtype: IntDType) -> Primitive {
+        if half(&value) {
+            top_indices(value, dim, k, out_dtype)
+        } else {
+            Ascend::float_argtopk(value, dim, k, out_dtype)
+        }
+    }
+    fn float_sort(value: Primitive, dim: usize, descending: bool) -> Primitive {
+        if half(&value) {
+            sorted(value, dim, descending, IntDType::I64).0
+        } else {
+            Ascend::float_sort(value, dim, descending)
+        }
+    }
+    fn float_sort_with_indices(
+        value: Primitive,
+        dim: usize,
+        descending: bool,
+        indices_dtype: IntDType,
+    ) -> (Primitive, Primitive) {
+        if half(&value) {
+            sorted(value, dim, descending, indices_dtype)
+        } else {
+            Ascend::float_sort_with_indices(value, dim, descending, indices_dtype)
+        }
+    }
+    fn float_argsort(
+        value: Primitive,
+        dim: usize,
+        descending: bool,
+        out_dtype: IntDType,
+    ) -> Primitive {
+        if half(&value) {
+            sorted(value, dim, descending, out_dtype).1
+        } else {
+            Ascend::float_argsort(value, dim, descending, out_dtype)
+        }
+    }
     fn float_random(
         shape: Shape,
         distribution: Distribution,
@@ -492,7 +557,6 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_atanh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_atan2(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_round(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_argtopk( tensor: FloatTensor<Self>, dim: usize, k: usize, out_dtype: IntDType, ) -> IntTensor<Self>;
         fn float_expand(tensor: FloatTensor<Self>, shape: Shape) -> FloatTensor<Self>;
         fn float_unfold(tensor: FloatTensor<Self>, dim: usize, size: usize, step: usize) -> FloatTensor<Self>;
     }
@@ -686,6 +750,37 @@ impl IntTensorOps<Self> for RudaAscend {
             _ => Ascend::int_argmin(value, dim),
         }
     }
+    fn int_argtopk(value: Primitive, dim: usize, k: usize) -> Primitive {
+        match value.dtype {
+            DType::I32 => top_indices(value, dim, k, IntDType::I32),
+            DType::I64 => top_indices(value, dim, k, IntDType::I64),
+            _ => Ascend::int_argtopk(value, dim, k),
+        }
+    }
+    fn int_sort(value: Primitive, dim: usize, descending: bool) -> Primitive {
+        match value.dtype {
+            DType::I32 | DType::I64 => sorted(value, dim, descending, IntDType::I64).0,
+            _ => Ascend::int_sort(value, dim, descending),
+        }
+    }
+    fn int_sort_with_indices(
+        value: Primitive,
+        dim: usize,
+        descending: bool,
+    ) -> (Primitive, Primitive) {
+        match value.dtype {
+            DType::I32 => sorted(value, dim, descending, IntDType::I32),
+            DType::I64 => sorted(value, dim, descending, IntDType::I64),
+            _ => Ascend::int_sort_with_indices(value, dim, descending),
+        }
+    }
+    fn int_argsort(value: Primitive, dim: usize, descending: bool) -> Primitive {
+        match value.dtype {
+            DType::I32 => sorted(value, dim, descending, IntDType::I32).1,
+            DType::I64 => sorted(value, dim, descending, IntDType::I64).1,
+            _ => Ascend::int_argsort(value, dim, descending),
+        }
+    }
     fn int_cumsum(value: Primitive, dim: usize) -> Primitive {
         if matches!(value.dtype, DType::I32 | DType::I64) {
             cumsum(value, dim)
@@ -825,7 +920,6 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_cumprod(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cummin(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cummax(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
-        fn int_argtopk(tensor: IntTensor<Self>, dim: usize, k: usize) -> IntTensor<Self>;
         fn int_abs(tensor: IntTensor<Self>) -> IntTensor<Self>;
         fn int_swap_dims(tensor: IntTensor<Self>, dim1: usize, dim2: usize) -> IntTensor<Self>;
         fn int_permute(tensor: IntTensor<Self>, axes: &[usize]) -> IntTensor<Self>;
