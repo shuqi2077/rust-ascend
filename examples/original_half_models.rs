@@ -1,6 +1,6 @@
 use rust_ascend::{
     Autodiff, RudaAscend,
-    model::module::Initializer,
+    model::module::{Initializer, Module},
     nn::modules::{LayerNormConfig, LinearConfig, LoRALinearConfig, RmsNormConfig},
     runtime::{AscendRuntime, RuntimeOptions},
     tensor::{
@@ -22,12 +22,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let device = unsafe { AscendRuntime::initialize_exclusive(options)? };
     type B = Autodiff<RudaAscend>;
-    for dtype in [DType::F16, DType::BF16] {
-        let mut base = LinearConfig::new(2, 3)
+    for (dtype, module_dtype) in [
+        (DType::F16, FloatDType::F16),
+        (DType::BF16, FloatDType::BF16),
+    ] {
+        let base = LinearConfig::new(2, 3)
             .with_bias(false)
             .with_initializer(Initializer::Ones)
-            .init::<B>(&device);
-        base.weight = base.weight.map(|weight| weight.cast(dtype));
+            .init::<B>(&device)
+            .to_dtype(module_dtype);
         let model = LoRALinearConfig::new(1, 2.).init(base);
         let input = Tensor::<B, 2>::from_data([[1., 3.], [2., 4.]], &device)
             .cast(dtype)

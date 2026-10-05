@@ -1,7 +1,7 @@
 use rust_ascend::{
     Autodiff, RudaAscend,
     model::{
-        module::Initializer,
+        module::{Initializer, Module},
         record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
     },
     nn::modules::{LinearConfig, LoRALinear, LoRALinearConfig},
@@ -9,7 +9,7 @@ use rust_ascend::{
         AdamWConfig, AdamWState, Fp32MasterOptimizer, Fp32MasterState, GradientsParams, Optimizer,
     },
     runtime::{AscendRuntime, RuntimeOptions},
-    tensor::{Backend, DType, api::Tensor},
+    tensor::{Backend, DType, FloatDType, api::Tensor},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,13 +25,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let device = unsafe { AscendRuntime::initialize_exclusive(options)? };
     type B = Autodiff<RudaAscend>;
-    for dtype in [DType::F16, DType::BF16] {
+    for (dtype, module_dtype) in [
+        (DType::F16, FloatDType::F16),
+        (DType::BF16, FloatDType::BF16),
+    ] {
         B::seed(&device, 2077);
-        let mut base = LinearConfig::new(2, 2)
+        let base = LinearConfig::new(2, 2)
             .with_bias(false)
             .with_initializer(Initializer::Ones)
-            .init::<B>(&device);
-        base.weight = base.weight.map(|tensor| tensor.cast(dtype));
+            .init::<B>(&device)
+            .to_dtype(module_dtype);
         let mut model = LoRALinearConfig::new(1, 2.).init(base);
         let base_id = model.base.weight.id;
         let a_id = model.adapter_a.weight.id;

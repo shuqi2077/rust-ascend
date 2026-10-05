@@ -1,6 +1,6 @@
 use rust_ascend::{
     Autodiff, RudaAscend,
-    model::module::{Module, ModuleMapper, Param},
+    model::module::Module,
     nn::modules::{
         EmbeddingConfig, LinearConfig, LoRALinearConfig, RmsNormConfig, RotaryEncodingConfig,
         attention::{MhaInput, MultiHeadAttentionConfig},
@@ -15,12 +15,6 @@ use rust_ascend::{
 };
 
 type B = Autodiff<RudaAscend>;
-struct StorageDtype(DType);
-impl ModuleMapper<B> for StorageDtype {
-    fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
-        param.map(|tensor| tensor.cast(self.0))
-    }
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let toolkit = std::env::var_os("ASCEND_HOME_PATH").ok_or("set ASCEND_HOME_PATH")?;
@@ -44,20 +38,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ]],
         &device,
     );
-    for dtype in [DType::F16, DType::BF16] {
+    for (dtype, module_dtype) in [
+        (DType::F16, FloatDType::F16),
+        (DType::BF16, FloatDType::BF16),
+    ] {
         B::seed(&device, 2077);
-        let mut mapper = StorageDtype(dtype);
         let embedding = EmbeddingConfig::new(3, 2)
             .init::<B>(&device)
-            .map(&mut mapper);
+            .to_dtype(module_dtype);
         let attention = MultiHeadAttentionConfig::new(2, 1)
             .with_dropout(0.)
             .init::<B>(&device)
-            .map(&mut mapper);
+            .to_dtype(module_dtype);
         let norm = RmsNormConfig::new(2).init::<B>(&device);
         let rotary = RotaryEncodingConfig::new(3, 2).init::<B>(&device);
-        let mut head = LoRALinearConfig::new(1, 2.)
-            .init(LinearConfig::new(2, 3).init::<B>(&device).map(&mut mapper));
+        let mut head = LoRALinearConfig::new(1, 2.).init(
+            LinearConfig::new(2, 3)
+                .init::<B>(&device)
+                .to_dtype(module_dtype),
+        );
         let hidden = embedding.forward(tokens.clone());
         assert_eq!(hidden.dtype(), dtype);
         let hidden = rotary.forward_with_compute_dtype(hidden, FloatDType::F32);

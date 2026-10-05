@@ -661,6 +661,20 @@ impl IntTensorOps<Self> for RudaAscend {
         int_flip
     );
     index_updates!(int_scatter_add, int_select_add);
+    fn int_argmax(value: Primitive, dim: usize) -> Primitive {
+        match value.dtype {
+            DType::I32 => arg_reduce(value, dim, IntDType::I32, false),
+            DType::I64 => arg_reduce(value, dim, IntDType::I64, false),
+            _ => Ascend::int_argmax(value, dim),
+        }
+    }
+    fn int_argmin(value: Primitive, dim: usize) -> Primitive {
+        match value.dtype {
+            DType::I32 => arg_reduce(value, dim, IntDType::I32, true),
+            DType::I64 => arg_reduce(value, dim, IntDType::I64, true),
+            _ => Ascend::int_argmin(value, dim),
+        }
+    }
     fn int_sum(value: Primitive) -> Primitive {
         reduce_all(value, TensorReduceOp::Sum)
     }
@@ -774,9 +788,7 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_cumprod(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cummin(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cummax(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
-        fn int_argmax(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_argtopk(tensor: IntTensor<Self>, dim: usize, k: usize) -> IntTensor<Self>;
-        fn int_argmin(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_abs(tensor: IntTensor<Self>) -> IntTensor<Self>;
         fn int_swap_dims(tensor: IntTensor<Self>, dim1: usize, dim2: usize) -> IntTensor<Self>;
         fn int_permute(tensor: IntTensor<Self>, axes: &[usize]) -> IntTensor<Self>;
