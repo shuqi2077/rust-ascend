@@ -1,6 +1,7 @@
 //! Ascend CANN runtime, Rust common-IR compiler and BF16 device programs.
 pub mod nn;
 pub mod optim;
+pub mod distributed;
 mod backend;
 pub use backend::RudaAscend;
 pub use ruda_model as model;

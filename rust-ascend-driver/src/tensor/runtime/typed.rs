@@ -162,7 +162,7 @@ fn shape(value: &[usize]) -> Result<Vec<i64>> {
         .map(|&n| i64::try_from(n).map_err(error))
         .collect()
 }
-fn layout(value: &TensorBuffer) -> Result<TensorLayout> {
+pub(super) fn layout(value: &TensorBuffer) -> Result<TensorLayout> {
     let dims = shape(&value.shape)?;
     let strides = value
         .strides
@@ -175,7 +175,7 @@ fn layout(value: &TensorBuffer) -> Result<TensorLayout> {
     }
     Ok(layout)
 }
-fn allocate(client: &ComputeClient<AscendRuntime>, layout: &TensorLayout) -> TensorBuffer {
+pub(super) fn allocate(client: &ComputeClient<AscendRuntime>, layout: &TensorLayout) -> TensorBuffer {
     TensorBuffer {
         handle: client.empty(layout.byte_len()),
         shape: Shape::from(

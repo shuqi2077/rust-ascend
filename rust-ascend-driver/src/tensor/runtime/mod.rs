@@ -20,6 +20,7 @@ mod piecewise;
 mod window;
 mod generic_matrix;
 mod typed;
+mod hccl;
 use crate::CannError;
 use ruda_core::{
     backtrace::BackTrace,
@@ -67,6 +68,7 @@ use std::{
 };
 pub use worker::AscendResource;
 pub use typed::{TensorBinaryOp, TensorRandomDistribution, TensorReduceOp, TensorUnaryOp};
+pub use hccl::{HcclCommunicator, HcclContext, HcclReduceOp, HcclRootInfo};
 use worker::Worker;
 
 type Result<T> = std::result::Result<T, CannError>;

@@ -107,7 +107,7 @@ macro_rules! forward {
         })*
     };
 }
-fn buffer(value: Primitive) -> TensorBuffer {
+pub(crate) fn buffer(value: Primitive) -> TensorBuffer {
     TensorBuffer {
         shape: value.meta.shape().clone(),
         strides: value.meta.strides().clone(),
@@ -115,7 +115,7 @@ fn buffer(value: Primitive) -> TensorBuffer {
         handle: value.handle,
     }
 }
-fn wrap(reference: &Primitive, value: TensorBuffer) -> Primitive {
+pub(crate) fn wrap(reference: &Primitive, value: TensorBuffer) -> Primitive {
     Primitive::new(
         reference.client.clone(),
         value.handle,

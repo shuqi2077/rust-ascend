@@ -63,6 +63,7 @@ impl Worker {
                         programs: HashMap::new(),
                         gemm,
                         gemm_artifacts,
+                        hccl: super::hccl::Registry::default(),
                     };
                     Ok((state, total as u64))
                 })();
@@ -116,6 +117,7 @@ impl AscendResource {
 
 pub(super) struct State {
     pub(super) session: Rc<CannSession>,
+    pub(super) hccl: super::hccl::Registry,
     tools: Toolchain,
     buffers: HashMap<StorageId, Buffer>,
     programs: HashMap<String, CannProgram>,
