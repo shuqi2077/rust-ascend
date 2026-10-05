@@ -240,6 +240,12 @@ fn unary(value: Primitive, op: TensorUnaryOp) -> Primitive {
         .expect("native Ascend floating unary operation failed");
     wrap(&value, out)
 }
+fn arg_reduce(value: Primitive, dim: usize, out_dtype: IntDType, min: bool) -> Primitive {
+    let out =
+        AscendRuntime::tensor_arg_reduce(&value.client, buffer(value.clone()), dim, out_dtype, min)
+            .expect("native Ascend arg-reduction failed");
+    wrap(&value, out)
+}
 macro_rules! floating_binary {
     ($($method:ident, $scalar_method:ident => $op:ident;)*) => { $(
         fn $method(a: Primitive, b: Primitive) -> Primitive {
@@ -407,6 +413,20 @@ impl FloatTensorOps<Self> for RudaAscend {
         float_tanh => Tanh;
         float_erf => Erf;
     }
+    fn float_argmax(value: Primitive, dim: usize, out_dtype: IntDType) -> Primitive {
+        if half(&value) {
+            arg_reduce(value, dim, out_dtype, false)
+        } else {
+            Ascend::float_argmax(value, dim, out_dtype)
+        }
+    }
+    fn float_argmin(value: Primitive, dim: usize, out_dtype: IntDType) -> Primitive {
+        if half(&value) {
+            arg_reduce(value, dim, out_dtype, true)
+        } else {
+            Ascend::float_argmin(value, dim, out_dtype)
+        }
+    }
     fn float_random(
         shape: Shape,
         distribution: Distribution,
@@ -468,9 +488,7 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_floor(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_ceil(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_trunc(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_argmax(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> IntTensor<Self>;
         fn float_argtopk( tensor: FloatTensor<Self>, dim: usize, k: usize, out_dtype: IntDType, ) -> IntTensor<Self>;
-        fn float_argmin(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> IntTensor<Self>;
         fn float_expand(tensor: FloatTensor<Self>, shape: Shape) -> FloatTensor<Self>;
         fn float_unfold(tensor: FloatTensor<Self>, dim: usize, size: usize, step: usize) -> FloatTensor<Self>;
     }

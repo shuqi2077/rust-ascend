@@ -9,7 +9,7 @@ use crate::tensor::{
     ffi::{AclIntArray, AclOpExecutor, AclScalar, AclTensor},
     layout::broadcast,
 };
-use ruda_core::tensor::{BoolStore, DType, Shape, Slice, Strides};
+use ruda_core::tensor::{BoolStore, DType, IntDType, Shape, Slice, Strides};
 use std::ffi::{CStr, c_void};
 
 /// Same-dtype tensor operations. Comparisons/logical operations produce Bool(U8).
@@ -79,6 +79,11 @@ enum Operation {
     Reduce {
         dim: usize,
         op: TensorReduceOp,
+    },
+    ArgReduce {
+        dim: usize,
+        min: bool,
+        dtype: CannDType,
     },
     Gather(usize),
     Select(usize),
@@ -291,6 +296,21 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
             let mut shape = input.shape().to_vec();
             shape[*dim] = 1;
             TensorLayout::contiguous(&shape, input.dtype())
+        }
+        Operation::ArgReduce { dim, dtype, .. } => {
+            let input = unary()?;
+            if !numeric(input.dtype())
+                || !matches!(dtype, CannDType::I32 | CannDType::I64)
+                || *dim >= input.shape().len()
+            {
+                return Err(error("arg-reduction axis/dtype mismatch"));
+            }
+            if input.shape()[*dim] == 0 {
+                return Err(error("arg-reduction cannot reduce an empty axis"));
+            }
+            let mut shape = input.shape().to_vec();
+            shape[*dim] = 1;
+            TensorLayout::contiguous(&shape, *dtype)
         }
         Operation::Gather(dim)
         | Operation::Select(dim)
@@ -506,6 +526,23 @@ fn slice_plan(
 }
 
 impl AscendRuntime {
+    pub fn tensor_arg_reduce(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        dim: usize,
+        out_dtype: IntDType,
+        min: bool,
+    ) -> Result<TensorBuffer> {
+        execute(
+            client,
+            Operation::ArgReduce {
+                dim,
+                min,
+                dtype: dtype(out_dtype.into())?,
+            },
+            &[input],
+        )
+    }
     pub fn tensor_unary(
         client: &ComputeClient<Self>,
         input: TensorBuffer,
@@ -1089,6 +1126,27 @@ impl State {
                             )
                         })
                 }
+                Operation::ArgReduce { dim, min, .. } => {
+                    type Plan = unsafe extern "C" fn(
+                        *const AclTensor,
+                        i64,
+                        bool,
+                        *mut AclTensor,
+                        *mut u64,
+                        *mut *mut AclOpExecutor,
+                    ) -> i32;
+                    let (plan_name, run_name) = if min {
+                        (c"aclnnArgMinGetWorkspaceSize", c"aclnnArgMin")
+                    } else {
+                        (c"aclnnArgMaxGetWorkspaceSize", c"aclnnArgMax")
+                    };
+                    let plan: Plan = self.session.ops.get(plan_name)?;
+                    let run = self.session.ops.get(run_name)?;
+                    self.session
+                        .execute("native argmin/argmax", run, |size, executor| {
+                            plan(handle(0), dim as i64, true, out, size, executor)
+                        })
+                }
                 Operation::Not => {
                     let plan: UnaryPlan =
                         self.session.ops.get(c"aclnnLogicalNotGetWorkspaceSize")?;
@@ -1429,6 +1487,62 @@ fn ranges(addresses: &[usize], layouts: &[TensorLayout]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn arg_reduction_preserves_axis_and_requested_integer_width() {
+        for input_dtype in [CannDType::F16, CannDType::BF16, CannDType::I64] {
+            let input = TensorLayout::contiguous(&[2, 5, 3], input_dtype).unwrap();
+            for out_dtype in [CannDType::I32, CannDType::I64] {
+                for min in [true, false] {
+                    let output = output_layout(
+                        &Operation::ArgReduce {
+                            dim: 1,
+                            min,
+                            dtype: out_dtype,
+                        },
+                        &[input.clone()],
+                    )
+                    .unwrap();
+                    assert_eq!(output.shape(), &[2, 1, 3]);
+                    assert_eq!(output.dtype(), out_dtype);
+                }
+            }
+        }
+        let empty = TensorLayout::contiguous(&[2, 0], CannDType::F16).unwrap();
+        assert!(
+            output_layout(
+                &Operation::ArgReduce {
+                    dim: 1,
+                    min: false,
+                    dtype: CannDType::I64
+                },
+                &[empty]
+            )
+            .is_err()
+        );
+        let input = TensorLayout::contiguous(&[2, 5], CannDType::F16).unwrap();
+        assert!(
+            output_layout(
+                &Operation::ArgReduce {
+                    dim: 2,
+                    min: false,
+                    dtype: CannDType::I64
+                },
+                &[input.clone()]
+            )
+            .is_err()
+        );
+        assert!(
+            output_layout(
+                &Operation::ArgReduce {
+                    dim: 1,
+                    min: false,
+                    dtype: CannDType::F32
+                },
+                &[input]
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn half_arithmetic_activation_and_reduction_keep_dtypes_and_shapes() {
         for dtype in [CannDType::F16, CannDType::BF16] {
