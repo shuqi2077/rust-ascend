@@ -172,7 +172,7 @@ fn check_sharded_gradients(
             .detach()
             .require_grad();
         let output = all_gather(input.clone(), communicator.clone())?;
-        let weights = Tensor::<B, 2>::full([2 * world, 2], rank + 1, device).cast(dtype);
+        let weights = Tensor::<B, 2>::full([2 * world, 2], rank as u32 + 1, device).cast(dtype);
         let gradients = (output * weights).sum().backward();
         let gradient = input
             .grad(&gradients)
@@ -183,7 +183,7 @@ fn check_sharded_gradients(
             assert!((actual - rank_sum).abs() <= 0.02 * (1. + rank_sum.abs()));
         }
         for mean in [false, true] {
-            let input = Tensor::<B, 2>::full([2, 2 * world], rank + 1, device)
+            let input = Tensor::<B, 2>::full([2, 2 * world], rank as u32 + 1, device)
                 .cast(dtype)
                 .swap_dims(0, 1)
                 .detach()
@@ -194,7 +194,7 @@ fn check_sharded_gradients(
                 reduce_scatter_sum(input.clone(), communicator.clone())?
             };
             assert_eq!(output.dims(), [2, 2]);
-            let weights = Tensor::<B, 2>::full([2, 2], rank + 1, device).cast(dtype);
+            let weights = Tensor::<B, 2>::full([2, 2], rank as u32 + 1, device).cast(dtype);
             let gradients = (output * weights).sum().backward();
             let gradient = input
                 .grad(&gradients)
