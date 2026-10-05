@@ -104,6 +104,7 @@ enum Operation {
         dtype: CannDType,
     },
     Cumsum(usize),
+    Cummin(usize),
     Sort {
         dim: usize,
         descending: bool,
@@ -349,6 +350,20 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
             let mut shape = input.shape().to_vec();
             shape[*dim] = 1;
             TensorLayout::contiguous(&shape, input.dtype())
+        }
+        Operation::Cummin(dim) => {
+            let input = unary()?;
+            if *dim >= input.shape().len()
+                || !matches!(
+                    input.dtype(),
+                    CannDType::F32 | CannDType::F16 | CannDType::BF16 | CannDType::I32
+                )
+            {
+                return Err(error(
+                    "native cumulative minimum requires FP32/FP16/BF16/I32 and a valid axis",
+                ));
+            }
+            TensorLayout::contiguous(input.shape(), input.dtype())
         }
         Operation::Sort { dim, .. } => {
             let input = unary()?;
@@ -615,6 +630,28 @@ fn slice_plan(
 }
 
 impl AscendRuntime {
+    /// FP32/FP16/BF16/I32 cumulative minima, including strided views and empty axes.
+    pub fn tensor_cummin(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        dim: usize,
+    ) -> Result<TensorBuffer> {
+        let operation = Operation::Cummin(dim);
+        let mut layouts = vec![layout(&input)?];
+        let values_layout = output_layout(&operation, &layouts)?;
+        let indices_layout = TensorLayout::contiguous(values_layout.shape(), CannDType::I64)?;
+        let values = allocate(client, &values_layout);
+        let indices = allocate(client, &indices_layout);
+        submit_outputs(
+            client,
+            operation,
+            &[input],
+            &[values.clone(), indices],
+            &mut layouts,
+            &[values_layout, indices_layout],
+        )?;
+        Ok(values)
+    }
     /// Stable native axis sort. Values keep their dtype; indices are I64.
     /// Equal values retain their original axis coordinates in either direction.
     pub fn tensor_sort(
@@ -1065,7 +1102,7 @@ impl State {
         layouts: Vec<TensorLayout>,
         resources: Vec<AscendResource>,
     ) -> Result<()> {
-        let output_count = if matches!(&operation, Operation::Sort { .. }) {
+        let output_count = if matches!(&operation, Operation::Sort { .. } | Operation::Cummin(_)) {
             2
         } else {
             1
@@ -1110,6 +1147,28 @@ impl State {
         // SAFETY: every symbol below has the documented ACLNN ABI, not an IR fallback.
         unsafe {
             match operation {
+                Operation::Cummin(dim) => {
+                    type Plan = unsafe extern "C" fn(
+                        *const AclTensor,
+                        i64,
+                        *mut AclTensor,
+                        *mut AclTensor,
+                        *mut u64,
+                        *mut *mut AclOpExecutor,
+                    ) -> i32;
+                    let plan: Plan = self.session.ops.get(c"aclnnCumminGetWorkspaceSize")?;
+                    let run = self.session.ops.get(c"aclnnCummin")?;
+                    self.session.execute("aclnnCummin", run, |size, executor| {
+                        plan(
+                            handle(0),
+                            dim as i64,
+                            out,
+                            handle(output_index + 1),
+                            size,
+                            executor,
+                        )
+                    })
+                }
                 Operation::Sort { dim, descending } => {
                     type Plan = unsafe extern "C" fn(
                         *const AclTensor,
@@ -1702,6 +1761,38 @@ fn ranges(addresses: &[usize], layouts: &[TensorLayout]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cumulative_minimum_retains_compute_width_and_view_shape() {
+        for dtype in [
+            CannDType::F32,
+            CannDType::F16,
+            CannDType::BF16,
+            CannDType::I32,
+        ] {
+            let input = TensorLayout::strided(&[4, 2], &[1, 4], dtype).unwrap();
+            for dim in [0, 1] {
+                assert_eq!(
+                    output_layout(&Operation::Cummin(dim), &[input.clone()]).unwrap(),
+                    TensorLayout::contiguous(&[4, 2], dtype).unwrap()
+                );
+            }
+            assert!(output_layout(&Operation::Cummin(2), &[input]).is_err());
+            let empty = TensorLayout::contiguous(&[2, 0], dtype).unwrap();
+            assert_eq!(
+                output_layout(&Operation::Cummin(1), &[empty.clone()]).unwrap(),
+                empty
+            );
+        }
+        for dtype in [CannDType::I64, CannDType::Bool] {
+            assert!(
+                output_layout(
+                    &Operation::Cummin(0),
+                    &[TensorLayout::contiguous(&[4], dtype).unwrap()]
+                )
+                .is_err()
+            );
+        }
+    }
     #[test]
     fn native_integer_bits_preserve_broadcast_shape_and_exact_width() {
         for dtype in [CannDType::I32, CannDType::I64] {

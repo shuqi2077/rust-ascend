@@ -259,6 +259,11 @@ fn cumsum(value: Primitive, dim: usize) -> Primitive {
         .expect("native Ascend cumulative sum failed");
     wrap(&value, out)
 }
+fn cumulative_minimum(value: Primitive, dim: usize) -> Primitive {
+    let out = AscendRuntime::tensor_cummin(&value.client, buffer(value.clone()), dim)
+        .expect("native Ascend cumulative minimum failed");
+    wrap(&value, out)
+}
 fn sorted(
     value: Primitive,
     dim: usize,
@@ -448,6 +453,23 @@ fn piecewise(value: Primitive, op: crate::runtime::PiecewiseActivation) -> Primi
 }
 
 impl FloatTensorOps<Self> for RudaAscend {
+    fn float_cummin(value: Primitive, dim: usize) -> Primitive {
+        if half(&value) {
+            cumulative_minimum(value, dim)
+        } else {
+            Ascend::float_cummin(value, dim)
+        }
+    }
+    fn float_cummax(value: Primitive, dim: usize) -> Primitive {
+        if half(&value) {
+            unary(
+                cumulative_minimum(unary(value, TensorUnaryOp::Neg), dim),
+                TensorUnaryOp::Neg,
+            )
+        } else {
+            Ascend::float_cummax(value, dim)
+        }
+    }
     floating_binary! {
         float_add, float_add_scalar => Add;
         float_sub, float_sub_scalar => Sub;
@@ -576,8 +598,6 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_swap_dims(tensor: FloatTensor<Self>, dim1: usize, dim2: usize) -> FloatTensor<Self>;
         fn float_permute(tensor: FloatTensor<Self>, axes: &[usize]) -> FloatTensor<Self>;
         fn float_cumprod(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
-        fn float_cummin(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
-        fn float_cummax(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_asinh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_atan2(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_expand(tensor: FloatTensor<Self>, shape: Shape) -> FloatTensor<Self>;
@@ -751,6 +771,23 @@ impl FloatTensorOps<Self> for RudaAscend {
 }
 
 impl IntTensorOps<Self> for RudaAscend {
+    fn int_cummin(value: Primitive, dim: usize) -> Primitive {
+        if value.dtype == DType::I32 {
+            cumulative_minimum(value, dim)
+        } else {
+            Ascend::int_cummin(value, dim)
+        }
+    }
+    fn int_cummax(value: Primitive, dim: usize) -> Primitive {
+        if value.dtype == DType::I32 {
+            unary(
+                cumulative_minimum(unary(value, TensorUnaryOp::BitwiseNot), dim),
+                TensorUnaryOp::BitwiseNot,
+            )
+        } else {
+            Ascend::int_cummax(value, dim)
+        }
+    }
     integer_bits! {
         bitwise_and, bitwise_and_scalar => BitwiseAnd;
         bitwise_or, bitwise_or_scalar => BitwiseOr;
@@ -954,8 +991,6 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_matmul(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
         fn int_mean_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cumprod(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
-        fn int_cummin(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
-        fn int_cummax(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_swap_dims(tensor: IntTensor<Self>, dim1: usize, dim2: usize) -> IntTensor<Self>;
         fn int_permute(tensor: IntTensor<Self>, axes: &[usize]) -> IntTensor<Self>;
         fn int_random( shape: Shape, distribution: Distribution, device: &Device<Self>, dtype: IntDType, ) -> IntTensor<Self>;
