@@ -147,11 +147,54 @@ pub fn adamw_step(client: &ComputeClient<AscendRuntime>, parameter: &TensorBuffe
 pub fn adamw_tensor_step<const D:usize>(parameter:&mut ApiTensor<crate::Ascend,D>,
     gradient:&ApiTensor<crate::Ascend,D>,first:&mut ApiTensor<crate::Ascend,D>,
     second:&mut ApiTensor<crate::Ascend,D>,step:AdamWStorageStep)->Result<()> {
-    let primitive=|tensor:&ApiTensor<crate::Ascend,D>|match tensor.clone().into_primitive() {
+    adamw_api_step(parameter,gradient,first,second,step)
+}
+
+pub fn adamw_ruda_tensor_step<const D:usize>(parameter:&mut ApiTensor<crate::RudaAscend,D>,
+    gradient:&ApiTensor<crate::RudaAscend,D>,first:&mut ApiTensor<crate::RudaAscend,D>,
+    second:&mut ApiTensor<crate::RudaAscend,D>,step:AdamWStorageStep)->Result<()> {
+    adamw_api_step(parameter,gradient,first,second,step)
+}
+
+pub fn adamw_master_tensor_step<const D:usize>(parameter:&mut ApiTensor<crate::RudaAscend,D>,
+    master:&mut ApiTensor<crate::RudaAscend,D>,gradient:&ApiTensor<crate::RudaAscend,D>,
+    first:&mut ApiTensor<crate::RudaAscend,D>,second:&mut ApiTensor<crate::RudaAscend,D>,
+    step:AdamWStorageStep)->Result<()> {
+    let parameter_primitive=adamw_primitive(parameter)?;
+    let master_primitive=adamw_primitive(master)?;
+    let gradient_primitive=adamw_primitive(gradient)?;
+    if !matches!(parameter_primitive.dtype,DType::F32|DType::F16|DType::BF16)
+        || !matches!(gradient_primitive.dtype,DType::F32|DType::F16|DType::BF16)
+        || master_primitive.dtype!=DType::F32 {
+        return Err(error("master AdamW requires floating parameter/gradient and an explicit FP32 master"));
+    }
+    if parameter_primitive.meta.shape()!=master_primitive.meta.shape() {
+        return Err(error("master AdamW parameter and master shapes must match"));
+    }
+    if parameter_primitive.device!=master_primitive.device
+        || !parameter_primitive.client.same_execution_queue(&master_primitive.client) {
+        return Err(error("master AdamW parameter device or execution queue mismatch"));
+    }
+    let storage_dtype=parameter_primitive.dtype;
+    let gradient=gradient.clone().cast(DType::F32);
+    adamw_api_step(master,&gradient,first,second,step)?;
+    *parameter=master.clone().cast(storage_dtype);
+    Ok(())
+}
+
+fn adamw_primitive<B,const D:usize>(tensor:&ApiTensor<B,D>)->Result<ruda_tensor_device::RudaTensor<AscendRuntime>>
+where B:ruda_tensor::Backend<FloatTensorPrimitive=ruda_tensor_device::RudaTensor<AscendRuntime>> {
+    match tensor.clone().into_primitive() {
         TensorPrimitive::Float(tensor)=>Ok(tensor),
         TensorPrimitive::QFloat(_)=>Err(error("AdamW does not dequantize parameter, gradient or state implicitly")),
-    };
-    let p=primitive(parameter)?;let g=primitive(gradient)?;let m=primitive(first)?;let v=primitive(second)?;
+    }
+}
+
+fn adamw_api_step<B,const D:usize>(parameter:&mut ApiTensor<B,D>,gradient:&ApiTensor<B,D>,
+    first:&mut ApiTensor<B,D>,second:&mut ApiTensor<B,D>,step:AdamWStorageStep)->Result<()>
+where B:ruda_tensor::Backend<FloatTensorPrimitive=ruda_tensor_device::RudaTensor<AscendRuntime>> {
+    let p=adamw_primitive(parameter)?;let g=adamw_primitive(gradient)?;
+    let m=adamw_primitive(first)?;let v=adamw_primitive(second)?;
     for other in [&g,&m,&v] {
         if p.device!=other.device || !p.client.same_execution_queue(&other.client) {
             return Err(error("AdamW tensor device or execution queue mismatch"));

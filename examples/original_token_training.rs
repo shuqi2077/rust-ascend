@@ -6,6 +6,7 @@ use rust_ascend::{
         attention::{MhaInput, MultiHeadAttentionConfig},
         loss::CausalCrossEntropyConfig,
     },
+    optim::{AdamWStorageStep, adamw_master_tensor_step},
     runtime::{AscendRuntime, RuntimeOptions},
     tensor::{
         Backend, DType, FloatDType,
@@ -54,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .init::<B>(&device)
             .map(&mut mapper);
         let norm = RmsNormConfig::new(2).init::<B>(&device);
-        let head = LoRALinearConfig::new(1, 2.)
+        let mut head = LoRALinearConfig::new(1, 2.)
             .init(LinearConfig::new(2, 3).init::<B>(&device).map(&mut mapper));
         let hidden = embedding.forward(tokens.clone());
         assert_eq!(hidden.dtype(), dtype);
@@ -102,8 +103,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         assert!(norm.gamma.val().grad(&gradients).is_some());
         assert!(head.base.weight.val().grad(&gradients).is_none());
+        let gradient = head
+            .adapter_b
+            .weight
+            .val()
+            .grad(&gradients)
+            .ok_or("missing adapter update gradient")?;
+        let mut parameter = head.adapter_b.weight.val().inner();
+        let mut master = parameter.clone().cast(DType::F32);
+        let mut first = Tensor::<RudaAscend, 2>::zeros(parameter.dims(), &device);
+        let mut second = Tensor::<RudaAscend, 2>::zeros(parameter.dims(), &device);
+        let beta1 = 0.9f32;
+        let beta2 = 0.999f32;
+        adamw_master_tensor_step(
+            &mut parameter,
+            &mut master,
+            &gradient,
+            &mut first,
+            &mut second,
+            AdamWStorageStep {
+                learning_rate: 0.001,
+                beta1,
+                beta2,
+                epsilon: 1e-8,
+                weight_decay: 0.,
+                correction1: 1. - beta1,
+                correction2: 1. - beta2,
+                inverse_gradient_scale: 1.,
+                clip_multiplier: 1.,
+            },
+        )?;
+        head.adapter_b.weight = head
+            .adapter_b
+            .weight
+            .map(|_| Tensor::<B, 2>::from_inner(parameter).require_grad());
+        let hidden = embedding.forward(tokens.clone());
+        let hidden = attention
+            .forward(MhaInput::self_attn(hidden).mask_attn(mask.clone()))
+            .context;
+        let logits = head.forward(norm.forward_with_compute_dtype(hidden, FloatDType::F32));
+        let loss = CausalCrossEntropyConfig::new()
+            .forward_logits(logits, labels.clone())
+            .mean();
+        assert!(loss.into_scalar().is_finite());
         println!(
-            "{dtype:?}: original RUDA embedding, causal MHA, FP32 RMSNorm, LoRA and causal loss backward passed"
+            "{dtype:?}: original RUDA token graph backward, explicit FP32-master AdamW adapter update and next forward passed"
         );
     }
     Ok(())
