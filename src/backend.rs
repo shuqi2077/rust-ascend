@@ -246,6 +246,11 @@ fn arg_reduce(value: Primitive, dim: usize, out_dtype: IntDType, min: bool) -> P
             .expect("native Ascend arg-reduction failed");
     wrap(&value, out)
 }
+fn cumsum(value: Primitive, dim: usize) -> Primitive {
+    let out = AscendRuntime::tensor_cumsum(&value.client, buffer(value.clone()), dim)
+        .expect("native Ascend cumulative sum failed");
+    wrap(&value, out)
+}
 macro_rules! floating_binary {
     ($($method:ident, $scalar_method:ident => $op:ident;)*) => { $(
         fn $method(a: Primitive, b: Primitive) -> Primitive {
@@ -470,7 +475,6 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_cross(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_swap_dims(tensor: FloatTensor<Self>, dim1: usize, dim2: usize) -> FloatTensor<Self>;
         fn float_permute(tensor: FloatTensor<Self>, axes: &[usize]) -> FloatTensor<Self>;
-        fn float_cumsum(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cumprod(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cummin(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cummax(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
@@ -552,6 +556,13 @@ impl FloatTensorOps<Self> for RudaAscend {
     }
     fn float_cast(value: Primitive, dtype: FloatDType) -> Primitive {
         cast(value, dtype.into())
+    }
+    fn float_cumsum(value: Primitive, dim: usize) -> Primitive {
+        if half(&value) {
+            cumsum(value, dim)
+        } else {
+            <Ascend as FloatTensorOps<Ascend>>::float_cumsum(value, dim)
+        }
     }
     fn float_sum(value: Primitive) -> Primitive {
         if half(&value) {
@@ -675,6 +686,13 @@ impl IntTensorOps<Self> for RudaAscend {
             _ => Ascend::int_argmin(value, dim),
         }
     }
+    fn int_cumsum(value: Primitive, dim: usize) -> Primitive {
+        if matches!(value.dtype, DType::I32 | DType::I64) {
+            cumsum(value, dim)
+        } else {
+            <Ascend as IntTensorOps<Ascend>>::int_cumsum(value, dim)
+        }
+    }
     fn int_sum(value: Primitive) -> Primitive {
         reduce_all(value, TensorReduceOp::Sum)
     }
@@ -784,7 +802,6 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_remainder_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn int_matmul(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
         fn int_mean_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
-        fn int_cumsum(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cumprod(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cummin(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cummax(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;

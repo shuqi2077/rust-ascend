@@ -85,6 +85,7 @@ enum Operation {
         min: bool,
         dtype: CannDType,
     },
+    Cumsum(usize),
     Gather(usize),
     Select(usize),
     ScatterAdd(usize),
@@ -296,6 +297,13 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
             let mut shape = input.shape().to_vec();
             shape[*dim] = 1;
             TensorLayout::contiguous(&shape, input.dtype())
+        }
+        Operation::Cumsum(dim) => {
+            let input = unary()?;
+            if !numeric(input.dtype()) || *dim >= input.shape().len() {
+                return Err(error("cumulative sum axis/dtype mismatch"));
+            }
+            TensorLayout::contiguous(input.shape(), input.dtype())
         }
         Operation::ArgReduce { dim, dtype, .. } => {
             let input = unary()?;
@@ -526,6 +534,14 @@ fn slice_plan(
 }
 
 impl AscendRuntime {
+    /// Inclusive cumulative sum along an axis, preserving input shape and dtype.
+    pub fn tensor_cumsum(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        dim: usize,
+    ) -> Result<TensorBuffer> {
+        execute(client, Operation::Cumsum(dim), &[input])
+    }
     pub fn tensor_arg_reduce(
         client: &ComputeClient<Self>,
         input: TensorBuffer,
@@ -1126,6 +1142,21 @@ impl State {
                             )
                         })
                 }
+                Operation::Cumsum(dim) => {
+                    type Plan = unsafe extern "C" fn(
+                        *const AclTensor,
+                        i64,
+                        i32,
+                        *mut AclTensor,
+                        *mut u64,
+                        *mut *mut AclOpExecutor,
+                    ) -> i32;
+                    let plan: Plan = self.session.ops.get(c"aclnnCumsumGetWorkspaceSize")?;
+                    let run = self.session.ops.get(c"aclnnCumsum")?;
+                    self.session.execute("aclnnCumsum", run, |size, executor| {
+                        plan(handle(0), dim as i64, kind, out, size, executor)
+                    })
+                }
                 Operation::ArgReduce { dim, min, .. } => {
                     type Plan = unsafe extern "C" fn(
                         *const AclTensor,
@@ -1487,6 +1518,31 @@ fn ranges(addresses: &[usize], layouts: &[TensorLayout]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cumsum_preserves_shape_dtype_and_accepts_empty_and_strided_inputs() {
+        for dtype in [
+            CannDType::F32,
+            CannDType::F16,
+            CannDType::BF16,
+            CannDType::I32,
+            CannDType::I64,
+        ] {
+            let input = TensorLayout::strided(&[3, 2], &[1, 3], dtype).unwrap();
+            for dim in [0, 1] {
+                let output = output_layout(&Operation::Cumsum(dim), &[input.clone()]).unwrap();
+                assert_eq!(output.shape(), &[3, 2]);
+                assert_eq!(output.dtype(), dtype);
+                assert_eq!(output.strides(), &[2, 1]);
+            }
+            assert!(output_layout(&Operation::Cumsum(2), &[input]).is_err());
+            let empty = TensorLayout::contiguous(&[2, 0], dtype).unwrap();
+            let output = output_layout(&Operation::Cumsum(1), &[empty]).unwrap();
+            assert_eq!(output.shape(), &[2, 0]);
+            assert_eq!(output.byte_len(), 0);
+        }
+        let boolean = TensorLayout::contiguous(&[2, 3], CannDType::Bool).unwrap();
+        assert!(output_layout(&Operation::Cumsum(1), &[boolean]).is_err());
+    }
     #[test]
     fn arg_reduction_preserves_axis_and_requested_integer_width() {
         for input_dtype in [CannDType::F16, CannDType::BF16, CannDType::I64] {
