@@ -2,6 +2,8 @@
 pub use ruda_optim::{MuonConfig, Muon, MuonAdamWConfig, MuonAdamW, MuonMomentumMode,
     MuonMatrixLayout, AdjustLrFn, GradientsParams, GradientsAccumulator, Optimizer};
 pub use ruda_optim::{grad_clipping, lr_scheduler};
+pub use ruda_optim::{AdamW, AdamWConfig, AdamWState, Fp32MasterOptimizer, Fp32MasterState,
+    SimpleOptimizer};
 use crate::{compiler::AscendCompiler, driver::CannError,
     runtime::{AscendRuntime, ComputeClient, TensorBuffer,
         portable::{id::KernelId, kernel::{KernelMetadata, KernelTask, RudaKernel}, server::{KernelArguments, RudaCount}}}};
