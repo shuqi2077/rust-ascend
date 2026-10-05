@@ -18,8 +18,8 @@ type Primitive = RudaTensor<crate::runtime::AscendRuntime>;
 type Control = RankCommunicator<TensorDevice<RudaAscend>>;
 
 pub use ruda_autodiff::collective::{
-    all_gather, all_gather_dim, reduce_scatter_mean, reduce_scatter_mean_dim, reduce_scatter_sum,
-    reduce_scatter_sum_dim,
+    all_gather, all_gather_dim, all_reduce_mean, all_reduce_sum, reduce_scatter_mean,
+    reduce_scatter_mean_dim, reduce_scatter_sum, reduce_scatter_sum_dim,
 };
 
 impl ruda_tensor::collective::TensorCollective<RudaAscend> for HcclCommunicator {
@@ -35,6 +35,16 @@ impl ruda_tensor::collective::TensorCollective<RudaAscend> for HcclCommunicator 
 
     fn reduce_scatter_sum(&self, value: Primitive) -> Result<Primitive, Self::Error> {
         self.reduce_scatter_float(value, ReduceOperation::Sum)
+    }
+}
+
+impl ruda_tensor::collective::ReplicatedTensorCollective<RudaAscend> for HcclCommunicator {
+    fn all_reduce_sum(&self, value: Primitive) -> Result<Primitive, Self::Error> {
+        <Self as DataParallelCommunicator<RudaAscend>>::all_reduce_float(
+            self,
+            value,
+            ReduceOperation::Sum,
+        )
     }
 }
 

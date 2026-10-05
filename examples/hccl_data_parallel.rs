@@ -76,6 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     check_sharded_collectives(&communicator, &device)?;
     check_sharded_gradients(&communicator, &device)?;
     check_hidden_axis_gradients(&communicator, &device)?;
+    check_replicated_gradients(&communicator, &device)?;
     let root = world - 1;
     for dtype in [FloatDType::F16, FloatDType::BF16] {
         let model = Replica {
@@ -155,6 +156,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join()
             .map_err(|_| "rendezvous thread panicked")??;
     }
+    Ok(())
+}
+
+fn check_replicated_gradients(
+    communicator: &HcclCommunicator,
+    device: &AscendDevice,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rust_ascend::distributed::{all_reduce_mean, all_reduce_sum};
+    let rank = communicator.rank();
+    let world = communicator.world_size() as usize;
+    let rank_sum = (world * (world + 1) / 2) as f32;
+    for dtype in [FloatDType::F32, FloatDType::F16, FloatDType::BF16] {
+        for mean in [false, true] {
+            let input = Tensor::<B, 2>::full([2, 3], rank + 1, device)
+                .cast(dtype)
+                .swap_dims(0, 1)
+                .detach()
+                .require_grad();
+            let output = if mean {
+                all_reduce_mean(input.clone(), communicator.clone())?
+            } else {
+                all_reduce_sum(input.clone(), communicator.clone())?
+            };
+            assert_eq!(output.dtype(), dtype.into());
+            assert_eq!(output.dims(), [3, 2]);
+            let expected = rank_sum / if mean { world as f32 } else { 1. };
+            for value in output
+                .clone()
+                .cast(FloatDType::F32)
+                .into_data()
+                .to_vec::<f32>()?
+            {
+                assert!((value - expected).abs() <= 0.02 * (1. + expected.abs()));
+            }
+            let weights = Tensor::<B, 2>::full([3, 2], rank + 1, device).cast(dtype);
+            let gradients = (output * weights).sum().backward();
+            let gradient = input
+                .grad(&gradients)
+                .ok_or("missing all-reduce gradient")?;
+            assert_eq!(gradient.dtype(), dtype.into());
+            assert_eq!(gradient.dims(), [3, 2]);
+            for value in gradient.cast(FloatDType::F32).into_data().to_vec::<f32>()? {
+                assert!((value - expected).abs() <= 0.02 * (1. + expected.abs()));
+            }
+        }
+    }
+    println!("rank {rank}/{world}: native replicated tensors and shared RUDA gradients passed");
     Ok(())
 }
 
