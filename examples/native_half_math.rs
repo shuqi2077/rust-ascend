@@ -139,6 +139,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             |y| y - (y / -2.).floor() * -2.,
             |_| 1.,
         )?;
+        let lhs = Tensor::<B, 2>::from_data([[1., 2., 3.]], &device)
+            .cast(dtype)
+            .swap_dims(0, 1)
+            .detach()
+            .require_grad();
+        let rhs = Tensor::<B, 2>::from_data([[4., 5., 6.], [7., 8., 9.]], &device)
+            .cast(dtype)
+            .swap_dims(0, 1)
+            .detach()
+            .require_grad();
+        let output = lhs.clone().cross(rhs.clone(), 0);
+        assert_eq!(output.dtype(), dtype);
+        assert_eq!(output.dims(), [3, 2]);
+        close(
+            &output
+                .clone()
+                .cast(DType::F32)
+                .into_data()
+                .to_vec::<f32>()?,
+            &[-3., -6., 6., 12., -3., -6.],
+        );
+        let weights = Tensor::<B, 2>::from_data([[1., 2., 4.], [3., 5., 7.]], &device)
+            .cast(dtype)
+            .swap_dims(0, 1);
+        let gradients = (output * weights).sum().backward();
+        let dlhs = lhs
+            .grad(&gradients)
+            .ok_or("missing broadcast cross gradient")?;
+        let drhs = rhs.grad(&gradients).ok_or("missing cross gradient")?;
+        assert_eq!(dlhs.dims(), [3, 1]);
+        assert_eq!(drhs.dims(), [3, 2]);
+        assert_eq!(dlhs.dtype(), dtype);
+        assert_eq!(drhs.dtype(), dtype);
+        close(
+            &dlhs.cast(DType::F32).into_data().to_vec::<f32>()?,
+            &[19., -32., 14.],
+        );
+        close(
+            &drhs.cast(DType::F32).into_data().to_vec::<f32>()?,
+            &[-2., 1., 1., -2., 0., 1.],
+        );
         let input = Tensor::<B, 2>::from_data([[-0.75, -0.25, 0.25], [0., 0.5, 0.75]], &device)
             .cast(dtype)
             .swap_dims(0, 1)
@@ -152,6 +193,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         check(input.clone(), |x| x.sinh(), f32::sinh, f32::cosh)?;
         check(input.clone(), |x| x.cosh(), f32::cosh, f32::sinh)?;
+        check(
+            input.clone(),
+            |x| x.asinh(),
+            f32::asinh,
+            |x| 1. / (1. + x * x).sqrt(),
+        )?;
         check(
             input.clone(),
             |x| x.asin(),

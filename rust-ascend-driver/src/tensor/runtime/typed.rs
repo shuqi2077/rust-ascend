@@ -54,6 +54,7 @@ pub enum TensorUnaryOp {
     Acos,
     Acosh,
     Asin,
+    Asinh,
     Atan,
     Atanh,
     Erf,
@@ -92,6 +93,7 @@ enum Operation {
         log: bool,
     },
     ReluBackward,
+    Cross(usize),
     Not,
     Copy,
     Cast(CannDType),
@@ -301,6 +303,23 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
                 }
             }
             TensorLayout::contiguous(input.shape(), input.dtype())
+        }
+        Operation::Cross(dim) => {
+            if inputs.len() != 2
+                || inputs[0].dtype() != inputs[1].dtype()
+                || !floating(inputs[0].dtype())
+                || inputs[0].shape().len() != inputs[1].shape().len()
+                || inputs[0].shape().get(*dim) != Some(&3)
+                || inputs[1].shape().get(*dim) != Some(&3)
+            {
+                return Err(error(
+                    "cross requires same-width floating inputs and a size-three axis",
+                ));
+            }
+            TensorLayout::contiguous(
+                &broadcast(inputs[0].shape(), inputs[1].shape())?,
+                inputs[0].dtype(),
+            )
         }
         Operation::ReluBackward => {
             if inputs.len() != 2
@@ -637,6 +656,15 @@ fn slice_plan(
 }
 
 impl AscendRuntime {
+    /// Same-width floating cross products, with strided and broadcast batch axes.
+    pub fn tensor_cross(
+        client: &ComputeClient<Self>,
+        lhs: TensorBuffer,
+        rhs: TensorBuffer,
+        dim: usize,
+    ) -> Result<TensorBuffer> {
+        execute(client, Operation::Cross(dim), &[lhs, rhs])
+    }
     /// FP32/FP16/BF16/I32 cumulative minima, including strided views and empty axes.
     pub fn tensor_cummin(
         client: &ComputeClient<Self>,
@@ -1096,6 +1124,7 @@ fn unary_symbols(op: TensorUnaryOp) -> (&'static CStr, &'static CStr) {
         TensorUnaryOp::Acos => (c"aclnnAcosGetWorkspaceSize", c"aclnnAcos"),
         TensorUnaryOp::Acosh => (c"aclnnAcoshGetWorkspaceSize", c"aclnnAcosh"),
         TensorUnaryOp::Asin => (c"aclnnAsinGetWorkspaceSize", c"aclnnAsin"),
+        TensorUnaryOp::Asinh => (c"aclnnAsinhGetWorkspaceSize", c"aclnnAsinh"),
         TensorUnaryOp::Atan => (c"aclnnAtanGetWorkspaceSize", c"aclnnAtan"),
         TensorUnaryOp::Atanh => (c"aclnnAtanhGetWorkspaceSize", c"aclnnAtanh"),
         TensorUnaryOp::Erf => (c"aclnnErfGetWorkspaceSize", c"aclnnErf"),
@@ -1206,6 +1235,22 @@ impl State {
                             executor,
                         )
                     })
+                }
+                Operation::Cross(dim) => {
+                    type Plan = unsafe extern "C" fn(
+                        *const AclTensor,
+                        *const AclTensor,
+                        i64,
+                        *mut AclTensor,
+                        *mut u64,
+                        *mut *mut AclOpExecutor,
+                    ) -> i32;
+                    let plan: Plan = self.session.ops.get(c"aclnnLinalgCrossGetWorkspaceSize")?;
+                    let run = self.session.ops.get(c"aclnnLinalgCross")?;
+                    self.session
+                        .execute("native cross product", run, |size, executor| {
+                            plan(handle(0), handle(1), dim as i64, out, size, executor)
+                        })
                 }
                 Operation::Binary(op) => {
                     let (plan_name, run_name) = binary_symbols(op);
@@ -1903,6 +1948,29 @@ mod tests {
         );
     }
     #[test]
+    fn cross_preserves_batch_broadcasts_and_requires_size_three_axis() {
+        for kind in [CannDType::F32, CannDType::F16, CannDType::BF16] {
+            let left = TensorLayout::strided(&[3, 2], &[1, 3], kind).unwrap();
+            let right = TensorLayout::contiguous(&[3, 1], kind).unwrap();
+            assert_eq!(
+                output_layout(&Operation::Cross(0), &[left.clone(), right.clone()]).unwrap(),
+                TensorLayout::contiguous(&[3, 2], kind).unwrap()
+            );
+            assert!(output_layout(&Operation::Cross(1), &[left.clone(), right.clone()]).is_err());
+            assert!(output_layout(&Operation::Cross(2), &[left, right.clone()]).is_err());
+            let empty = TensorLayout::contiguous(&[3, 0], kind).unwrap();
+            assert_eq!(
+                output_layout(&Operation::Cross(0), &[empty.clone(), right]).unwrap(),
+                empty
+            );
+            let short = TensorLayout::contiguous(&[1, 2], kind).unwrap();
+            let vector = TensorLayout::contiguous(&[3, 2], kind).unwrap();
+            assert!(output_layout(&Operation::Cross(0), &[short, vector]).is_err());
+        }
+        let integer = TensorLayout::contiguous(&[3], CannDType::I32).unwrap();
+        assert!(output_layout(&Operation::Cross(0), &[integer.clone(), integer]).is_err());
+    }
+    #[test]
     fn atan2_and_remainder_preserve_broadcast_layout_and_compute_width() {
         for kind in [
             CannDType::F32,
@@ -2083,6 +2151,7 @@ mod tests {
                 Operation::Unary(TensorUnaryOp::Acos),
                 Operation::Unary(TensorUnaryOp::Acosh),
                 Operation::Unary(TensorUnaryOp::Asin),
+                Operation::Unary(TensorUnaryOp::Asinh),
                 Operation::Unary(TensorUnaryOp::Atan),
                 Operation::Unary(TensorUnaryOp::Atanh),
                 Operation::Softmax { dim: 1, log: true },

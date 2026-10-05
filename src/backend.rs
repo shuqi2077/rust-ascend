@@ -453,6 +453,21 @@ fn piecewise(value: Primitive, op: crate::runtime::PiecewiseActivation) -> Primi
 }
 
 impl FloatTensorOps<Self> for RudaAscend {
+    fn float_cross(lhs: Primitive, rhs: Primitive, dim: usize) -> Primitive {
+        if half(&lhs) {
+            same_device(&lhs, &rhs);
+            let output = AscendRuntime::tensor_cross(
+                &lhs.client,
+                buffer(lhs.clone()),
+                buffer(rhs),
+                dim,
+            )
+            .expect("native Ascend cross product failed");
+            wrap(&lhs, output)
+        } else {
+            Ascend::float_cross(lhs, rhs, dim)
+        }
+    }
     fn float_atan2(y: Primitive, x: Primitive) -> Primitive {
         if half(&y) {
             binary(y, x, TensorBinaryOp::Atan2)
@@ -516,6 +531,7 @@ impl FloatTensorOps<Self> for RudaAscend {
         float_acos => Acos;
         float_acosh => Acosh;
         float_asin => Asin;
+        float_asinh => Asinh;
         float_atan => Atan;
         float_atanh => Atanh;
         float_erf => Erf;
@@ -614,11 +630,9 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_device(tensor: &FloatTensor<Self>) -> Device<Self>;
         fn float_to_device(tensor: FloatTensor<Self>, device: &Device<Self>) -> FloatTensor<Self>;
         fn float_empty(shape: Shape, device: &Device<Self>, dtype: FloatDType) -> FloatTensor<Self>;
-        fn float_cross(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_swap_dims(tensor: FloatTensor<Self>, dim1: usize, dim2: usize) -> FloatTensor<Self>;
         fn float_permute(tensor: FloatTensor<Self>, axes: &[usize]) -> FloatTensor<Self>;
         fn float_cumprod(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
-        fn float_asinh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_expand(tensor: FloatTensor<Self>, shape: Shape) -> FloatTensor<Self>;
         fn float_unfold(tensor: FloatTensor<Self>, dim: usize, size: usize, step: usize) -> FloatTensor<Self>;
     }
