@@ -32,22 +32,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             TensorData::new(vec![3i64, -3], [2, 1]),
             TensorCreationOptions::<RudaAscend>::new(device.clone()).with_dtype(dtype),
         );
-        let output = input.clone() / divisor;
+        let output = input.clone() / divisor.clone();
         assert_eq!(output.dtype(), dtype);
         assert_eq!(output.dims(), [2, 2]);
         assert_eq!(
             output.cast(IntDType::I64).into_data().to_vec::<i64>()?,
             vec![large / 3, 2, large / 3, 2]
         );
-        let output = input.div_scalar(-3);
+        let output = input.clone().div_scalar(-3);
         assert_eq!(output.dtype(), dtype);
         assert_eq!(
             output.cast(IntDType::I64).into_data().to_vec::<i64>()?,
             vec![-large / 3, -2, large / 3, 2]
         );
+        let remainder = |a: i64, b: i64| {
+            let a = a as i128;
+            let b = b as i128;
+            (((a % b) + b) % b) as i64
+        };
+        let output = input.clone().remainder(divisor);
+        assert_eq!(output.dtype(), dtype);
+        assert_eq!(output.dims(), [2, 2]);
+        assert_eq!(
+            output.cast(IntDType::I64).into_data().to_vec::<i64>()?,
+            vec![remainder(large, 3), 1, remainder(-large, -3), -1]
+        );
+        let output = input.clone().remainder_scalar(-3);
+        assert_eq!(output.dtype(), dtype);
+        assert_eq!(
+            output.cast(IntDType::I64).into_data().to_vec::<i64>()?,
+            vec![remainder(large, -3), -2, remainder(-large, -3), -1]
+        );
+        assert_eq!(
+            input.cast(IntDType::I64).into_data().to_vec::<i64>()?,
+            vec![large, 7, -large, -7]
+        );
     }
     println!(
-        "native strided/broadcast integer division and scalar truncation beyond floating precision passed"
+        "native strided/broadcast integer division and signed remainder beyond floating precision passed"
     );
     Ok(())
 }

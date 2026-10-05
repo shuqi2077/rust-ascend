@@ -49,6 +49,52 @@ fn check(
     Ok(())
 }
 
+fn check_binary(
+    y: Tensor<B, 2>,
+    x: Tensor<B, 2>,
+    forward: fn(Tensor<B, 2>, Tensor<B, 2>) -> Tensor<B, 2>,
+    reference: fn(f32, f32) -> f32,
+    derivative_y: fn(f32, f32) -> f32,
+    derivative_x: fn(f32, f32) -> f32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dtype = y.dtype();
+    let ys = y.clone().cast(DType::F32).into_data().to_vec::<f32>()?;
+    let xs = x.clone().cast(DType::F32).into_data().to_vec::<f32>()?;
+    let output = forward(y.clone(), x.clone());
+    assert_eq!(output.dtype(), dtype);
+    assert_eq!(output.dims(), [3, 2]);
+    let expected = ys
+        .iter()
+        .flat_map(|&y| xs.iter().map(move |&x| reference(y, x)))
+        .collect::<Vec<_>>();
+    close(
+        &output
+            .clone()
+            .cast(DType::F32)
+            .into_data()
+            .to_vec::<f32>()?,
+        &expected,
+    );
+    let gradients = output.sum().backward();
+    let dy = y.grad(&gradients).ok_or("missing broadcast y gradient")?;
+    let dx = x.grad(&gradients).ok_or("missing broadcast x gradient")?;
+    assert_eq!(dy.dtype(), dtype);
+    assert_eq!(dx.dtype(), dtype);
+    close(
+        &dy.cast(DType::F32).into_data().to_vec::<f32>()?,
+        &ys.iter()
+            .map(|&y| xs.iter().map(|&x| derivative_y(y, x)).sum())
+            .collect::<Vec<_>>(),
+    );
+    close(
+        &dx.cast(DType::F32).into_data().to_vec::<f32>()?,
+        &xs.iter()
+            .map(|&x| ys.iter().map(|&y| derivative_x(y, x)).sum())
+            .collect::<Vec<_>>(),
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let toolkit = std::env::var_os("ASCEND_HOME_PATH").ok_or("set ASCEND_HOME_PATH")?;
     let mut options = RuntimeOptions::new(toolkit);
@@ -62,6 +108,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let device = unsafe { AscendRuntime::initialize_exclusive(options)? };
     for dtype in [DType::F16, DType::BF16] {
+        let y = Tensor::<B, 2>::from_data([[1., 3., -1.]], &device)
+            .cast(dtype)
+            .swap_dims(0, 1)
+            .detach()
+            .require_grad();
+        let x = Tensor::<B, 2>::from_data([[2., -2.]], &device)
+            .cast(dtype)
+            .detach()
+            .require_grad();
+        check_binary(
+            y.clone(),
+            x.clone(),
+            |y, x| y.atan2(x),
+            f32::atan2,
+            |y, x| x / (x * x + y * y),
+            |y, x| -y / (x * x + y * y),
+        )?;
+        check_binary(
+            y.clone(),
+            x,
+            |y, x| y.remainder(x),
+            |y, x| y - (y / x).floor() * x,
+            |_, _| 1.,
+            |y, x| -(y / x).floor(),
+        )?;
+        check(
+            y,
+            |y| y.remainder_scalar(-2.),
+            |y| y - (y / -2.).floor() * -2.,
+            |_| 1.,
+        )?;
         let input = Tensor::<B, 2>::from_data([[-0.75, -0.25, 0.25], [0., 0.5, 0.75]], &device)
             .cast(dtype)
             .swap_dims(0, 1)
@@ -132,7 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let empty = Tensor::<RudaAscend, 2>::empty([0, 3], &device).cast(dtype);
         assert_eq!(empty.round().dims(), [0, 3]);
         println!(
-            "{dtype:?}: native half math, strided views, shared RUDA gradients and ties-to-even round passed"
+            "{dtype:?}: native half math including atan2/remainder, strided broadcast views, shared RUDA gradients and ties-to-even round passed"
         );
     }
     Ok(())

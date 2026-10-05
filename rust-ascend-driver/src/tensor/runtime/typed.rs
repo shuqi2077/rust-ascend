@@ -27,6 +27,8 @@ pub enum TensorBinaryOp {
     Mul,
     Div,
     IntDiv,
+    Remainder,
+    Atan2,
     Pow,
     BitwiseAnd,
     BitwiseOr,
@@ -237,6 +239,8 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
                     | TensorBinaryOp::Mul
                     | TensorBinaryOp::Div
                     | TensorBinaryOp::IntDiv
+                    | TensorBinaryOp::Remainder
+                    | TensorBinaryOp::Atan2
                     | TensorBinaryOp::Pow
                     | TensorBinaryOp::BitwiseAnd
                     | TensorBinaryOp::BitwiseOr
@@ -245,7 +249,10 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
             );
             if (logical && kind != CannDType::Bool)
                 || (arithmetic && !numeric(kind))
-                || (matches!(op, TensorBinaryOp::Div | TensorBinaryOp::Pow) && !floating(kind))
+                || (matches!(
+                    op,
+                    TensorBinaryOp::Div | TensorBinaryOp::Pow | TensorBinaryOp::Atan2
+                ) && !floating(kind))
                 || (*op == TensorBinaryOp::IntDiv
                     && !matches!(kind, CannDType::I32 | CannDType::I64))
                 || (bitwise && !matches!(kind, CannDType::I32 | CannDType::I64))
@@ -1047,6 +1054,11 @@ fn binary_symbols(op: TensorBinaryOp) -> (&'static CStr, &'static CStr) {
         TensorBinaryOp::Sub => (c"aclnnSubGetWorkspaceSize", c"aclnnSub"),
         TensorBinaryOp::Div => (c"aclnnDivGetWorkspaceSize", c"aclnnDiv"),
         TensorBinaryOp::IntDiv => (c"aclnnDivModGetWorkspaceSize", c"aclnnDivMod"),
+        TensorBinaryOp::Remainder => (
+            c"aclnnRemainderTensorTensorGetWorkspaceSize",
+            c"aclnnRemainderTensorTensor",
+        ),
+        TensorBinaryOp::Atan2 => (c"aclnnAtan2GetWorkspaceSize", c"aclnnAtan2"),
         TensorBinaryOp::BitwiseAnd => (
             c"aclnnBitwiseAndTensorGetWorkspaceSize",
             c"aclnnBitwiseAndTensor",
@@ -1889,6 +1901,42 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn atan2_and_remainder_preserve_broadcast_layout_and_compute_width() {
+        for kind in [
+            CannDType::F32,
+            CannDType::F16,
+            CannDType::BF16,
+            CannDType::I32,
+            CannDType::I64,
+            CannDType::Bool,
+        ] {
+            let left = TensorLayout::strided(&[3, 2], &[1, 3], kind).unwrap();
+            let right = TensorLayout::contiguous(&[3, 1], kind).unwrap();
+            for op in [TensorBinaryOp::Atan2, TensorBinaryOp::Remainder] {
+                let result = output_layout(&Operation::Binary(op), &[left.clone(), right.clone()]);
+                let supported = if op == TensorBinaryOp::Atan2 {
+                    floating(kind)
+                } else {
+                    numeric(kind)
+                };
+                if supported {
+                    assert_eq!(
+                        result.unwrap(),
+                        TensorLayout::contiguous(&[3, 2], kind).unwrap()
+                    );
+                    let empty = TensorLayout::contiguous(&[0, 2], kind).unwrap();
+                    let scalar = TensorLayout::contiguous(&[1], kind).unwrap();
+                    assert_eq!(
+                        output_layout(&Operation::Binary(op), &[empty.clone(), scalar]).unwrap(),
+                        empty
+                    );
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+        }
     }
     #[test]
     fn integer_division_preserves_broadcast_shape_and_integer_width() {

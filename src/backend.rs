@@ -453,6 +453,28 @@ fn piecewise(value: Primitive, op: crate::runtime::PiecewiseActivation) -> Primi
 }
 
 impl FloatTensorOps<Self> for RudaAscend {
+    fn float_atan2(y: Primitive, x: Primitive) -> Primitive {
+        if half(&y) {
+            binary(y, x, TensorBinaryOp::Atan2)
+        } else {
+            Ascend::float_atan2(y, x)
+        }
+    }
+    fn float_remainder(a: Primitive, b: Primitive) -> Primitive {
+        if half(&a) {
+            binary(a, b, TensorBinaryOp::Remainder)
+        } else {
+            Ascend::float_remainder(a, b)
+        }
+    }
+    fn float_remainder_scalar(a: Primitive, b: Scalar) -> Primitive {
+        if half(&a) {
+            let b = scalar_like(&a, b);
+            binary(a, b, TensorBinaryOp::Remainder)
+        } else {
+            Ascend::float_remainder_scalar(a, b)
+        }
+    }
     fn float_cummin(value: Primitive, dim: usize) -> Primitive {
         if half(&value) {
             cumulative_minimum(value, dim)
@@ -592,14 +614,11 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_device(tensor: &FloatTensor<Self>) -> Device<Self>;
         fn float_to_device(tensor: FloatTensor<Self>, device: &Device<Self>) -> FloatTensor<Self>;
         fn float_empty(shape: Shape, device: &Device<Self>, dtype: FloatDType) -> FloatTensor<Self>;
-        fn float_remainder(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_remainder_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self>;
         fn float_cross(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_swap_dims(tensor: FloatTensor<Self>, dim1: usize, dim2: usize) -> FloatTensor<Self>;
         fn float_permute(tensor: FloatTensor<Self>, axes: &[usize]) -> FloatTensor<Self>;
         fn float_cumprod(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_asinh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_atan2(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_expand(tensor: FloatTensor<Self>, shape: Shape) -> FloatTensor<Self>;
         fn float_unfold(tensor: FloatTensor<Self>, dim: usize, size: usize, step: usize) -> FloatTensor<Self>;
     }
@@ -953,6 +972,21 @@ impl IntTensorOps<Self> for RudaAscend {
             <Ascend as IntTensorOps<Ascend>>::int_div_scalar(a, b)
         }
     }
+    fn int_remainder(a: Primitive, b: Primitive) -> Primitive {
+        if matches!(a.dtype, DType::I32 | DType::I64) {
+            binary(a, b, TensorBinaryOp::Remainder)
+        } else {
+            Ascend::int_remainder(a, b)
+        }
+    }
+    fn int_remainder_scalar(a: Primitive, b: Scalar) -> Primitive {
+        if let Some(value) = integer_scalar(b, a.dtype) {
+            let b = scalar_like(&a, Scalar::Int(value));
+            binary(a, b, TensorBinaryOp::Remainder)
+        } else {
+            Ascend::int_remainder_scalar(a, b)
+        }
+    }
     fn int_add_scalar(a: Primitive, b: Scalar) -> Primitive {
         let b = scalar_like(&a, b);
         binary(a, b, TensorBinaryOp::Add)
@@ -986,8 +1020,6 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_from_data(data: TensorData, device: &Device<Self>) -> IntTensor<Self>;
         fn int_device(tensor: &IntTensor<Self>) -> Device<Self>;
         fn int_to_device(tensor: IntTensor<Self>, device: &Device<Self>) -> IntTensor<Self>;
-        fn int_remainder(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn int_remainder_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn int_matmul(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
         fn int_mean_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cumprod(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;

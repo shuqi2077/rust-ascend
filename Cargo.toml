@@ -9,7 +9,7 @@ repository = "https://github.com/shuqi2077/rust-ascend"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-ruda-core = { git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["ir", "compiler-std", "argument-layout"] }
+ruda-core = { git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["ir", "compiler-std", "argument-layout"] }
 rust-ascend-compiler = { path = "rust-ascend-compiler", version = "0.1.0", default-features = false }
 rust-ascend-driver = { path = "rust-ascend-driver", version = "0.1.0", default-features = false }
 rust-ascend-kernels = { path = "rust-ascend-kernels", version = "0.1.0" }
@@ -32,18 +32,18 @@ ruda-core.workspace = true
 rust-ascend-compiler = { workspace = true, features = ["ascend"] }
 rust-ascend-driver = { workspace = true, features = ["runtime"] }
 rust-ascend-kernels.workspace = true
-ruda-tensor = { git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["api-std"] }
-ruda-tensor-device = { git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["std"] }
-ruda-autodiff = { git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["std"] }
-ruda-kernel = { git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["frontend-std", "library"] }
-ruda-optim = { git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["fused-adamw-device", "collective"] }
-ruda-model = { git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["std"] }
-ruda-nn = { git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["std"] }
-ruda-store = { git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["std", "safetensors"] }
-ruccl = { package = "ruCCL", git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false }
-rurand = { package = "ruRAND", git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["std"] }
-rullm = { package = "ruda-llm", git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, optional = true }
+ruda-tensor = { git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["api-std"] }
+ruda-tensor-device = { git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["std"] }
+ruda-autodiff = { git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["std"] }
+ruda-kernel = { git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["frontend-std", "library"] }
+ruda-optim = { git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["fused-adamw-device", "collective"] }
+ruda-model = { git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["std"] }
+ruda-nn = { git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["std"] }
+ruda-store = { git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["std", "safetensors"] }
+ruccl = { package = "ruCCL", git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false }
+rurand = { package = "ruRAND", git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["std"] }
+rullm = { package = "ruda-llm", git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, optional = true }
 
 [dev-dependencies]
-ruda-kernel = { git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["frontend-std", "library"] }
-ruprim = { package = "ruPRIM", git = "https://github.com/shuqi2077/RUDA.git", rev = "416904acc0aace9ff05d291c6b9e37315c502168", default-features = false, features = ["std", "elementwise"] }
+ruda-kernel = { git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["frontend-std", "library"] }
+ruprim = { package = "ruPRIM", git = "https://github.com/shuqi2077/RUDA.git", rev = "9ae58d4b3bac887f416452a0cf3966e215963680", default-features = false, features = ["std", "elementwise"] }
