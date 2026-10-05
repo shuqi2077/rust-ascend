@@ -97,8 +97,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vec![9_007_199_254_740_993_i64 + root as i64]
         );
         assert_eq!(
-            model.flags.val().into_data().to_vec::<bool>()?,
-            vec![true, false]
+            model.flags.val().into_data().to_vec::<u8>()?,
+            vec![1, 0]
         );
         let local_weight = rank as u64 + 1;
         let loss =
