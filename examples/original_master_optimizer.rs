@@ -1,16 +1,17 @@
 use rust_ascend::{
     Autodiff, RudaAscend,
     model::{
-        module::{Initializer, Module},
-        record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
+        module::{Initializer, Module, ModuleDTypeRecord},
+        record::{BinBytesRecorder, FullPrecisionSettings},
     },
     nn::modules::{LinearConfig, LoRALinear, LoRALinearConfig},
     optim::{
         AdamWConfig, AdamWState, Fp32MasterOptimizer, Fp32MasterState, GradientsAccumulator,
-        GradientsParams, Optimizer,
+        GradientsParams, Optimizer, lr_scheduler::LrScheduler,
     },
     runtime::{AscendRuntime, RuntimeOptions},
     tensor::{Backend, DType, FloatDType, api::Tensor},
+    training::TrainingRecord,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,6 +27,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let device = unsafe { AscendRuntime::initialize_exclusive(options)? };
     type B = Autodiff<RudaAscend>;
+    type O = ruda_optim::adaptor::OptimizerAdaptor<
+        Fp32MasterOptimizer<rust_ascend::optim::AdamW>,
+        LoRALinear<B>,
+        B,
+    >;
+    type Snapshot = TrainingRecord<B, LoRALinear<B>, O, f64, usize>;
+    type StoredSnapshot = TrainingRecord<B, LoRALinear<B>, O, f64, (ModuleDTypeRecord, usize)>;
     for (dtype, module_dtype) in [
         (DType::F16, FloatDType::F16),
         (DType::BF16, FloatDType::BF16),
@@ -45,7 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_gradient_scale(loss_scale)
             .init::<B, LoRALinear<B>>();
         let mut accumulator = GradientsAccumulator::new();
-        for _ in 0..3 {
+        let mut scheduler = 0.001f64;
+        for step in 0usize..3 {
             for input in [[[1., 2.]], [[2., 1.]]] {
                 let input = Tensor::<B, 2>::from_data(input, &device).cast(dtype);
                 let prediction = model.forward(input);
@@ -62,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     DType::F32
                 );
             }
-            model = optimizer.step(0.001, model, gradients);
+            model = optimizer.step(scheduler.step(), model, gradients);
             assert_eq!(model.base.weight.id, base_id);
             assert_eq!(model.adapter_a.weight.id, a_id);
             assert_eq!(model.adapter_b.weight.id, b_id);
@@ -91,18 +100,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
-            let bytes = <BinBytesRecorder<FullPrecisionSettings> as Recorder<B>>::record(
-                &recorder,
-                record,
-                (),
+            let bytes = Snapshot::capture_with_dtypes(
+                &model,
+                &optimizer,
+                &scheduler,
+                &accumulator,
+                step + 1,
+            )?
+            .save(&recorder, ())?;
+            let restored = StoredSnapshot::load(&recorder, bytes, &device)?.restore_with_dtypes(
+                model.clone().to_dtype(FloatDType::F32),
+                Fp32MasterOptimizer::new(AdamWConfig::new().build())
+                    .with_gradient_scale(loss_scale)
+                    .init(),
+                scheduler,
+                &device,
             )?;
-            let restored = <BinBytesRecorder<FullPrecisionSettings> as Recorder<B>>::load(
-                &recorder, bytes, &device,
-            )?;
-            optimizer = optimizer.load_record(restored);
+            assert_eq!(restored.state, step + 1);
+            assert_eq!(restored.model.base.weight.val().dtype(), dtype);
+            assert!(!restored.model.base.weight.val().is_require_grad());
+            assert_eq!(restored.model.adapter_a.weight.val().dtype(), dtype);
+            assert!(restored.model.adapter_a.weight.val().is_require_grad());
+            model = restored.model;
+            optimizer = restored.optimizer;
+            scheduler = restored.scheduler;
+            accumulator = restored.accumulator;
         }
         println!(
-            "{dtype:?}: original LoRA module, FP32 accumulation, master AdamW and optimizer record continuation passed"
+            "{dtype:?}: original LoRA, FP32 accumulation, master AdamW and dtype-preserving training checkpoint continuation passed"
         );
     }
     Ok(())

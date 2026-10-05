@@ -13,7 +13,7 @@ ptx = ["dep:upstream-compiler"]
 
 [dependencies]
 ruda-core.workspace = true
-upstream-compiler = { package = "ruda-compiler", git = "https://github.com/shuqi2077/RUDA.git", rev = "4765f9cd30d9c5b451ed8b05dbd956109fe84994", default-features = false, features = ["ptx"], optional = true }
+upstream-compiler = { package = "ruda-compiler", git = "https://github.com/shuqi2077/RUDA.git", rev = "3f3344fc7158fbc4e616f0d58cd06dd050881f87", default-features = false, features = ["ptx"], optional = true }
 
 [[example]]
 name = "ascend_ir"
