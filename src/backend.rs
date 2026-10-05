@@ -176,6 +176,14 @@ fn scalar_like(reference: &Primitive, value: Scalar) -> Primitive {
     .expect("native Ascend scalar tensor fill failed");
     wrap(reference, out)
 }
+fn integer_scalar(value: Scalar, dtype: DType) -> Option<i64> {
+    let value = match value {
+        Scalar::Int(value) => Some(value),
+        Scalar::UInt(value) => i64::try_from(value).ok(),
+        _ => None,
+    }?;
+    (dtype == DType::I64 || (dtype == DType::I32 && i32::try_from(value).is_ok())).then_some(value)
+}
 fn binary(a: Primitive, b: Primitive, op: TensorBinaryOp) -> Primitive {
     same_device(&a, &b);
     let out = AscendRuntime::tensor_binary(&a.client, buffer(a.clone()), buffer(b), op)
@@ -297,6 +305,21 @@ macro_rules! floating_unary {
         fn $method(value: Primitive) -> Primitive {
             if half(&value) { unary(value, TensorUnaryOp::$op) }
             else { <Ascend as FloatTensorOps<Ascend>>::$method(value) }
+        }
+    )* };
+}
+macro_rules! integer_bits {
+    ($($method:ident, $scalar_method:ident => $op:ident;)*) => { $(
+        fn $method(a: Primitive, b: Primitive) -> Primitive {
+            if matches!(a.dtype, DType::I32 | DType::I64) {
+                binary(a, b, TensorBinaryOp::$op)
+            } else { <Ascend as IntTensorOps<Ascend>>::$method(a, b) }
+        }
+        fn $scalar_method(a: Primitive, b: Scalar) -> Primitive {
+            if let Some(value) = integer_scalar(b, a.dtype) {
+                let b = scalar_like(&a, Scalar::Int(value));
+                binary(a, b, TensorBinaryOp::$op)
+            } else { <Ascend as IntTensorOps<Ascend>>::$scalar_method(a, b) }
         }
     )* };
 }
@@ -728,6 +751,25 @@ impl FloatTensorOps<Self> for RudaAscend {
 }
 
 impl IntTensorOps<Self> for RudaAscend {
+    integer_bits! {
+        bitwise_and, bitwise_and_scalar => BitwiseAnd;
+        bitwise_or, bitwise_or_scalar => BitwiseOr;
+        bitwise_xor, bitwise_xor_scalar => BitwiseXor;
+    }
+    fn bitwise_not(value: Primitive) -> Primitive {
+        if matches!(value.dtype, DType::I32 | DType::I64) {
+            unary(value, TensorUnaryOp::BitwiseNot)
+        } else {
+            Ascend::bitwise_not(value)
+        }
+    }
+    fn int_abs(value: Primitive) -> Primitive {
+        if matches!(value.dtype, DType::I32 | DType::I64) {
+            unary(value, TensorUnaryOp::Abs)
+        } else {
+            Ascend::int_abs(value)
+        }
+    }
     indexing!(
         int_slice,
         int_slice_assign,
@@ -866,14 +908,7 @@ impl IntTensorOps<Self> for RudaAscend {
         }
     }
     fn int_div_scalar(a: Primitive, b: Scalar) -> Primitive {
-        let integer = match b {
-            Scalar::Int(value) => Some(value),
-            Scalar::UInt(value) => i64::try_from(value).ok(),
-            _ => None,
-        };
-        if let Some(value) = integer
-            && (a.dtype == DType::I64 || (a.dtype == DType::I32 && i32::try_from(value).is_ok()))
-        {
+        if let Some(value) = integer_scalar(b, a.dtype) {
             let b = scalar_like(&a, Scalar::Int(value));
             binary(a, b, TensorBinaryOp::IntDiv)
         } else {
@@ -920,18 +955,10 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_cumprod(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cummin(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_cummax(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
-        fn int_abs(tensor: IntTensor<Self>) -> IntTensor<Self>;
         fn int_swap_dims(tensor: IntTensor<Self>, dim1: usize, dim2: usize) -> IntTensor<Self>;
         fn int_permute(tensor: IntTensor<Self>, axes: &[usize]) -> IntTensor<Self>;
         fn int_random( shape: Shape, distribution: Distribution, device: &Device<Self>, dtype: IntDType, ) -> IntTensor<Self>;
         fn int_expand(tensor: IntTensor<Self>, shape: Shape) -> IntTensor<Self>;
-        fn bitwise_and(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn bitwise_and_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
-        fn bitwise_or(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn bitwise_or_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
-        fn bitwise_xor(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn bitwise_xor_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
-        fn bitwise_not(tensor: IntTensor<Self>) -> IntTensor<Self>;
         fn bitwise_left_shift(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
         fn bitwise_left_shift_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn bitwise_right_shift(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;

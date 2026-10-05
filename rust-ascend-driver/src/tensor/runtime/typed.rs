@@ -28,6 +28,9 @@ pub enum TensorBinaryOp {
     Div,
     IntDiv,
     Pow,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +50,7 @@ pub enum TensorUnaryOp {
     Floor,
     Ceil,
     Trunc,
+    BitwiseNot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,6 +209,10 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
             }
             let kind = inputs[0].dtype();
             let logical = matches!(op, TensorBinaryOp::And | TensorBinaryOp::Or);
+            let bitwise = matches!(
+                op,
+                TensorBinaryOp::BitwiseAnd | TensorBinaryOp::BitwiseOr | TensorBinaryOp::BitwiseXor
+            );
             let arithmetic = matches!(
                 op,
                 TensorBinaryOp::Add
@@ -213,12 +221,16 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
                     | TensorBinaryOp::Div
                     | TensorBinaryOp::IntDiv
                     | TensorBinaryOp::Pow
+                    | TensorBinaryOp::BitwiseAnd
+                    | TensorBinaryOp::BitwiseOr
+                    | TensorBinaryOp::BitwiseXor
             );
             if (logical && kind != CannDType::Bool)
                 || (arithmetic && !numeric(kind))
                 || (matches!(op, TensorBinaryOp::Div | TensorBinaryOp::Pow) && !floating(kind))
                 || (*op == TensorBinaryOp::IntDiv
                     && !matches!(kind, CannDType::I32 | CannDType::I64))
+                || (bitwise && !matches!(kind, CannDType::I32 | CannDType::I64))
             {
                 return Err(error("native binary tensor dtype contract mismatch"));
             }
@@ -238,6 +250,18 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
                 )
             {
                 return Err(error("native scalar arithmetic requires floating tensors"));
+            }
+            TensorLayout::contiguous(input.shape(), input.dtype())
+        }
+        Operation::Unary(
+            op @ (TensorUnaryOp::Neg | TensorUnaryOp::Abs | TensorUnaryOp::BitwiseNot),
+        ) => {
+            let input = unary()?;
+            if !numeric(input.dtype())
+                || (*op == TensorUnaryOp::BitwiseNot
+                    && !matches!(input.dtype(), CannDType::I32 | CannDType::I64))
+            {
+                return Err(error("native integer unary operation dtype mismatch"));
             }
             TensorLayout::contiguous(input.shape(), input.dtype())
         }
@@ -969,6 +993,18 @@ fn binary_symbols(op: TensorBinaryOp) -> (&'static CStr, &'static CStr) {
         TensorBinaryOp::Sub => (c"aclnnSubGetWorkspaceSize", c"aclnnSub"),
         TensorBinaryOp::Div => (c"aclnnDivGetWorkspaceSize", c"aclnnDiv"),
         TensorBinaryOp::IntDiv => (c"aclnnDivModGetWorkspaceSize", c"aclnnDivMod"),
+        TensorBinaryOp::BitwiseAnd => (
+            c"aclnnBitwiseAndTensorGetWorkspaceSize",
+            c"aclnnBitwiseAndTensor",
+        ),
+        TensorBinaryOp::BitwiseOr => (
+            c"aclnnBitwiseOrTensorGetWorkspaceSize",
+            c"aclnnBitwiseOrTensor",
+        ),
+        TensorBinaryOp::BitwiseXor => (
+            c"aclnnBitwiseXorTensorGetWorkspaceSize",
+            c"aclnnBitwiseXorTensor",
+        ),
         TensorBinaryOp::Pow => (
             c"aclnnPowTensorTensorGetWorkspaceSize",
             c"aclnnPowTensorTensor",
@@ -992,6 +1028,7 @@ fn unary_symbols(op: TensorUnaryOp) -> (&'static CStr, &'static CStr) {
         TensorUnaryOp::Floor => (c"aclnnFloorGetWorkspaceSize", c"aclnnFloor"),
         TensorUnaryOp::Ceil => (c"aclnnCeilGetWorkspaceSize", c"aclnnCeil"),
         TensorUnaryOp::Trunc => (c"aclnnTruncGetWorkspaceSize", c"aclnnTrunc"),
+        TensorUnaryOp::BitwiseNot => (c"aclnnBitwiseNotGetWorkspaceSize", c"aclnnBitwiseNot"),
     }
 }
 impl State {
@@ -1638,6 +1675,47 @@ fn ranges(addresses: &[usize], layouts: &[TensorLayout]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_integer_bits_preserve_broadcast_shape_and_exact_width() {
+        for dtype in [CannDType::I32, CannDType::I64] {
+            let input = TensorLayout::strided(&[3, 2], &[1, 3], dtype).unwrap();
+            let mask = TensorLayout::contiguous(&[3, 1], dtype).unwrap();
+            for op in [
+                TensorBinaryOp::BitwiseAnd,
+                TensorBinaryOp::BitwiseOr,
+                TensorBinaryOp::BitwiseXor,
+            ] {
+                let output =
+                    output_layout(&Operation::Binary(op), &[input.clone(), mask.clone()]).unwrap();
+                assert_eq!(output, TensorLayout::contiguous(&[3, 2], dtype).unwrap());
+            }
+            for op in [
+                TensorUnaryOp::BitwiseNot,
+                TensorUnaryOp::Abs,
+                TensorUnaryOp::Neg,
+            ] {
+                assert_eq!(
+                    output_layout(&Operation::Unary(op), &[input.clone()]).unwrap(),
+                    TensorLayout::contiguous(&[3, 2], dtype).unwrap()
+                );
+            }
+        }
+        let float = TensorLayout::contiguous(&[2, 3], CannDType::F32).unwrap();
+        assert!(
+            output_layout(
+                &Operation::Unary(TensorUnaryOp::BitwiseNot),
+                &[float.clone()]
+            )
+            .is_err()
+        );
+        assert!(
+            output_layout(
+                &Operation::Binary(TensorBinaryOp::BitwiseAnd),
+                &[float.clone(), float]
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn native_sort_accepts_strided_numeric_axes_and_preserves_value_width() {
         for dtype in [
