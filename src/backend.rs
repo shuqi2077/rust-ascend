@@ -466,10 +466,19 @@ impl FloatTensorOps<Self> for RudaAscend {
         float_sin => Sin;
         float_cos => Cos;
         float_tanh => Tanh;
+        float_tan => Tan;
+        float_cosh => Cosh;
+        float_sinh => Sinh;
+        float_acos => Acos;
+        float_acosh => Acosh;
+        float_asin => Asin;
+        float_atan => Atan;
+        float_atanh => Atanh;
         float_erf => Erf;
         float_floor => Floor;
         float_ceil => Ceil;
         float_trunc => Trunc;
+        float_round => Round;
     }
     fn float_argmax(value: Primitive, dim: usize, out_dtype: IntDType) -> Primitive {
         if half(&value) {
@@ -569,17 +578,8 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_cumprod(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cummin(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cummax(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
-        fn float_tan(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_cosh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_sinh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_acos(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_acosh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_asin(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_asinh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_atan(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_atanh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_atan2(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_round(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_expand(tensor: FloatTensor<Self>, shape: Shape) -> FloatTensor<Self>;
         fn float_unfold(tensor: FloatTensor<Self>, dim: usize, size: usize, step: usize) -> FloatTensor<Self>;
     }
