@@ -14,17 +14,18 @@ use rust_ascend::{
     optim::{Fp32MasterOptimizer, GradientsParams, Optimizer},
     runtime::{AscendRuntime, RuntimeOptions},
     tensor::{
-        Backend, Bool, DType, FloatDType, Int, TensorCreationOptions, TensorData, api::Tensor,
+        Backend, DType, FloatDType, TensorData,
+        api::{Bool, Int, Tensor, TensorCreationOptions},
     },
 };
 use std::{net::SocketAddr, thread, time::Duration};
 type B = Autodiff<RudaAscend>;
 
 #[derive(Module, Debug)]
-struct Replica<T: Backend> {
-    weight: Param<Tensor<T, 1>>,
-    counter: Param<Tensor<T, 1, Int>>,
-    flags: Param<Tensor<T, 1, Bool>>,
+struct Replica<B: Backend> {
+    weight: Param<Tensor<B, 1>>,
+    counter: Param<Tensor<B, 1, Int>>,
+    flags: Param<Tensor<B, 1, Bool>>,
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rank: u32 = std::env::var("RUDA_RANK")?.parse()?;
@@ -55,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let device = unsafe { AscendRuntime::initialize_exclusive(options)? };
     let coordinator = if rank == 0 {
-        let server = TcpRendezvousServer::bind(address, id, world)?;
+        let server = TcpRendezvousServer::bind(address, id, world as usize)?;
         Some(thread::spawn(move || server.run()))
     } else {
         None
@@ -96,10 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model.counter.val().into_data().to_vec::<i64>()?,
             vec![9_007_199_254_740_993_i64 + root as i64]
         );
-        assert_eq!(
-            model.flags.val().into_data().to_vec::<u8>()?,
-            vec![1, 0]
-        );
+        assert_eq!(model.flags.val().into_data().to_vec::<u8>()?, vec![1, 0]);
         let local_weight = rank as u64 + 1;
         let loss =
             model.weight.val().cast(FloatDType::F32).sum() * (local_weight * local_weight) as f32;
