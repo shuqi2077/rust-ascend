@@ -24,6 +24,10 @@ use rust_ascend::{
 | `rust_ascend::kernels` | Rust BF16 矩阵设备程序与 CCE 生成 |
 | `rust_ascend::core` | RUDA 公共 IR 与编译器接口 |
 | `rust_ascend::runtime` | RUDA `Runtime` / `ComputeServer` / `ComputeStorage` 接口、设备工作线程与 CCE 即时编译 |
+| `rust_ascend::RudaAscend` | 保留 RUDA 张量 API 的 CANN typed backend，支持浮点、整数及 Bool 张量 |
+| `rust_ascend::nn::modules` / `model` | 复用 RUDA 网络层、Module、参数与记录 |
+| `rust_ascend::optim` / `training` | 复用优化器、FP32 主参数／梯度累积及混合存储 checkpoint |
+| `rust_ascend::data_parallel` / `distributed` | 共享副本训练契约、原生 HCCL 及可微分张量集合通信 |
 
 ACLNN 路径另提供 `cast`、`silu_backward`、`softmax_backward`、`log_softmax_backward` 和 `rms_norm_backward`。反向接口支持 FP32/FP16/BF16；RMSNorm 返回输入梯度及 FP32 权重梯度。调用示例见 [gradients](examples/gradients.rs)。
 
@@ -54,6 +58,66 @@ let dx = x.grad(&gradients).unwrap();
 完整进程初始化与调用见 [tensor 示例](examples/tensor.rs)：`cargo run --release --example tensor`。
 
 公共 map 编译器对可严格证明的 32 字节对齐连续区间使用分段整块搬运，行广播在每段只读取一次并在设备本地展开；宽行归一化的输入块、共享 weight 和输出 patch 复用这一通路。非连续步长、无法证明的区间或不满足本地对齐的索引仍按原设备逐元素路径执行。索引边界、FP32 计算、尾部 padding 与未写输出保留语义不变。
+
+## 通用 RUDA 后端与 typed 算子
+
+`RudaAscend` 在同一 `AscendRuntime` 上接入 CANN typed 算子，保留 RUDA 的 `Tensor`、Module 和自动求导定义。使用 `Autodiff<RudaAscend>` 运行原有 Embedding、Linear、LoRA、Attention、RMSNorm、LayerNorm、RoPE 和损失模块；`nn::modules` 是这些 RUDA 模块的重导出，不另建模型专用训练图。`Ascend` 则保留前述公共 IR 后端；下文显式 `nn::*` 原生接口的精度、布局和矩阵对齐契约不变。
+
+浮点存储支持 F32/F16/BF16；通过 `Module::to_dtype` 选择 `FloatDType::F16` 或 `FloatDType::BF16` 转换参数，保留参数 ID、共享别名、冻结设置和可训练叶节点。整数使用 I32/I64，Bool 保留布尔存储；创建宽 I64 数据时在 `TensorCreationOptions::with_dtype(DType::I64)` 中指定 dtype，避免先按默认 I32 创建。完整调用见 [typed_model_tensors](examples/typed_model_tensors.rs)、[original_half_models](examples/original_half_models.rs) 和 [original_token_training](examples/original_token_training.rs)。
+
+| typed 路径 | 范围与接口 | 示例 |
+|---|---|---|
+| 半精度数学 | F16/BF16 三角／双曲及反函数、floor/ceil/trunc、ties-to-even round、atan2、remainder、cross；沿用 RUDA 求导与广播规则 | [native_half_math](examples/native_half_math.rs) |
+| 累积运算 | F16/BF16 与 I32/I64 cumsum；F16/BF16 和 I32 cummin/cummax。Cummax 由设备 Cummin 加浮点取负／整数按位取反组合，不是独立 Cummax 内核 | [native_cumsum](examples/native_cumsum.rs) |
+| 排序与选择 | 浮点及 I32/I64 稳定排序、排序组合的 Top-K、argmin/argmax；索引可选择 I32/I64，包含全轴 Top-K | [native_sort_topk](examples/native_sort_topk.rs)、[native_arg_reductions](examples/native_arg_reductions.rs) |
+| 整数算术 | I32/I64 向零截断除法、remainder、and/or/xor/not、算术右移和 abs；整数不经浮点转换。可表示的整数 scalar 使用同宽路径，左移保持原有路径 | [native_integer_division](examples/native_integer_division.rs)、[native_integer_bits](examples/native_integer_bits.rs) |
+
+这些 typed 入口不把公共 IR 编译器扩展成任意 dtype／布局编译器，也不改写已有显式 BF16 矩阵接口。
+
+## FP32 主参数训练与混合存储 checkpoint
+
+`optim::Fp32MasterOptimizer::new(existing_optimizer).init()` 包装原 RUDA `SimpleOptimizer`：参数可用 F32/F16/BF16 存储，FP32 主参数参与原优化器更新，保留其原有状态，更新后转回原参数存储 dtype。`optim::GradientsAccumulator::accumulate_with_dtype(&model, gradients, FloatDType::F32)` 在累加前转换新梯度和待累积梯度，不改变损失归一化或参数存储。`with_gradient_scale(scale)` 显式在 FP32 中反缩放后执行可选的逐参数 `with_grad_clipping`，不启用动态缩放或自动跳步。
+
+`training::TrainingRecord::capture_with_dtypes` 保存每个浮点参数的存储 metadata，以及优化器、调度器、待累积梯度和调用方状态；加载返回的 `(ModuleDTypeRecord, U)` 记录类型后，使用 `restore_with_dtypes` 恢复混合存储并取回原状态 `U`。使用全精度 recorder 保留 FP32 主参数、动量和待累积梯度；恢复前重建相同模型、优化器选项及调度器配置。数据位置和 RNG 状态仍由调用方提供。
+
+底层 `optim::adamw_master_tensor_step` 接受显式的半精度参数、FP32 master／一阶矩／二阶矩和梯度，在设备端复用原 RUDA AdamW 存储内核；主参数和矩原位更新，梯度只读，不自动创建 master。模块包装器和底层存储更新是不同入口，调用见 [original_master_optimizer](examples/original_master_optimizer.rs) 与 [original_master_adamw](examples/original_master_adamw.rs)。从本仓库运行：
+
+```bash
+cargo run --locked --release --example original_master_optimizer
+cargo run --locked --release --example original_master_adamw
+```
+
+## 原生 HCCL 与可微分集合通信
+
+`distributed::HcclCommunicator` 通过已有 `RankCommunicator<TensorDevice<RudaAscend>>` 完成 TCP rendezvous 与训练 metadata 交换；张量 broadcast、all-reduce、all-gather 和 reduce-scatter 使用 NPU 内存上的原生 HCCL，不把张量 payload 搬回主机。每个进程管理一个 NPU，设备会话、HCCL 上下文及通信器由原设备工作线程持有。
+
+`data_parallel::DataParallel<Autodiff<RudaAscend>, HcclCommunicator>` 复用 RUDA 副本结构检查、参数／共享别名／冻结语义，以及本地损失和按有效 token／样本总数归一化的梯度归约。`initialize_with_buffers` 额外一次性同步 I32/I64 与 Bool 参数缓冲区，不在每次前向前自动广播；`reduce_fp32` 接收半精度或 FP32 累积梯度并返回 FP32，之后显式调用原主参数优化器。各 rank 使用同一初始化 root、归约模式及 missing-gradient policy。
+
+`distributed` 重导出共享的可微分函数，接受 `Tensor<Autodiff<RudaAscend>, D>` 和 HCCL 通信器：
+
+| API | 前向与反向 |
+|---|---|
+| `all_gather` / `all_gather_dim` | 按 rank 顺序聚合等形分片；反向 sum reduce-scatter |
+| `reduce_scatter_sum` / `reduce_scatter_sum_dim` | 求和并返回等分片；反向 all-gather |
+| `reduce_scatter_mean` / `reduce_scatter_mean_dim` | 平均并分片；反向 all-gather 后除以 world size |
+| `all_reduce_sum` / `all_reduce_mean` | 副本求和／平均；反向汇总各 rank 本地梯度，Mean 再除以 world size |
+| `broadcast` | 显式 root 广播；反向汇总到 root，非 root 的占位输入得到零梯度 |
+
+无后缀的 gather/scatter 沿第零轴，`_dim` 支持正轴或负轴并恢复原轴顺序；scatter 选定轴须可被 world size 整除。浮点集合支持 F32/F16/BF16，原始整数 gather/scatter 保留 I32/I64 宽度；Bool 不参与归约，BF16 Product 不在原生归约范围内。所有 rank 在前向和反向保持相同 shape、dtype、梯度跟踪、root 与集合调用顺序。共享图节点保留通信器，不在 checkpoint 重计算中重放通信；这些原语不自动实现 FSDP/ZeRO 或模型并行调度。
+
+完整初始化、原生集合及主参数更新见 [hccl_data_parallel](examples/hccl_data_parallel.rs)。在已配置 CANN/HCCL、至少两个 NPU 的机器上，每个 rank 设置 `RUDA_RANK`、`RUDA_WORLD_SIZE`、`RUDA_NPU_DEVICE`、`RUDA_RENDEZVOUS` 和同一个由 32 个十六进制字符组成的 `RUDA_RENDEZVOUS_ID`；`RUDA_HCCL_LIBRARY` 可指定 HCCL 库，默认 `libhccl.so`。双 NPU 单机示例：
+
+```bash
+export RUDA_WORLD_SIZE=2
+export RUDA_RENDEZVOUS=127.0.0.1:29500
+export RUDA_RENDEZVOUS_ID=00000000000000000000000000002077
+RUDA_RANK=0 RUDA_NPU_DEVICE=0 cargo run --locked --release --example hccl_data_parallel &
+rank0=$!
+RUDA_RANK=1 RUDA_NPU_DEVICE=1 cargo run --locked --release --example hccl_data_parallel &
+rank1=$!
+wait "$rank0"
+wait "$rank1"
+```
 
 ## 整数索引 Embedding
 
@@ -269,7 +333,7 @@ python tools/ascend/build_deepgemm.py --emit-only --out ./target/bf16-source
 - BF16 矩阵：direct-store Dense/Batched NN/NT/TN/TT、对齐的 MGrouped NT，BF16/FP32 输出。
 - 设备代码目标为 Ascend950DT / dav-c310；不自动推断或替换目标型号。
 - Rust 程序生成 CCE，再由 Bisheng 编译为设备机器码，不是直接 Rust → 昇腾 ISA。
-- 不包含完整 PyTorch 昇腾后端、通用低精度行计算或任意 stride/广播。
+- 不包含完整 PyTorch 昇腾后端；公共 IR 编译路径不提供通用低精度行计算或任意 stride/广播。`RudaAscend` 的 typed CANN 算子使用各自的 dtype、shape 和布局契约。
 
 ## 测试入口
 
