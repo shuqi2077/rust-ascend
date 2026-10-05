@@ -2,7 +2,7 @@ use rust_ascend::{
     Autodiff, RudaAscend,
     model::module::{Module, ModuleMapper, Param},
     nn::modules::{
-        EmbeddingConfig, LinearConfig, LoRALinearConfig, RmsNormConfig,
+        EmbeddingConfig, LinearConfig, LoRALinearConfig, RmsNormConfig, RotaryEncodingConfig,
         attention::{MhaInput, MultiHeadAttentionConfig},
         loss::CausalCrossEntropyConfig,
     },
@@ -55,10 +55,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .init::<B>(&device)
             .map(&mut mapper);
         let norm = RmsNormConfig::new(2).init::<B>(&device);
+        let rotary = RotaryEncodingConfig::new(3, 2).init::<B>(&device);
         let mut head = LoRALinearConfig::new(1, 2.)
             .init(LinearConfig::new(2, 3).init::<B>(&device).map(&mut mapper));
         let hidden = embedding.forward(tokens.clone());
         assert_eq!(hidden.dtype(), dtype);
+        let hidden = rotary.forward_with_compute_dtype(hidden, FloatDType::F32);
         let hidden = attention
             .forward(MhaInput::self_attn(hidden).mask_attn(mask.clone()))
             .context;
@@ -138,6 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .weight
             .map(|_| Tensor::<B, 2>::from_inner(parameter).require_grad());
         let hidden = embedding.forward(tokens.clone());
+        let hidden = rotary.forward_with_compute_dtype(hidden, FloatDType::F32);
         let hidden = attention
             .forward(MhaInput::self_attn(hidden).mask_attn(mask.clone()))
             .context;
@@ -147,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .mean();
         assert!(loss.into_scalar().is_finite());
         println!(
-            "{dtype:?}: original RUDA token graph backward, explicit FP32-master AdamW adapter update and next forward passed"
+            "{dtype:?}: original RUDA token graph with RoPE backward, explicit FP32-master AdamW adapter update and next forward passed"
         );
     }
     Ok(())
