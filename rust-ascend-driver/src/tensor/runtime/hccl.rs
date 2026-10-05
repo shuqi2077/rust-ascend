@@ -5,6 +5,7 @@ use crate::{
     CannError, CannLibrary,
     tensor::{CannSession, DType, TensorLayout},
 };
+use ruda_core::tensor::{Shape, collective::CollectiveShape};
 use std::{
     collections::HashMap,
     ffi::{OsStr, c_void},
@@ -57,6 +58,8 @@ type Destroy = unsafe extern "C" fn(*mut c_void) -> i32;
 type Broadcast = unsafe extern "C" fn(*mut c_void, u64, i32, u32, *mut c_void, *mut c_void) -> i32;
 type AllReduce =
     unsafe extern "C" fn(*mut c_void, *mut c_void, u64, i32, i32, *mut c_void, *mut c_void) -> i32;
+type AllGather =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, u64, i32, *mut c_void, *mut c_void) -> i32;
 
 struct Api {
     _library: CannLibrary,
@@ -65,6 +68,8 @@ struct Api {
     destroy: Destroy,
     broadcast: Broadcast,
     all_reduce: AllReduce,
+    all_gather: AllGather,
+    reduce_scatter: AllReduce,
 }
 impl Api {
     unsafe fn load(library: &OsStr) -> Result<Self> {
@@ -76,6 +81,8 @@ impl Api {
             destroy: unsafe { *library.symbol::<Destroy>(c"HcclCommDestroy")? },
             broadcast: unsafe { *library.symbol::<Broadcast>(c"HcclBroadcast")? },
             all_reduce: unsafe { *library.symbol::<AllReduce>(c"HcclAllReduce")? },
+            all_gather: unsafe { *library.symbol::<AllGather>(c"HcclAllGather")? },
+            reduce_scatter: unsafe { *library.symbol::<AllReduce>(c"HcclReduceScatter")? },
             _library: library,
         })
     }
@@ -191,7 +198,7 @@ impl Registry {
     fn collective(
         &self,
         id: u64,
-        layout: &TensorLayout,
+        layouts: &[TensorLayout; 2],
         addresses: &[usize],
         operation: Operation,
     ) -> Result<()> {
@@ -199,8 +206,23 @@ impl Registry {
         let handle = entry
             .handle
             .ok_or_else(|| error("HCCL communicator is not initialized"))?;
+        let layout = &layouts[0];
+        let expected_addresses = if matches!(operation, Operation::Broadcast(_)) {
+            1
+        } else {
+            2
+        };
+        if addresses.len() != expected_addresses
+            || output_layout(layout, entry.world_size, operation)? != layouts[1]
+        {
+            return Err(error("HCCL tensor layout/resource contract mismatch"));
+        }
         let dtype = datatype(layout.dtype())?;
-        if let Operation::AllReduce(HcclReduceOp::Product) = operation {
+        if matches!(
+            operation,
+            Operation::AllReduce(HcclReduceOp::Product)
+                | Operation::ReduceScatter(HcclReduceOp::Product)
+        ) {
             if layout.dtype() == DType::BF16 {
                 return Err(error("HCCL product does not support BF16"));
             }
@@ -210,7 +232,12 @@ impl Registry {
                 return Err(error("HCCL broadcast root is outside the world"));
             }
         }
-        let count = u64::try_from(layout.byte_len() / layout.dtype().bytes()).map_err(error)?;
+        let bytes = if matches!(operation, Operation::ReduceScatter(_)) {
+            layouts[1].byte_len()
+        } else {
+            layout.byte_len()
+        };
+        let count = u64::try_from(bytes / layout.dtype().bytes()).map_err(error)?;
         if count == 0 {
             return Ok(());
         }
@@ -229,6 +256,27 @@ impl Registry {
             }),
             Operation::AllReduce(op) => ("HcclAllReduce", unsafe {
                 (entry.api.all_reduce)(
+                    addresses[0] as *mut c_void,
+                    addresses[1] as *mut c_void,
+                    count,
+                    dtype,
+                    op as i32,
+                    handle.as_ptr(),
+                    entry.session.stream,
+                )
+            }),
+            Operation::AllGather => ("HcclAllGather", unsafe {
+                (entry.api.all_gather)(
+                    addresses[0] as *mut c_void,
+                    addresses[1] as *mut c_void,
+                    count,
+                    dtype,
+                    handle.as_ptr(),
+                    entry.session.stream,
+                )
+            }),
+            Operation::ReduceScatter(op) => ("HcclReduceScatter", unsafe {
+                (entry.api.reduce_scatter)(
                     addresses[0] as *mut c_void,
                     addresses[1] as *mut c_void,
                     count,
@@ -344,6 +392,33 @@ pub struct HcclCommunicator {
 enum Operation {
     Broadcast(u32),
     AllReduce(HcclReduceOp),
+    AllGather,
+    ReduceScatter(HcclReduceOp),
+}
+fn output_layout(
+    input: &TensorLayout,
+    world_size: u32,
+    operation: Operation,
+) -> Result<TensorLayout> {
+    let shape = Shape::from(
+        input
+            .shape()
+            .iter()
+            .map(|&dim| dim as usize)
+            .collect::<Vec<_>>(),
+    );
+    let plan = match operation {
+        Operation::AllGather => CollectiveShape::all_gather(shape, world_size as usize),
+        Operation::ReduceScatter(_) => CollectiveShape::reduce_scatter(shape, world_size as usize),
+        _ => return TensorLayout::contiguous(input.shape(), input.dtype()),
+    }
+    .map_err(error)?;
+    let output = plan
+        .output
+        .iter()
+        .map(|&dim| i64::try_from(dim).map_err(error))
+        .collect::<Result<Vec<_>>>()?;
+    TensorLayout::contiguous(&output, input.dtype())
 }
 impl HcclCommunicator {
     pub fn rank(&self) -> u32 {
@@ -377,6 +452,25 @@ impl HcclCommunicator {
     ) -> Result<TensorBuffer> {
         self.execute(client, value, Operation::AllReduce(op))
     }
+    /// Gather equal-size tensors into rank-ordered leading-axis concatenation.
+    /// Input snapshots and dtype are retained, including byte Bool and wide integers.
+    pub fn all_gather(
+        &self,
+        client: &ComputeClient<AscendRuntime>,
+        value: TensorBuffer,
+    ) -> Result<TensorBuffer> {
+        self.execute(client, value, Operation::AllGather)
+    }
+    /// Reduce and return this rank's equal leading-axis shard. The leading axis
+    /// must divide by world size; the vendor's writable send buffer is an independent copy.
+    pub fn reduce_scatter(
+        &self,
+        client: &ComputeClient<AscendRuntime>,
+        value: TensorBuffer,
+        op: HcclReduceOp,
+    ) -> Result<TensorBuffer> {
+        self.execute(client, value, Operation::ReduceScatter(op))
+    }
     fn execute(
         &self,
         client: &ComputeClient<AscendRuntime>,
@@ -385,34 +479,40 @@ impl HcclCommunicator {
     ) -> Result<TensorBuffer> {
         let source_layout = super::typed::layout(&value)?;
         datatype(source_layout.dtype())?;
-        if matches!(operation, Operation::AllReduce(_))
-            && matches!(source_layout.dtype(), DType::U8 | DType::Bool)
+        if matches!(
+            operation,
+            Operation::AllReduce(_) | Operation::ReduceScatter(_)
+        ) && matches!(source_layout.dtype(), DType::U8 | DType::Bool)
         {
             return Err(error(
-                "HCCL all-reduce requires a floating or I32/I64 tensor",
+                "HCCL reduction requires a floating or I32/I64 tensor",
             ));
         }
-        if matches!(operation, Operation::AllReduce(HcclReduceOp::Product))
-            && source_layout.dtype() == DType::BF16
+        if matches!(
+            operation,
+            Operation::AllReduce(HcclReduceOp::Product)
+                | Operation::ReduceScatter(HcclReduceOp::Product)
+        ) && source_layout.dtype() == DType::BF16
         {
             return Err(error("HCCL product does not support BF16"));
         }
+        let target = output_layout(&source_layout, self.world_size, operation)?;
         let dense = TensorLayout::contiguous(source_layout.shape(), source_layout.dtype())?;
-        let source = if matches!(operation, Operation::AllReduce(_)) && source_layout == dense {
+        let source = if matches!(operation, Operation::AllGather) && source_layout == dense {
             value
         } else {
             AscendRuntime::materialize(client, value)?
         };
-        let layout = super::typed::layout(&source)?;
+        let layouts = [super::typed::layout(&source)?, target];
         let (output, buffers) = match operation {
             Operation::Broadcast(_) => (source.clone(), vec![source]),
-            Operation::AllReduce(_) => {
-                let output = super::typed::allocate(client, &layout);
+            Operation::AllReduce(_) | Operation::AllGather | Operation::ReduceScatter(_) => {
+                let output = super::typed::allocate(client, &layouts[1]);
                 (output.clone(), vec![source, output])
             }
         };
         client.flush().map_err(error)?;
-        if layout.byte_len() == 0 {
+        if layouts[1].byte_len() == 0 {
             return Ok(output);
         }
         let guards = buffers
@@ -421,7 +521,8 @@ impl HcclCommunicator {
             .collect::<Result<Vec<_>>>()?;
         let resources = guards
             .iter()
-            .map(|guard| {
+            .zip(&layouts)
+            .map(|(guard, layout)| {
                 let mut resource: AscendResource = guard.resource().clone();
                 if resource.byte_len() < layout.byte_len() {
                     return Err(error("HCCL allocation is too short"));
@@ -436,7 +537,7 @@ impl HcclCommunicator {
                 .iter()
                 .map(|resource| state.pointer(resource).map(|ptr| ptr as usize))
                 .collect::<Result<Vec<_>>>()?;
-            state.hccl.collective(id, &layout, &addresses, operation)
+            state.hccl.collective(id, &layouts, &addresses, operation)
         });
         if matches!(&result, Err(CannError::Completion { sync_code, .. }) if *sync_code != 0) {
             std::mem::forget(guards);
@@ -468,5 +569,42 @@ mod tests {
             assert_eq!(datatype(dtype).unwrap(), code);
         }
         assert!(datatype(DType::F64).is_err());
+    }
+    #[test]
+    fn native_layouts_reuse_leading_axis_rules_and_wide_storage() {
+        for dtype in [
+            DType::F32,
+            DType::F16,
+            DType::BF16,
+            DType::I32,
+            DType::I64,
+            DType::Bool,
+        ] {
+            let source = TensorLayout::strided(&[2, 3], &[1, 2], dtype).unwrap();
+            let gathered = output_layout(&source, 4, Operation::AllGather).unwrap();
+            assert_eq!(gathered.shape(), &[8, 3]);
+            assert_eq!(gathered.dtype(), dtype);
+            assert_eq!(gathered.byte_len(), 24 * dtype.bytes());
+            let shard =
+                output_layout(&gathered, 4, Operation::ReduceScatter(HcclReduceOp::Sum)).unwrap();
+            assert_eq!(shard.shape(), &[2, 3]);
+            assert_eq!(shard.byte_len(), 6 * dtype.bytes());
+        }
+        assert!(
+            output_layout(
+                &TensorLayout::contiguous(&[3, 2], DType::F32).unwrap(),
+                2,
+                Operation::ReduceScatter(HcclReduceOp::Sum)
+            )
+            .is_err()
+        );
+        let empty = output_layout(
+            &TensorLayout::contiguous(&[2, 0], DType::I64).unwrap(),
+            4,
+            Operation::AllGather,
+        )
+        .unwrap();
+        assert_eq!(empty.shape(), &[8, 0]);
+        assert_eq!(empty.byte_len(), 0);
     }
 }

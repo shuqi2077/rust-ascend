@@ -76,6 +76,69 @@ impl HcclCommunicator {
     pub fn device(&self) -> &AscendDevice {
         self.native.device()
     }
+    /// Gather floating tensors along axis zero, in rank order, on NPU memory.
+    pub fn all_gather_float(&self, value: Primitive) -> Result<Primitive, TensorDeviceError> {
+        self.check_float(&value)?;
+        let output = self
+            .native
+            .all_gather(&value.client, buffer(value.clone()))
+            .map_err(collective_error)?;
+        Ok(wrap(&value, output))
+    }
+    /// Gather I32/I64 tensors without floating-point conversion or host staging.
+    pub fn all_gather_int(&self, value: Primitive) -> Result<Primitive, TensorDeviceError> {
+        self.check_int(&value)?;
+        let output = self
+            .native
+            .all_gather(&value.client, buffer(value.clone()))
+            .map_err(collective_error)?;
+        Ok(wrap(&value, output))
+    }
+    /// Reduce floating tensors and return this rank's equal axis-zero shard.
+    pub fn reduce_scatter_float(
+        &self,
+        value: Primitive,
+        operation: ReduceOperation,
+    ) -> Result<Primitive, TensorDeviceError> {
+        self.check_float(&value)?;
+        let output = self
+            .native
+            .reduce_scatter(&value.client, buffer(value.clone()), HcclReduceOp::Sum)
+            .map_err(collective_error)?;
+        let output = wrap(&value, output);
+        Ok(if operation == ReduceOperation::Mean {
+            RudaAscend::float_div_scalar(output, (self.world_size() as f32).into())
+        } else {
+            output
+        })
+    }
+    /// Reduce I32/I64 tensors using native sum/product/min/max and return a rank shard.
+    pub fn reduce_scatter_int(
+        &self,
+        value: Primitive,
+        operation: HcclReduceOp,
+    ) -> Result<Primitive, TensorDeviceError> {
+        self.check_int(&value)?;
+        let output = self
+            .native
+            .reduce_scatter(&value.client, buffer(value.clone()), operation)
+            .map_err(collective_error)?;
+        Ok(wrap(&value, output))
+    }
+    fn check_float(&self, value: &Primitive) -> Result<(), TensorDeviceError> {
+        self.check_device(value)?;
+        if !matches!(value.dtype(), DType::F32 | DType::F16 | DType::BF16) {
+            return Err(TensorDeviceError::UnsupportedDType(value.dtype()));
+        }
+        Ok(())
+    }
+    fn check_int(&self, value: &Primitive) -> Result<(), TensorDeviceError> {
+        self.check_device(value)?;
+        if !matches!(value.dtype(), DType::I32 | DType::I64) {
+            return Err(TensorDeviceError::UnsupportedDType(value.dtype()));
+        }
+        Ok(())
+    }
     fn check_device(&self, value: &Primitive) -> Result<(), TensorDeviceError> {
         if &value.device != self.device() {
             Err(TensorDeviceError::DeviceMismatch)

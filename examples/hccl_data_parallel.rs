@@ -5,6 +5,7 @@ use ruda_optim::SgdConfig;
 use rust_ascend::{
     Autodiff, RudaAscend,
     collective::{
+        ReduceOperation,
         rank::{TcpRendezvousServer, UniqueId, communicator::RankCommunicator},
         tensor_device::{TensorDevice, TensorDeviceError},
     },
@@ -12,9 +13,9 @@ use rust_ascend::{
     distributed::HcclCommunicator,
     model::module::{Module, Param, ParamId},
     optim::{Fp32MasterOptimizer, GradientsParams, Optimizer},
-    runtime::{AscendRuntime, RuntimeOptions},
+    runtime::{AscendDevice, AscendRuntime, HcclReduceOp, RuntimeOptions},
     tensor::{
-        Backend, DType, FloatDType, TensorData,
+        Backend, DType, FloatDType, IntDType, TensorData,
         api::{Bool, Int, Tensor, TensorCreationOptions},
     },
 };
@@ -72,6 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let library = std::env::var_os("RUDA_HCCL_LIBRARY").unwrap_or_else(|| "libhccl.so".into());
     let communicator = unsafe { HcclCommunicator::initialize(control, library)? };
+    check_sharded_collectives(&communicator, &device)?;
     let root = world - 1;
     for dtype in [FloatDType::F16, FloatDType::BF16] {
         let model = Replica {
@@ -151,5 +153,126 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join()
             .map_err(|_| "rendezvous thread panicked")??;
     }
+    Ok(())
+}
+
+fn check_sharded_collectives(
+    communicator: &HcclCommunicator,
+    device: &AscendDevice,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rank = communicator.rank();
+    let world = communicator.world_size() as usize;
+    for dtype in [FloatDType::F32, FloatDType::F16, FloatDType::BF16] {
+        let input = Tensor::<RudaAscend, 2>::from_data([[rank as f32 + 1., 2.], [3., 4.]], device)
+            .cast(dtype)
+            .swap_dims(0, 1);
+        let gathered =
+            Tensor::<RudaAscend, 2>::from_primitive(rust_ascend::tensor::TensorPrimitive::Float(
+                communicator.all_gather_float(input.clone().into_primitive().tensor())?,
+            ));
+        assert_eq!(gathered.dims(), [2 * world, 2]);
+        assert_eq!(gathered.dtype(), dtype.into());
+        let expected = (0..world)
+            .flat_map(|rank| [rank as f32 + 1., 3., 2., 4.])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            gathered
+                .clone()
+                .cast(FloatDType::F32)
+                .into_data()
+                .to_vec::<f32>()?,
+            expected
+        );
+        for operation in [ReduceOperation::Sum, ReduceOperation::Mean] {
+            let shard = Tensor::<RudaAscend, 2>::from_primitive(
+                rust_ascend::tensor::TensorPrimitive::Float(
+                    communicator.reduce_scatter_float(
+                        gathered.clone().into_primitive().tensor(),
+                        operation,
+                    )?,
+                ),
+            );
+            assert_eq!(shard.dims(), [2, 2]);
+            assert_eq!(shard.dtype(), dtype.into());
+            let scale = if operation == ReduceOperation::Sum {
+                world as f32
+            } else {
+                1.
+            };
+            let expected = [rank as f32 + 1., 3., 2., 4.].map(|value| value * scale);
+            assert_eq!(
+                shard.cast(FloatDType::F32).into_data().to_vec::<f32>()?,
+                expected.to_vec()
+            );
+        }
+        assert_eq!(
+            gathered.cast(FloatDType::F32).into_data().to_vec::<f32>()?,
+            expected
+        );
+        assert_eq!(
+            input.cast(FloatDType::F32).into_data().to_vec::<f32>()?,
+            vec![rank as f32 + 1., 3., 2., 4.]
+        );
+    }
+    for dtype in [IntDType::I32, IntDType::I64] {
+        let large = if dtype == IntDType::I64 {
+            9_007_199_254_740_993_i64
+        } else {
+            16_777_217_i64
+        };
+        let input = Tensor::<RudaAscend, 2, Int>::from_data(
+            TensorData::new(vec![large + rank as i64, -3, 7, 2], [2, 2]),
+            TensorCreationOptions::<RudaAscend>::new(device.clone()).with_dtype(dtype.into()),
+        )
+        .swap_dims(0, 1);
+        let gathered = Tensor::<RudaAscend, 2, Int>::from_primitive(
+            communicator.all_gather_int(input.clone().into_primitive())?,
+        );
+        assert_eq!(gathered.dims(), [2 * world, 2]);
+        assert_eq!(gathered.dtype(), dtype.into());
+        let expected = (0..world)
+            .flat_map(|rank| [large + rank as i64, 7, -3, 2])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            gathered
+                .clone()
+                .cast(IntDType::I64)
+                .into_data()
+                .to_vec::<i64>()?,
+            expected
+        );
+        let shard = Tensor::<RudaAscend, 2, Int>::from_primitive(
+            communicator
+                .reduce_scatter_int(gathered.clone().into_primitive(), HcclReduceOp::Minimum)?,
+        );
+        assert_eq!(shard.dims(), [2, 2]);
+        assert_eq!(shard.dtype(), dtype.into());
+        assert_eq!(
+            shard.cast(IntDType::I64).into_data().to_vec::<i64>()?,
+            vec![large + rank as i64, 7, -3, 2]
+        );
+        assert_eq!(
+            gathered.cast(IntDType::I64).into_data().to_vec::<i64>()?,
+            expected
+        );
+        assert_eq!(
+            input.cast(IntDType::I64).into_data().to_vec::<i64>()?,
+            vec![large + rank as i64, 7, -3, 2]
+        );
+        let empty = Tensor::<RudaAscend, 2, Int>::empty([2, 0], device).cast(dtype);
+        let gathered = communicator.all_gather_int(empty.into_primitive())?;
+        assert_eq!(
+            Tensor::<RudaAscend, 2, Int>::from_primitive(gathered.clone()).dims(),
+            [2 * world, 0]
+        );
+        let shard = communicator.reduce_scatter_int(gathered, HcclReduceOp::Sum)?;
+        assert_eq!(
+            Tensor::<RudaAscend, 2, Int>::from_primitive(shard).dims(),
+            [2, 0]
+        );
+    }
+    println!(
+        "rank {rank}/{world}: native sharded collectives preserve dtype, rank order, views, empty axes and input snapshots"
+    );
     Ok(())
 }
