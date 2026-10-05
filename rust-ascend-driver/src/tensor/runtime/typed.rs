@@ -26,6 +26,7 @@ pub enum TensorBinaryOp {
     Sub,
     Mul,
     Div,
+    IntDiv,
     Pow,
 }
 
@@ -203,11 +204,14 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
                     | TensorBinaryOp::Sub
                     | TensorBinaryOp::Mul
                     | TensorBinaryOp::Div
+                    | TensorBinaryOp::IntDiv
                     | TensorBinaryOp::Pow
             );
             if (logical && kind != CannDType::Bool)
                 || (arithmetic && !numeric(kind))
                 || (matches!(op, TensorBinaryOp::Div | TensorBinaryOp::Pow) && !floating(kind))
+                || (*op == TensorBinaryOp::IntDiv
+                    && !matches!(kind, CannDType::I32 | CannDType::I64))
             {
                 return Err(error("native binary tensor dtype contract mismatch"));
             }
@@ -904,6 +908,7 @@ fn binary_symbols(op: TensorBinaryOp) -> (&'static CStr, &'static CStr) {
         TensorBinaryOp::Add => (c"aclnnAddGetWorkspaceSize", c"aclnnAdd"),
         TensorBinaryOp::Sub => (c"aclnnSubGetWorkspaceSize", c"aclnnSub"),
         TensorBinaryOp::Div => (c"aclnnDivGetWorkspaceSize", c"aclnnDiv"),
+        TensorBinaryOp::IntDiv => (c"aclnnDivModGetWorkspaceSize", c"aclnnDivMod"),
         TensorBinaryOp::Pow => (
             c"aclnnPowTensorTensorGetWorkspaceSize",
             c"aclnnPowTensorTensor",
@@ -970,7 +975,22 @@ impl State {
                 Operation::Binary(op) => {
                     let (plan_name, run_name) = binary_symbols(op);
                     let run = self.session.ops.get(run_name)?;
-                    if matches!(op, TensorBinaryOp::Add | TensorBinaryOp::Sub) {
+                    if op == TensorBinaryOp::IntDiv {
+                        type Plan = unsafe extern "C" fn(
+                            *const AclTensor,
+                            *const AclTensor,
+                            i32,
+                            *mut AclTensor,
+                            *mut u64,
+                            *mut *mut AclOpExecutor,
+                        ) -> i32;
+                        let plan: Plan = self.session.ops.get(plan_name)?;
+                        self.session.execute(
+                            "native truncating integer division",
+                            run,
+                            |size, executor| plan(handle(0), handle(1), 1, out, size, executor),
+                        )
+                    } else if matches!(op, TensorBinaryOp::Add | TensorBinaryOp::Sub) {
                         type Plan = unsafe extern "C" fn(
                             *const AclTensor,
                             *const AclTensor,
@@ -1518,6 +1538,32 @@ fn ranges(addresses: &[usize], layouts: &[TensorLayout]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn integer_division_preserves_broadcast_shape_and_integer_width() {
+        for dtype in [CannDType::I32, CannDType::I64] {
+            let left = TensorLayout::strided(&[3, 2], &[1, 3], dtype).unwrap();
+            let right = TensorLayout::contiguous(&[3, 1], dtype).unwrap();
+            let output = output_layout(
+                &Operation::Binary(TensorBinaryOp::IntDiv),
+                &[left.clone(), right],
+            )
+            .unwrap();
+            assert_eq!(output.shape(), &[3, 2]);
+            assert_eq!(output.dtype(), dtype);
+            let float = TensorLayout::contiguous(&[3, 2], CannDType::F32).unwrap();
+            assert!(
+                output_layout(&Operation::Binary(TensorBinaryOp::IntDiv), &[left, float]).is_err()
+            );
+        }
+        let float = TensorLayout::contiguous(&[2], CannDType::F16).unwrap();
+        assert!(
+            output_layout(
+                &Operation::Binary(TensorBinaryOp::IntDiv),
+                &[float.clone(), float]
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn cumsum_preserves_shape_dtype_and_accepts_empty_and_strided_inputs() {
         for dtype in [

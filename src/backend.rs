@@ -763,6 +763,28 @@ impl IntTensorOps<Self> for RudaAscend {
     fn int_mul(a: Primitive, b: Primitive) -> Primitive {
         binary(a, b, TensorBinaryOp::Mul)
     }
+    fn int_div(a: Primitive, b: Primitive) -> Primitive {
+        if matches!(a.dtype, DType::I32 | DType::I64) {
+            binary(a, b, TensorBinaryOp::IntDiv)
+        } else {
+            <Ascend as IntTensorOps<Ascend>>::int_div(a, b)
+        }
+    }
+    fn int_div_scalar(a: Primitive, b: Scalar) -> Primitive {
+        let integer = match b {
+            Scalar::Int(value) => Some(value),
+            Scalar::UInt(value) => i64::try_from(value).ok(),
+            _ => None,
+        };
+        if let Some(value) = integer
+            && (a.dtype == DType::I64 || (a.dtype == DType::I32 && i32::try_from(value).is_ok()))
+        {
+            let b = scalar_like(&a, Scalar::Int(value));
+            binary(a, b, TensorBinaryOp::IntDiv)
+        } else {
+            <Ascend as IntTensorOps<Ascend>>::int_div_scalar(a, b)
+        }
+    }
     fn int_add_scalar(a: Primitive, b: Scalar) -> Primitive {
         let b = scalar_like(&a, b);
         binary(a, b, TensorBinaryOp::Add)
@@ -796,8 +818,6 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_from_data(data: TensorData, device: &Device<Self>) -> IntTensor<Self>;
         fn int_device(tensor: &IntTensor<Self>) -> Device<Self>;
         fn int_to_device(tensor: IntTensor<Self>, device: &Device<Self>) -> IntTensor<Self>;
-        fn int_div(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn int_div_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn int_remainder(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
         fn int_remainder_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn int_matmul(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
