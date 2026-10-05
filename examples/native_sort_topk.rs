@@ -77,7 +77,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vec![0, 2, 1, 3, 3, 0, 2, 1]
         );
         assert_eq!(input.clone().argtopk(0, 1).dims(), [2, 0]);
-        assert_eq!(input.topk_with_indices(4, 1).0.dims(), [2, 4]);
+        assert_eq!(input.clone().topk(4, 1).dims(), [2, 4]);
+        assert_eq!(input.argtopk(4, 1).dims(), [2, 4]);
     }
     for (dtype, large) in [
         (DType::I32, 16_777_217i64),
