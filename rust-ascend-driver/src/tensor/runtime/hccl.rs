@@ -412,7 +412,7 @@ fn output_layout(
         Operation::ReduceScatter(_) => CollectiveShape::reduce_scatter(shape, world_size as usize),
         _ => return TensorLayout::contiguous(input.shape(), input.dtype()),
     }
-    .map_err(error)?;
+    .map_err(|cause| error(format!("{cause:?}")))?;
     let output = plan
         .output
         .iter()
