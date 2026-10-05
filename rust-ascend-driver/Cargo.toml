@@ -17,10 +17,10 @@ sha2 = "=0.10.9"
 rust-ascend-compiler = { workspace = true, features = ["ascend"], optional = true }
 rust-ascend-kernels = { workspace = true, optional = true }
 ruda-core = { workspace = true, optional = true }
-ruda-runtime = { git = "https://github.com/shuqi2077/RUDA.git", rev = "dfb315c5d70d99cecc9ea821cdb23b700960eb3c", optional = true }
+ruda-runtime = { git = "https://github.com/shuqi2077/RUDA.git", rev = "a9642a35ccaa7d9a9e7c72c46986e92471391fa0", optional = true }
 tempfile = { version = "3", optional = true }
 wait-timeout = { version = "0.2", optional = true }
-ruda-tensor = { git = "https://github.com/shuqi2077/RUDA.git", rev = "dfb315c5d70d99cecc9ea821cdb23b700960eb3c", default-features = false, optional = true }
+ruda-tensor = { git = "https://github.com/shuqi2077/RUDA.git", rev = "a9642a35ccaa7d9a9e7c72c46986e92471391fa0", default-features = false, optional = true }
 
 [[example]]
 name = "common_ir_validate"

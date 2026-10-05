@@ -74,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let library = std::env::var_os("RUDA_HCCL_LIBRARY").unwrap_or_else(|| "libhccl.so".into());
     let communicator = unsafe { HcclCommunicator::initialize(control, library)? };
     check_sharded_collectives(&communicator, &device)?;
+    check_sharded_gradients(&communicator, &device)?;
     let root = world - 1;
     for dtype in [FloatDType::F16, FloatDType::BF16] {
         let model = Replica {
@@ -153,6 +154,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join()
             .map_err(|_| "rendezvous thread panicked")??;
     }
+    Ok(())
+}
+
+fn check_sharded_gradients(
+    communicator: &HcclCommunicator,
+    device: &AscendDevice,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rust_ascend::distributed::{all_gather, reduce_scatter_mean, reduce_scatter_sum};
+    let rank = communicator.rank() as usize;
+    let world = communicator.world_size() as usize;
+    let rank_sum = (world * (world + 1) / 2) as f32;
+    for dtype in [FloatDType::F32, FloatDType::F16, FloatDType::BF16] {
+        let input = Tensor::<B, 2>::from_data([[rank as f32 + 1., 2.], [3., 4.]], device)
+            .cast(dtype)
+            .swap_dims(0, 1)
+            .detach()
+            .require_grad();
+        let output = all_gather(input.clone(), communicator.clone())?;
+        let weights = Tensor::<B, 2>::full([2 * world, 2], rank + 1, device).cast(dtype);
+        let gradients = (output * weights).sum().backward();
+        let gradient = input
+            .grad(&gradients)
+            .ok_or("missing all-gather gradient")?;
+        assert_eq!(gradient.dtype(), dtype.into());
+        assert_eq!(gradient.dims(), [2, 2]);
+        for actual in gradient.cast(FloatDType::F32).into_data().to_vec::<f32>()? {
+            assert!((actual - rank_sum).abs() <= 0.02 * (1. + rank_sum.abs()));
+        }
+        for mean in [false, true] {
+            let input = Tensor::<B, 2>::full([2, 2 * world], rank + 1, device)
+                .cast(dtype)
+                .swap_dims(0, 1)
+                .detach()
+                .require_grad();
+            let output = if mean {
+                reduce_scatter_mean(input.clone(), communicator.clone())?
+            } else {
+                reduce_scatter_sum(input.clone(), communicator.clone())?
+            };
+            assert_eq!(output.dims(), [2, 2]);
+            let weights = Tensor::<B, 2>::full([2, 2], rank + 1, device).cast(dtype);
+            let gradients = (output * weights).sum().backward();
+            let gradient = input
+                .grad(&gradients)
+                .ok_or("missing reduce-scatter gradient")?;
+            assert_eq!(gradient.dtype(), dtype.into());
+            assert_eq!(gradient.dims(), [2 * world, 2]);
+            let expected = (0..world)
+                .flat_map(|rank| {
+                    let value = (rank + 1) as f32 / if mean { world as f32 } else { 1. };
+                    [value; 4]
+                })
+                .collect::<Vec<_>>();
+            let values = gradient.cast(FloatDType::F32).into_data().to_vec::<f32>()?;
+            for (actual, expected) in values.iter().zip(&expected) {
+                assert!((actual - expected).abs() <= 0.02 * (1. + expected.abs()));
+            }
+        }
+    }
+    println!("rank {rank}/{world}: native HCCL sharded tensors with shared RUDA backward passed");
     Ok(())
 }
 

@@ -17,6 +17,24 @@ use std::ffi::OsStr;
 type Primitive = RudaTensor<crate::runtime::AscendRuntime>;
 type Control = RankCommunicator<TensorDevice<RudaAscend>>;
 
+pub use ruda_autodiff::collective::{all_gather, reduce_scatter_mean, reduce_scatter_sum};
+
+impl ruda_tensor::collective::TensorCollective<RudaAscend> for HcclCommunicator {
+    type Error = TensorDeviceError;
+
+    fn world_size(&self) -> u32 {
+        HcclCommunicator::world_size(self)
+    }
+
+    fn all_gather_float(&self, value: Primitive) -> Result<Primitive, Self::Error> {
+        HcclCommunicator::all_gather_float(self, value)
+    }
+
+    fn reduce_scatter_sum(&self, value: Primitive) -> Result<Primitive, Self::Error> {
+        self.reduce_scatter_float(value, ReduceOperation::Sum)
+    }
+}
+
 /// HCCL broadcasts/reductions on NPU memory, with ruCCL TCP for training metadata only.
 /// Use one process per NPU; all ranks must enter operations in matching order.
 #[derive(Clone, Debug)]
