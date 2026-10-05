@@ -25,6 +25,24 @@ pub enum TensorBinaryOp {
     Add,
     Sub,
     Mul,
+    Div,
+    Pow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TensorUnaryOp {
+    Neg,
+    Abs,
+    Exp,
+    Log,
+    Log1p,
+    Sqrt,
+    Recip,
+    Sin,
+    Cos,
+    Tanh,
+    Erf,
+    Relu,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +51,7 @@ pub enum TensorReduceOp {
     Prod,
     Max,
     Min,
+    Mean,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -45,6 +64,14 @@ pub enum TensorRandomDistribution {
 #[derive(Clone)]
 enum Operation {
     Binary(TensorBinaryOp),
+    ScalarBinary(TensorBinaryOp, ScalarValue),
+    Unary(TensorUnaryOp),
+    Clamp(ScalarValue, ScalarValue),
+    Softmax {
+        dim: usize,
+        log: bool,
+    },
+    ReluBackward,
     Not,
     Copy,
     Cast(CannDType),
@@ -147,6 +174,9 @@ fn numeric(value: CannDType) -> bool {
         CannDType::F32 | CannDType::F16 | CannDType::BF16 | CannDType::I32 | CannDType::I64
     )
 }
+fn floating(value: CannDType) -> bool {
+    matches!(value, CannDType::F32 | CannDType::F16 | CannDType::BF16)
+}
 fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<TensorLayout> {
     let unary = || {
         inputs
@@ -163,13 +193,60 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
             let logical = matches!(op, TensorBinaryOp::And | TensorBinaryOp::Or);
             let arithmetic = matches!(
                 op,
-                TensorBinaryOp::Add | TensorBinaryOp::Sub | TensorBinaryOp::Mul
+                TensorBinaryOp::Add
+                    | TensorBinaryOp::Sub
+                    | TensorBinaryOp::Mul
+                    | TensorBinaryOp::Div
+                    | TensorBinaryOp::Pow
             );
-            if (logical && kind != CannDType::Bool) || (arithmetic && !numeric(kind)) {
+            if (logical && kind != CannDType::Bool)
+                || (arithmetic && !numeric(kind))
+                || (matches!(op, TensorBinaryOp::Div | TensorBinaryOp::Pow) && !floating(kind))
+            {
                 return Err(error("native binary tensor dtype contract mismatch"));
             }
             let kind = if arithmetic { kind } else { CannDType::Bool };
             TensorLayout::contiguous(&broadcast(inputs[0].shape(), inputs[1].shape())?, kind)
+        }
+        Operation::ScalarBinary(op, _) => {
+            let input = unary()?;
+            if !floating(input.dtype())
+                || !matches!(
+                    op,
+                    TensorBinaryOp::Add
+                        | TensorBinaryOp::Sub
+                        | TensorBinaryOp::Mul
+                        | TensorBinaryOp::Div
+                        | TensorBinaryOp::Pow
+                )
+            {
+                return Err(error("native scalar arithmetic requires floating tensors"));
+            }
+            TensorLayout::contiguous(input.shape(), input.dtype())
+        }
+        Operation::Unary(_) | Operation::Clamp(_, _) | Operation::Softmax { .. } => {
+            let input = unary()?;
+            if !floating(input.dtype()) {
+                return Err(error("native floating operation dtype mismatch"));
+            }
+            if let Operation::Softmax { dim, .. } = operation {
+                if *dim >= input.shape().len() {
+                    return Err(error("softmax axis out of bounds"));
+                }
+            }
+            TensorLayout::contiguous(input.shape(), input.dtype())
+        }
+        Operation::ReluBackward => {
+            if inputs.len() != 2
+                || !floating(inputs[0].dtype())
+                || inputs[0].dtype() != inputs[1].dtype()
+                || inputs[0].shape() != inputs[1].shape()
+            {
+                return Err(error(
+                    "ReLU backward requires matching floating input and gradient",
+                ));
+            }
+            TensorLayout::contiguous(inputs[0].shape(), inputs[0].dtype())
         }
         Operation::Not => {
             let input = unary()?;
@@ -202,7 +279,10 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
         }
         Operation::Reduce { dim, op } => {
             let input = unary()?;
-            if !numeric(input.dtype()) || *dim >= input.shape().len() {
+            if !numeric(input.dtype())
+                || *dim >= input.shape().len()
+                || (*op == TensorReduceOp::Mean && !floating(input.dtype()))
+            {
                 return Err(error("native reduction axis/dtype mismatch"));
             }
             if input.shape()[*dim] == 0 && matches!(op, TensorReduceOp::Max | TensorReduceOp::Min) {
@@ -426,6 +506,44 @@ fn slice_plan(
 }
 
 impl AscendRuntime {
+    pub fn tensor_unary(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        op: TensorUnaryOp,
+    ) -> Result<TensorBuffer> {
+        execute(client, Operation::Unary(op), &[input])
+    }
+    pub fn tensor_scalar(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        value: ScalarValue,
+        op: TensorBinaryOp,
+    ) -> Result<TensorBuffer> {
+        execute(client, Operation::ScalarBinary(op, value), &[input])
+    }
+    pub fn tensor_clamp(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        min: ScalarValue,
+        max: ScalarValue,
+    ) -> Result<TensorBuffer> {
+        execute(client, Operation::Clamp(min, max), &[input])
+    }
+    pub fn tensor_softmax(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        dim: usize,
+        log: bool,
+    ) -> Result<TensorBuffer> {
+        execute(client, Operation::Softmax { dim, log }, &[input])
+    }
+    pub fn tensor_relu_backward(
+        client: &ComputeClient<Self>,
+        input: TensorBuffer,
+        grad: TensorBuffer,
+    ) -> Result<TensorBuffer> {
+        execute(client, Operation::ReluBackward, &[input, grad])
+    }
     pub fn tensor_random(
         client: &ComputeClient<Self>,
         dims: Shape,
@@ -455,12 +573,12 @@ impl AscendRuntime {
         let source = layout(&input)?;
         let target = output_layout(&Operation::Reduce { dim, op }, &[source.clone()])?;
         if source.shape()[dim] == 0 {
-            let value = if op == TensorReduceOp::Prod { 1 } else { 0 };
-            return execute(
-                client,
-                Operation::Fill(target, ScalarValue::I64(value)),
-                &[],
-            );
+            let value = match op {
+                TensorReduceOp::Prod => ScalarValue::I64(1),
+                TensorReduceOp::Mean => ScalarValue::F64(f64::NAN),
+                _ => ScalarValue::I64(0),
+            };
+            return execute(client, Operation::Fill(target, value), &[]);
         }
         execute(client, Operation::Reduce { dim, op }, &[input])
     }
@@ -732,6 +850,27 @@ fn binary_symbols(op: TensorBinaryOp) -> (&'static CStr, &'static CStr) {
         TensorBinaryOp::Mul => (c"aclnnMulGetWorkspaceSize", c"aclnnMul"),
         TensorBinaryOp::Add => (c"aclnnAddGetWorkspaceSize", c"aclnnAdd"),
         TensorBinaryOp::Sub => (c"aclnnSubGetWorkspaceSize", c"aclnnSub"),
+        TensorBinaryOp::Div => (c"aclnnDivGetWorkspaceSize", c"aclnnDiv"),
+        TensorBinaryOp::Pow => (
+            c"aclnnPowTensorTensorGetWorkspaceSize",
+            c"aclnnPowTensorTensor",
+        ),
+    }
+}
+fn unary_symbols(op: TensorUnaryOp) -> (&'static CStr, &'static CStr) {
+    match op {
+        TensorUnaryOp::Neg => (c"aclnnNegGetWorkspaceSize", c"aclnnNeg"),
+        TensorUnaryOp::Abs => (c"aclnnAbsGetWorkspaceSize", c"aclnnAbs"),
+        TensorUnaryOp::Exp => (c"aclnnExpGetWorkspaceSize", c"aclnnExp"),
+        TensorUnaryOp::Log => (c"aclnnLogGetWorkspaceSize", c"aclnnLog"),
+        TensorUnaryOp::Log1p => (c"aclnnLog1pGetWorkspaceSize", c"aclnnLog1p"),
+        TensorUnaryOp::Sqrt => (c"aclnnSqrtGetWorkspaceSize", c"aclnnSqrt"),
+        TensorUnaryOp::Recip => (c"aclnnReciprocalGetWorkspaceSize", c"aclnnReciprocal"),
+        TensorUnaryOp::Sin => (c"aclnnSinGetWorkspaceSize", c"aclnnSin"),
+        TensorUnaryOp::Cos => (c"aclnnCosGetWorkspaceSize", c"aclnnCos"),
+        TensorUnaryOp::Tanh => (c"aclnnTanhGetWorkspaceSize", c"aclnnTanh"),
+        TensorUnaryOp::Erf => (c"aclnnErfGetWorkspaceSize", c"aclnnErf"),
+        TensorUnaryOp::Relu => (c"aclnnReluGetWorkspaceSize", c"aclnnRelu"),
     }
 }
 impl State {
@@ -808,6 +947,148 @@ impl State {
                             })
                     }
                 }
+                Operation::ScalarBinary(op, mut value) => {
+                    let value = self.session.scalar(&mut value)?;
+                    if matches!(op, TensorBinaryOp::Add | TensorBinaryOp::Sub) {
+                        type Plan = unsafe extern "C" fn(
+                            *const AclTensor,
+                            *const AclScalar,
+                            *const AclScalar,
+                            *mut AclTensor,
+                            *mut u64,
+                            *mut *mut AclOpExecutor,
+                        ) -> i32;
+                        let alpha = self.session.scalar(&mut ScalarValue::I64(1))?;
+                        let (plan_name, run_name) = if op == TensorBinaryOp::Add {
+                            (c"aclnnAddsGetWorkspaceSize", c"aclnnAdds")
+                        } else {
+                            (c"aclnnSubsGetWorkspaceSize", c"aclnnSubs")
+                        };
+                        let plan: Plan = self.session.ops.get(plan_name)?;
+                        let run = self.session.ops.get(run_name)?;
+                        self.session.execute(
+                            "native floating add/sub scalar",
+                            run,
+                            |size, executor| {
+                                plan(
+                                    handle(0),
+                                    value.handle.as_ptr(),
+                                    alpha.handle.as_ptr(),
+                                    out,
+                                    size,
+                                    executor,
+                                )
+                            },
+                        )
+                    } else {
+                        type Plan = unsafe extern "C" fn(
+                            *const AclTensor,
+                            *const AclScalar,
+                            *mut AclTensor,
+                            *mut u64,
+                            *mut *mut AclOpExecutor,
+                        ) -> i32;
+                        let (plan_name, run_name) = match op {
+                            TensorBinaryOp::Mul => (c"aclnnMulsGetWorkspaceSize", c"aclnnMuls"),
+                            TensorBinaryOp::Div => (c"aclnnDivsGetWorkspaceSize", c"aclnnDivs"),
+                            TensorBinaryOp::Pow => (
+                                c"aclnnPowTensorScalarGetWorkspaceSize",
+                                c"aclnnPowTensorScalar",
+                            ),
+                            _ => return Err(error("unsupported floating scalar operation")),
+                        };
+                        let plan: Plan = self.session.ops.get(plan_name)?;
+                        let run = self.session.ops.get(run_name)?;
+                        self.session.execute(
+                            "native floating scalar operation",
+                            run,
+                            |size, executor| {
+                                plan(handle(0), value.handle.as_ptr(), out, size, executor)
+                            },
+                        )
+                    }
+                }
+                Operation::Unary(op) => {
+                    let (plan_name, run_name) = unary_symbols(op);
+                    let plan: UnaryPlan = self.session.ops.get(plan_name)?;
+                    let run = self.session.ops.get(run_name)?;
+                    self.session.execute(
+                        "native floating unary operation",
+                        run,
+                        |size, executor| plan(handle(0), out, size, executor),
+                    )
+                }
+                Operation::Clamp(mut min, mut max) => {
+                    type Plan = unsafe extern "C" fn(
+                        *const AclTensor,
+                        *const AclScalar,
+                        *const AclScalar,
+                        *mut AclTensor,
+                        *mut u64,
+                        *mut *mut AclOpExecutor,
+                    ) -> i32;
+                    let min = self.session.scalar(&mut min)?;
+                    let max = self.session.scalar(&mut max)?;
+                    let plan: Plan = self.session.ops.get(c"aclnnClampGetWorkspaceSize")?;
+                    let run = self.session.ops.get(c"aclnnClamp")?;
+                    self.session.execute("aclnnClamp", run, |size, executor| {
+                        plan(
+                            handle(0),
+                            min.handle.as_ptr(),
+                            max.handle.as_ptr(),
+                            out,
+                            size,
+                            executor,
+                        )
+                    })
+                }
+                Operation::Softmax { dim, log } => {
+                    type Plan = unsafe extern "C" fn(
+                        *const AclTensor,
+                        i64,
+                        *mut AclTensor,
+                        *mut u64,
+                        *mut *mut AclOpExecutor,
+                    ) -> i32;
+                    let (plan_name, run_name) = if log {
+                        (c"aclnnLogSoftmaxGetWorkspaceSize", c"aclnnLogSoftmax")
+                    } else {
+                        (c"aclnnSoftmaxGetWorkspaceSize", c"aclnnSoftmax")
+                    };
+                    let plan: Plan = self.session.ops.get(plan_name)?;
+                    let run = self.session.ops.get(run_name)?;
+                    self.session
+                        .execute("native softmax/log-softmax", run, |size, executor| {
+                            plan(handle(0), dim as i64, out, size, executor)
+                        })
+                }
+                Operation::ReluBackward => {
+                    type Plan = unsafe extern "C" fn(
+                        *const AclTensor,
+                        *const AclTensor,
+                        *const AclScalar,
+                        *mut AclTensor,
+                        *mut u64,
+                        *mut *mut AclOpExecutor,
+                    ) -> i32;
+                    let threshold = self.session.scalar(&mut ScalarValue::F64(0.))?;
+                    let plan: Plan = self
+                        .session
+                        .ops
+                        .get(c"aclnnThresholdBackwardGetWorkspaceSize")?;
+                    let run = self.session.ops.get(c"aclnnThresholdBackward")?;
+                    self.session
+                        .execute("aclnnThresholdBackward(ReLU)", run, |size, executor| {
+                            plan(
+                                handle(1),
+                                handle(0),
+                                threshold.handle.as_ptr(),
+                                out,
+                                size,
+                                executor,
+                            )
+                        })
+                }
                 Operation::Not => {
                     let plan: UnaryPlan =
                         self.session.ops.get(c"aclnnLogicalNotGetWorkspaceSize")?;
@@ -856,7 +1137,7 @@ impl State {
                     })
                 }
                 Operation::Reduce { dim, op } => match op {
-                    TensorReduceOp::Sum => {
+                    TensorReduceOp::Sum | TensorReduceOp::Mean => {
                         type Plan = unsafe extern "C" fn(
                             *const AclTensor,
                             *const AclIntArray,
@@ -867,10 +1148,15 @@ impl State {
                             *mut *mut AclOpExecutor,
                         ) -> i32;
                         let dims = self.session.int_array(&[dim as i64])?;
-                        let plan: Plan = self.session.ops.get(c"aclnnReduceSumGetWorkspaceSize")?;
-                        let run = self.session.ops.get(c"aclnnReduceSum")?;
+                        let (plan_name, run_name) = if op == TensorReduceOp::Sum {
+                            (c"aclnnReduceSumGetWorkspaceSize", c"aclnnReduceSum")
+                        } else {
+                            (c"aclnnMeanGetWorkspaceSize", c"aclnnMean")
+                        };
+                        let plan: Plan = self.session.ops.get(plan_name)?;
+                        let run = self.session.ops.get(run_name)?;
                         self.session
-                            .execute("aclnnReduceSum", run, |size, executor| {
+                            .execute("native sum/mean", run, |size, executor| {
                                 plan(
                                     handle(0),
                                     dims.handle.as_ptr(),
@@ -1143,6 +1429,73 @@ fn ranges(addresses: &[usize], layouts: &[TensorLayout]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn half_arithmetic_activation_and_reduction_keep_dtypes_and_shapes() {
+        for dtype in [CannDType::F16, CannDType::BF16] {
+            let input = TensorLayout::contiguous(&[2, 5], dtype).unwrap();
+            let scalar = ScalarValue::F64(1. / 4097.);
+            for op in [
+                TensorBinaryOp::Add,
+                TensorBinaryOp::Sub,
+                TensorBinaryOp::Mul,
+                TensorBinaryOp::Div,
+                TensorBinaryOp::Pow,
+            ] {
+                assert_eq!(
+                    output_layout(
+                        &Operation::ScalarBinary(op, scalar.clone()),
+                        &[input.clone()]
+                    )
+                    .unwrap(),
+                    input
+                );
+                let rhs = TensorLayout::contiguous(&[1, 5], dtype).unwrap();
+                assert_eq!(
+                    output_layout(&Operation::Binary(op), &[input.clone(), rhs]).unwrap(),
+                    input
+                );
+            }
+            for op in [
+                Operation::Unary(TensorUnaryOp::Sqrt),
+                Operation::Softmax { dim: 1, log: true },
+                Operation::Clamp(ScalarValue::F64(0.), ScalarValue::F64(1.)),
+            ] {
+                assert_eq!(output_layout(&op, &[input.clone()]).unwrap(), input);
+            }
+            let mean = output_layout(
+                &Operation::Reduce {
+                    dim: 1,
+                    op: TensorReduceOp::Mean,
+                },
+                &[input.clone()],
+            )
+            .unwrap();
+            assert_eq!(mean.shape(), &[2, 1]);
+            assert_eq!(mean.dtype(), dtype);
+            assert_eq!(
+                output_layout(&Operation::ReluBackward, &[input.clone(), input.clone()]).unwrap(),
+                input
+            );
+        }
+        let int = TensorLayout::contiguous(&[2, 5], CannDType::I64).unwrap();
+        assert!(
+            output_layout(
+                &Operation::Binary(TensorBinaryOp::Div),
+                &[int.clone(), int.clone()]
+            )
+            .is_err()
+        );
+        assert!(
+            output_layout(
+                &Operation::Reduce {
+                    dim: 1,
+                    op: TensorReduceOp::Mean
+                },
+                &[int]
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn native_random_contracts_use_floating_storage_and_aligned_stream_offsets() {
         let target = TensorLayout::contiguous(&[2, 3], CannDType::BF16).unwrap();

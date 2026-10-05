@@ -3,6 +3,7 @@ use crate::{
     Ascend,
     runtime::{
         AscendRuntime, TensorBinaryOp, TensorBuffer, TensorRandomDistribution, TensorReduceOp,
+        TensorUnaryOp,
     },
 };
 use ruda_core::tensor::{
@@ -231,6 +232,36 @@ fn reduce_all(value: Primitive, op: TensorReduceOp) -> Primitive {
     let elements = value.meta.shape().num_elements();
     reduce(reshape(value, Shape::new([elements])), 0, op)
 }
+fn half(value: &Primitive) -> bool {
+    matches!(value.dtype, DType::F16 | DType::BF16)
+}
+fn unary(value: Primitive, op: TensorUnaryOp) -> Primitive {
+    let out = AscendRuntime::tensor_unary(&value.client, buffer(value.clone()), op)
+        .expect("native Ascend floating unary operation failed");
+    wrap(&value, out)
+}
+macro_rules! floating_binary {
+    ($($method:ident, $scalar_method:ident => $op:ident;)*) => { $(
+        fn $method(a: Primitive, b: Primitive) -> Primitive {
+            if half(&a) || half(&b) { binary(a, b, TensorBinaryOp::$op) }
+            else { <Ascend as FloatTensorOps<Ascend>>::$method(a, b) }
+        }
+        fn $scalar_method(value: Primitive, other: Scalar) -> Primitive {
+            if !half(&value) { return <Ascend as FloatTensorOps<Ascend>>::$scalar_method(value, other); }
+            let out = AscendRuntime::tensor_scalar(&value.client, buffer(value.clone()), scalar(other), TensorBinaryOp::$op)
+                .expect("native Ascend floating scalar operation failed");
+            wrap(&value, out)
+        }
+    )* };
+}
+macro_rules! floating_unary {
+    ($($method:ident => $op:ident;)*) => { $(
+        fn $method(value: Primitive) -> Primitive {
+            if half(&value) { unary(value, TensorUnaryOp::$op) }
+            else { <Ascend as FloatTensorOps<Ascend>>::$method(value) }
+        }
+    )* };
+}
 fn indexed(value: Primitive, indices: Primitive, dim: usize, select: bool) -> Primitive {
     same_device(&value, &indices);
     let dispatch = if select {
@@ -356,6 +387,26 @@ fn piecewise(value: Primitive, op: crate::runtime::PiecewiseActivation) -> Primi
 }
 
 impl FloatTensorOps<Self> for RudaAscend {
+    floating_binary! {
+        float_add, float_add_scalar => Add;
+        float_sub, float_sub_scalar => Sub;
+        float_mul, float_mul_scalar => Mul;
+        float_div, float_div_scalar => Div;
+        float_powf, float_powf_scalar_impl => Pow;
+    }
+    floating_unary! {
+        float_neg => Neg;
+        float_abs => Abs;
+        float_exp => Exp;
+        float_log => Log;
+        float_log1p => Log1p;
+        float_sqrt => Sqrt;
+        float_recip => Recip;
+        float_sin => Sin;
+        float_cos => Cos;
+        float_tanh => Tanh;
+        float_erf => Erf;
+    }
     fn float_random(
         shape: Shape,
         distribution: Distribution,
@@ -394,37 +445,18 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_device(tensor: &FloatTensor<Self>) -> Device<Self>;
         fn float_to_device(tensor: FloatTensor<Self>, device: &Device<Self>) -> FloatTensor<Self>;
         fn float_empty(shape: Shape, device: &Device<Self>, dtype: FloatDType) -> FloatTensor<Self>;
-        fn float_add(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_add_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self>;
-        fn float_sub(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_sub_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self>;
-        fn float_mul(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_mul_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self>;
-        fn float_div(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_div_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self>;
         fn float_remainder(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_remainder_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self>;
         fn float_cross(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
-        fn float_recip(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_swap_dims(tensor: FloatTensor<Self>, dim1: usize, dim2: usize) -> FloatTensor<Self>;
         fn float_permute(tensor: FloatTensor<Self>, axes: &[usize]) -> FloatTensor<Self>;
         fn float_cumsum(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cumprod(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cummin(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_cummax(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
-        fn float_exp(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_log(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_log1p(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_powf(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_powf_scalar_impl(tensor: FloatTensor<Self>, value: Scalar) -> FloatTensor<Self>;
-        fn float_sqrt(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_abs(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_cos(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_sin(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_tan(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_cosh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_sinh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_tanh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_acos(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_acosh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_asin(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
@@ -436,7 +468,6 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_floor(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_ceil(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_trunc(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_erf(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_argmax(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> IntTensor<Self>;
         fn float_argtopk( tensor: FloatTensor<Self>, dim: usize, k: usize, out_dtype: IntDType, ) -> IntTensor<Self>;
         fn float_argmin(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> IntTensor<Self>;
@@ -497,14 +528,17 @@ impl FloatTensorOps<Self> for RudaAscend {
         );
         let a = contiguous(a);
         let b = contiguous(b);
-        let out = AscendRuntime::matmul_fp32(&a.client, buffer(a.clone()), buffer(b))
-            .expect("native FP32 matmul failed");
+        let out = AscendRuntime::tensor_matmul(&a.client, buffer(a.clone()), buffer(b))
+            .expect("native floating matmul failed");
         wrap(&a, out)
     }
     fn float_cast(value: Primitive, dtype: FloatDType) -> Primitive {
         cast(value, dtype.into())
     }
     fn float_sum(value: Primitive) -> Primitive {
+        if half(&value) {
+            return reduce_all(value, TensorReduceOp::Sum);
+        }
         let elements = value.meta.shape().num_elements();
         if elements == 0 {
             return Self::float_zeros(Shape::new([1]), &value.device, value.dtype.into());
@@ -513,6 +547,9 @@ impl FloatTensorOps<Self> for RudaAscend {
         axis_op(value, 0, 0)
     }
     fn float_sum_dim(value: Primitive, dim: usize) -> Primitive {
+        if half(&value) {
+            return reduce(value, dim, TensorReduceOp::Sum);
+        }
         assert!(dim < value.meta.shape().len(), "axis out of bounds");
         if value.meta.shape()[dim] == 0 {
             let mut shape = value.meta.shape().to_vec();
@@ -522,12 +559,28 @@ impl FloatTensorOps<Self> for RudaAscend {
         axis_op(value, dim, 0)
     }
     fn float_mean_dim(value: Primitive, dim: usize) -> Primitive {
+        if half(&value) {
+            return reduce(value, dim, TensorReduceOp::Mean);
+        }
         axis_op(value, dim, 1)
     }
+    fn float_mean(value: Primitive) -> Primitive {
+        if half(&value) {
+            return reduce_all(value, TensorReduceOp::Mean);
+        }
+        let elements = value.meta.shape().num_elements() as f32;
+        Self::float_div_scalar(Self::float_sum(value), elements.into())
+    }
     fn float_max_dim(value: Primitive, dim: usize) -> Primitive {
+        if half(&value) {
+            return reduce(value, dim, TensorReduceOp::Max);
+        }
         axis_op(value, dim, 2)
     }
     fn float_max(value: Primitive) -> Primitive {
+        if half(&value) {
+            return reduce_all(value, TensorReduceOp::Max);
+        }
         let elements = value.meta.shape().num_elements();
         axis_op(reshape(value, Shape::new([elements])), 0, 2)
     }
@@ -544,6 +597,16 @@ impl FloatTensorOps<Self> for RudaAscend {
         reduce(value, dim, TensorReduceOp::Prod)
     }
     fn float_clamp(value: Primitive, min: Scalar, max: Scalar) -> Primitive {
+        if half(&value) {
+            let out = AscendRuntime::tensor_clamp(
+                &value.client,
+                buffer(value.clone()),
+                scalar(min),
+                scalar(max),
+            )
+            .expect("native floating clamp failed");
+            return wrap(&value, out);
+        }
         piecewise(
             value,
             crate::runtime::PiecewiseActivation::Clamp {
@@ -559,6 +622,14 @@ impl FloatTensorOps<Self> for RudaAscend {
         Self::float_clamp(value, f32::NEG_INFINITY.into(), max)
     }
     fn float_repeat_dim(value: Primitive, dim: usize, times: usize) -> Primitive {
+        if half(&value) {
+            return ruda_tensor::ops::repeat_with_slice_assign::<Self, ruda_tensor::tensor::Float>(
+                ruda_tensor::TensorPrimitive::Float(value),
+                dim,
+                times,
+            )
+            .tensor();
+        }
         Ascend::float_repeat_dim(value, dim, times)
     }
 }
@@ -932,12 +1003,27 @@ impl ModuleOps<Self> for RudaAscend {
 impl TransactionOps<Self> for RudaAscend {}
 impl ActivationOps<Self> for RudaAscend {
     fn softmax(value: Primitive, dim: usize) -> Primitive {
+        if half(&value) {
+            let out =
+                AscendRuntime::tensor_softmax(&value.client, buffer(value.clone()), dim, false)
+                    .expect("native half softmax failed");
+            return wrap(&value, out);
+        }
         axis_op(value, dim, 3)
     }
     fn log_softmax(value: Primitive, dim: usize) -> Primitive {
+        if half(&value) {
+            let out =
+                AscendRuntime::tensor_softmax(&value.client, buffer(value.clone()), dim, true)
+                    .expect("native half log-softmax failed");
+            return wrap(&value, out);
+        }
         axis_op(value, dim, 4)
     }
     fn relu(value: Primitive) -> Primitive {
+        if half(&value) {
+            return unary(value, TensorUnaryOp::Relu);
+        }
         piecewise(value, crate::runtime::PiecewiseActivation::Relu)
     }
     fn relu_backward(value: Primitive, grad: Primitive) -> Primitive {
@@ -948,6 +1034,15 @@ impl ActivationOps<Self> for RudaAscend {
         );
         let value = contiguous(value);
         let grad = contiguous(grad);
+        if half(&value) {
+            let out = AscendRuntime::tensor_relu_backward(
+                &value.client,
+                buffer(value.clone()),
+                buffer(grad),
+            )
+            .expect("native half ReLU backward failed");
+            return wrap(&value, out);
+        }
         let out = AscendRuntime::piecewise_activation_backward(
             &value.client,
             buffer(value.clone()),

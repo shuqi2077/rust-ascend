@@ -2560,7 +2560,7 @@ dependencies = [
 [[package]]
 name = "ruCCL"
 version = "0.21.18"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -2579,8 +2579,8 @@ dependencies = [
 
 [[package]]
 name = "ruDNN"
-version = "0.1.19"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+version = "0.1.20"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "bytemuck",
  "derive-new",
@@ -2596,8 +2596,8 @@ dependencies = [
 
 [[package]]
 name = "ruPRIM"
-version = "0.1.19"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+version = "0.1.20"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "half",
  "num-traits",
@@ -2610,8 +2610,8 @@ dependencies = [
 
 [[package]]
 name = "ruRAND"
-version = "0.1.19"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+version = "0.1.20"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "half",
  "num-traits",
@@ -2623,8 +2623,8 @@ dependencies = [
 
 [[package]]
 name = "rublas"
-version = "0.1.19"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+version = "0.1.20"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "bytemuck",
  "half",
@@ -2637,7 +2637,7 @@ dependencies = [
 [[package]]
 name = "ruda"
 version = "0.1.8"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "ruda-runtime",
 ]
@@ -2645,7 +2645,7 @@ dependencies = [
 [[package]]
 name = "ruda-autodiff"
 version = "0.21.17"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "derive-new",
  "hashbrown 0.16.1",
@@ -2662,7 +2662,7 @@ dependencies = [
 [[package]]
 name = "ruda-communication"
 version = "0.21.17"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "axum",
  "bytes",
@@ -2688,7 +2688,7 @@ dependencies = [
 [[package]]
 name = "ruda-compiler"
 version = "0.1.5"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "bytemuck",
  "derive-new",
@@ -2707,7 +2707,7 @@ dependencies = [
 [[package]]
 name = "ruda-core"
 version = "0.1.4"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "ahash",
  "backtrace",
@@ -2756,8 +2756,8 @@ dependencies = [
 
 [[package]]
 name = "ruda-driver-cuda"
-version = "0.1.19"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+version = "0.1.20"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "bytemuck",
  "cudarc",
@@ -2773,8 +2773,8 @@ dependencies = [
 
 [[package]]
 name = "ruda-driver-wgpu"
-version = "0.1.19"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+version = "0.1.20"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "async-channel",
  "bytemuck",
@@ -2796,8 +2796,8 @@ dependencies = [
 
 [[package]]
 name = "ruda-fft"
-version = "0.1.19"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+version = "0.1.20"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "ruPRIM",
  "ruda-core",
@@ -2807,7 +2807,7 @@ dependencies = [
 [[package]]
 name = "ruda-fusion"
 version = "0.21.18"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "derive-new",
  "hashbrown 0.16.1",
@@ -2827,7 +2827,7 @@ dependencies = [
 [[package]]
 name = "ruda-io"
 version = "0.21.3"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "indicatif",
  "reqwest",
@@ -2837,7 +2837,7 @@ dependencies = [
 [[package]]
 name = "ruda-ir-macros"
 version = "0.1.2"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -2848,7 +2848,7 @@ dependencies = [
 [[package]]
 name = "ruda-kernel"
 version = "0.1.7"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "bitflags",
  "bytemuck",
@@ -2874,7 +2874,7 @@ dependencies = [
 [[package]]
 name = "ruda-kernel-macros"
 version = "0.1.5"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "darling 0.23.0",
  "derive-new",
@@ -2890,8 +2890,8 @@ dependencies = [
 
 [[package]]
 name = "ruda-llm"
-version = "0.1.19"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+version = "0.1.20"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "chacha20",
  "half",
@@ -2914,8 +2914,8 @@ dependencies = [
 
 [[package]]
 name = "ruda-model"
-version = "0.21.17"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+version = "0.21.18"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "ahash",
  "bincode",
@@ -2945,7 +2945,7 @@ dependencies = [
 [[package]]
 name = "ruda-model-codegen"
 version = "0.21.0"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "derive-new",
  "proc-macro2",
@@ -2956,7 +2956,7 @@ dependencies = [
 [[package]]
 name = "ruda-model-macros"
 version = "0.21.0"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "ruda-model-codegen",
  "syn 2.0.119",
@@ -2965,7 +2965,7 @@ dependencies = [
 [[package]]
 name = "ruda-nn"
 version = "0.21.20"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "num-traits",
  "ruda-model",
@@ -2973,8 +2973,8 @@ dependencies = [
 
 [[package]]
 name = "ruda-optim"
-version = "0.21.18"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+version = "0.21.19"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "derive-new",
  "hashbrown 0.16.1",
@@ -2991,7 +2991,7 @@ dependencies = [
 [[package]]
 name = "ruda-runtime"
 version = "0.1.1"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "async-channel",
  "bytemuck",
@@ -3016,8 +3016,8 @@ dependencies = [
 
 [[package]]
 name = "ruda-store"
-version = "0.21.17"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+version = "0.21.18"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "byteorder",
  "bytes",
@@ -3034,7 +3034,7 @@ dependencies = [
 [[package]]
 name = "ruda-tensor"
 version = "0.21.18"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "bytemuck",
  "colored",
@@ -3059,7 +3059,7 @@ dependencies = [
 [[package]]
 name = "ruda-tensor-config"
 version = "0.21.2"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "ruda-core",
  "serde",
@@ -3069,7 +3069,7 @@ dependencies = [
 [[package]]
 name = "ruda-tensor-device"
 version = "0.21.18"
-source = "git+https://github.com/shuqi2077/RUDA.git?rev=73f7a991db55570d32bb143e590b021c30dd732b#73f7a991db55570d32bb143e590b021c30dd732b"
+source = "git+https://github.com/shuqi2077/RUDA.git?rev=bf7a71f01cad954b2dd98704677b7d62bb3cef17#bf7a71f01cad954b2dd98704677b7d62bb3cef17"
 dependencies = [
  "derive-new",
  "futures-lite",

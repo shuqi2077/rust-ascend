@@ -123,10 +123,10 @@ pub(super) struct State {
     gemm_artifacts: tempfile::TempDir,
 }
 impl State {
-    pub fn matmul_fp32(&mut self, layouts: [crate::tensor::TensorLayout; 3], resources: [AscendResource; 3]) -> Result<()> {
+    pub fn tensor_matmul(&mut self, layouts: [crate::tensor::TensorLayout; 3], resources: [AscendResource; 3]) -> Result<()> {
         if super::generic_matrix::output_layout(&layouts[0], &layouts[1])? != layouts[2]
             || resources.iter().zip(&layouts).any(|(r, l)| r.size != l.byte_len()) {
-            return Err(error("FP32 matmul resource/layout contract mismatch"));
+            return Err(error("floating matmul resource/layout contract mismatch"));
         }
         let addresses = [self.pointer(&resources[0])? as usize, self.pointer(&resources[1])? as usize,
             self.pointer(&resources[2])? as usize];
@@ -152,7 +152,7 @@ impl State {
         unsafe {
             let plan: Plan = self.session.ops.get(c"aclnnMatmulGetWorkspaceSize")?;
             let run = self.session.ops.get(c"aclnnMatmul")?;
-            self.session.execute("aclnnMatmul(FP32 KEEP_DTYPE)", run, |size, executor| {
+            self.session.execute("aclnnMatmul(KEEP_DTYPE)", run, |size, executor| {
                 plan(descriptors[0].handle.as_ptr(), descriptors[1].handle.as_ptr(),
                     descriptors[2].handle.as_ptr(), 0, size, executor)
             })

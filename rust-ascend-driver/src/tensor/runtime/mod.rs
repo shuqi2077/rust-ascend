@@ -66,7 +66,7 @@ use std::{
     time::Duration,
 };
 pub use worker::AscendResource;
-pub use typed::{TensorBinaryOp, TensorRandomDistribution, TensorReduceOp};
+pub use typed::{TensorBinaryOp, TensorRandomDistribution, TensorReduceOp, TensorUnaryOp};
 use worker::Worker;
 
 type Result<T> = std::result::Result<T, CannError>;
@@ -144,6 +144,12 @@ impl AscendRuntime {
     /// FP32 ND matrix multiplication, with CANN KEEP_DTYPE and no BF16/HF32 cast.
     /// Inputs are contiguous rank 2..6; singleton batch axes broadcast.
     pub fn matmul_fp32(client: &ComputeClient<Self>, a: TensorBuffer, b: TensorBuffer) -> Result<TensorBuffer> {
+        if a.dtype != ruda_core::tensor::DType::F32 || b.dtype != ruda_core::tensor::DType::F32 {
+            return Err(error("matmul_fp32 requires FP32 inputs"));
+        }
+        generic_matrix::matmul(client, a, b)
+    }
+    pub fn tensor_matmul(client: &ComputeClient<Self>, a: TensorBuffer, b: TensorBuffer) -> Result<TensorBuffer> {
         generic_matrix::matmul(client, a, b)
     }
     /// Bit-preserving device token selection from contiguous [B,T,H] into [count,H].

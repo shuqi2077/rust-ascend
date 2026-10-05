@@ -2,14 +2,16 @@ use super::{AscendRuntime, ComputeClient, Result, TensorBuffer, WORKER, error, i
 use crate::tensor::{DType, TensorLayout, layout::matmul_shape};
 
 pub(super) fn output_layout(a: &TensorLayout, b: &TensorLayout) -> Result<TensorLayout> {
-    if a.dtype() != DType::F32
-        || b.dtype() != DType::F32
+    if !matches!(a.dtype(), DType::F32 | DType::F16 | DType::BF16)
+        || b.dtype() != a.dtype()
         || !(2..=6).contains(&a.shape().len())
         || !(2..=6).contains(&b.shape().len())
     {
-        return Err(error("generic Ascend matmul requires FP32 rank 2..6"));
+        return Err(error(
+            "generic Ascend matmul requires matching floating dtypes and rank 2..6",
+        ));
     }
-    TensorLayout::contiguous(&matmul_shape(a.shape(), b.shape())?, DType::F32)
+    TensorLayout::contiguous(&matmul_shape(a.shape(), b.shape())?, a.dtype())
 }
 
 pub(super) fn matmul(
@@ -45,7 +47,7 @@ pub(super) fn matmul(
         .get()
         .ok_or_else(|| error("Ascend runtime is not initialized"))?
         .1
-        .call(move |state| state.matmul_fp32(layouts, resources));
+        .call(move |state| state.tensor_matmul(layouts, resources));
     drop(guards);
     result?;
     Ok(out)
@@ -83,5 +85,19 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn half_matrices_preserve_storage_dtype_without_fp32_expansion() {
+        for dtype in [DType::F16, DType::BF16] {
+            let a = TensorLayout::contiguous(&[2, 1, 3, 5], dtype).unwrap();
+            let b = TensorLayout::contiguous(&[1, 4, 5, 7], dtype).unwrap();
+            let output = output_layout(&a, &b).unwrap();
+            assert_eq!(output.shape(), &[2, 4, 3, 7]);
+            assert_eq!(output.dtype(), dtype);
+            assert_eq!(output.byte_len(), 2 * 4 * 3 * 7 * 2);
+            assert!(
+                output_layout(&a, &TensorLayout::contiguous(&[5, 7], DType::F32).unwrap()).is_err()
+            );
+        }
     }
 }
