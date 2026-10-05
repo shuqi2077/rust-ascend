@@ -755,6 +755,7 @@ impl IntTensorOps<Self> for RudaAscend {
         bitwise_and, bitwise_and_scalar => BitwiseAnd;
         bitwise_or, bitwise_or_scalar => BitwiseOr;
         bitwise_xor, bitwise_xor_scalar => BitwiseXor;
+        bitwise_right_shift, bitwise_right_shift_scalar => RightShift;
     }
     fn bitwise_not(value: Primitive) -> Primitive {
         if matches!(value.dtype, DType::I32 | DType::I64) {
@@ -961,8 +962,6 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_expand(tensor: IntTensor<Self>, shape: Shape) -> IntTensor<Self>;
         fn bitwise_left_shift(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
         fn bitwise_left_shift_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
-        fn bitwise_right_shift(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn bitwise_right_shift_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn int_unfold(tensor: IntTensor<Self>, dim: usize, size: usize, step: usize) -> IntTensor<Self>;
     }
 }

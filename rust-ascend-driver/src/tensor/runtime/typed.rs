@@ -31,6 +31,7 @@ pub enum TensorBinaryOp {
     BitwiseAnd,
     BitwiseOr,
     BitwiseXor,
+    RightShift,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,7 +176,10 @@ pub(super) fn layout(value: &TensorBuffer) -> Result<TensorLayout> {
     }
     Ok(layout)
 }
-pub(super) fn allocate(client: &ComputeClient<AscendRuntime>, layout: &TensorLayout) -> TensorBuffer {
+pub(super) fn allocate(
+    client: &ComputeClient<AscendRuntime>,
+    layout: &TensorLayout,
+) -> TensorBuffer {
     TensorBuffer {
         handle: client.empty(layout.byte_len()),
         shape: Shape::from(
@@ -220,7 +224,10 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
             let logical = matches!(op, TensorBinaryOp::And | TensorBinaryOp::Or);
             let bitwise = matches!(
                 op,
-                TensorBinaryOp::BitwiseAnd | TensorBinaryOp::BitwiseOr | TensorBinaryOp::BitwiseXor
+                TensorBinaryOp::BitwiseAnd
+                    | TensorBinaryOp::BitwiseOr
+                    | TensorBinaryOp::BitwiseXor
+                    | TensorBinaryOp::RightShift
             );
             let arithmetic = matches!(
                 op,
@@ -233,6 +240,7 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
                     | TensorBinaryOp::BitwiseAnd
                     | TensorBinaryOp::BitwiseOr
                     | TensorBinaryOp::BitwiseXor
+                    | TensorBinaryOp::RightShift
             );
             if (logical && kind != CannDType::Bool)
                 || (arithmetic && !numeric(kind))
@@ -1014,6 +1022,7 @@ fn binary_symbols(op: TensorBinaryOp) -> (&'static CStr, &'static CStr) {
             c"aclnnBitwiseXorTensorGetWorkspaceSize",
             c"aclnnBitwiseXorTensor",
         ),
+        TensorBinaryOp::RightShift => (c"aclnnRightShiftGetWorkspaceSize", c"aclnnRightShift"),
         TensorBinaryOp::Pow => (
             c"aclnnPowTensorTensorGetWorkspaceSize",
             c"aclnnPowTensorTensor",
@@ -1702,6 +1711,7 @@ mod tests {
                 TensorBinaryOp::BitwiseAnd,
                 TensorBinaryOp::BitwiseOr,
                 TensorBinaryOp::BitwiseXor,
+                TensorBinaryOp::RightShift,
             ] {
                 let output =
                     output_layout(&Operation::Binary(op), &[input.clone(), mask.clone()]).unwrap();

@@ -40,6 +40,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let transposed = [
             values[0], values[3], values[1], values[4], values[2], values[5],
         ];
+        let width = if dtype == DType::I32 { 32 } else { 64 };
+        let shifts = [0_i64, width - 1];
+        let shift = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(shifts.to_vec(), [1, 2]),
+            TensorCreationOptions::<B>::new(device.clone()).with_dtype(dtype),
+        );
         let results = [
             (
                 input.clone().bitwise_and(mask.clone()),
@@ -81,6 +87,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 input.clone().bitwise_not(),
                 transposed.iter().map(|&x| !x).collect(),
             ),
+            (
+                input.clone().bitwise_right_shift(shift),
+                transposed
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &x)| x >> shifts[i % 2])
+                    .collect(),
+            ),
+            (
+                input.clone().bitwise_right_shift_scalar(1),
+                transposed.iter().map(|&x| x >> 1).collect(),
+            ),
+            (
+                input.clone().bitwise_right_shift_scalar((width - 1) as i32),
+                transposed.iter().map(|&x| x >> (width - 1)).collect(),
+            ),
             (input.abs(), transposed.iter().map(|&x| x.abs()).collect()),
         ];
         for (output, expected) in results {
@@ -93,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!(
-        "native I32/I64 bitwise and/or/xor/not and abs: exact high bits, signed values, scalars and strided broadcast passed"
+        "native I32/I64 bitwise and/or/xor/not, arithmetic right shift and abs: exact high bits, signed values, scalars and strided broadcast passed"
     );
     Ok(())
 }
