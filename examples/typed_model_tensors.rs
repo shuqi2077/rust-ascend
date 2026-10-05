@@ -62,6 +62,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into_data()
         .to_vec::<f32>()?;
     assert_eq!(actual, vec![2., 4., 0., 8., 10., 0.]);
+    for dtype in [DType::F16, DType::BF16] {
+        let input = Tensor::<B, 1>::from_data([1.25, -1.25, 2., 0.], &device).cast(dtype);
+        for (output, expected) in [
+            (input.clone().floor(), vec![1., -2., 2., 0.]),
+            (input.clone().ceil(), vec![2., -1., 2., 0.]),
+            (input.trunc(), vec![1., -1., 2., 0.]),
+        ] {
+            assert_eq!(output.dtype(), dtype);
+            assert_eq!(
+                output.cast(DType::F32).into_data().to_vec::<f32>()?,
+                expected
+            );
+        }
+    }
     println!("native integer positions, strided Bool masks and masked autodiff passed");
     Ok(())
 }

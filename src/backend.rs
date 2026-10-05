@@ -417,6 +417,9 @@ impl FloatTensorOps<Self> for RudaAscend {
         float_cos => Cos;
         float_tanh => Tanh;
         float_erf => Erf;
+        float_floor => Floor;
+        float_ceil => Ceil;
+        float_trunc => Trunc;
     }
     fn float_argmax(value: Primitive, dim: usize, out_dtype: IntDType) -> Primitive {
         if half(&value) {
@@ -489,9 +492,6 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_atanh(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_atan2(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_round(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_floor(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_ceil(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn float_trunc(tensor: FloatTensor<Self>) -> FloatTensor<Self>;
         fn float_argtopk( tensor: FloatTensor<Self>, dim: usize, k: usize, out_dtype: IntDType, ) -> IntTensor<Self>;
         fn float_expand(tensor: FloatTensor<Self>, shape: Shape) -> FloatTensor<Self>;
         fn float_unfold(tensor: FloatTensor<Self>, dim: usize, size: usize, step: usize) -> FloatTensor<Self>;

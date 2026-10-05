@@ -44,6 +44,9 @@ pub enum TensorUnaryOp {
     Tanh,
     Erf,
     Relu,
+    Floor,
+    Ceil,
+    Trunc,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -929,6 +932,9 @@ fn unary_symbols(op: TensorUnaryOp) -> (&'static CStr, &'static CStr) {
         TensorUnaryOp::Tanh => (c"aclnnTanhGetWorkspaceSize", c"aclnnTanh"),
         TensorUnaryOp::Erf => (c"aclnnErfGetWorkspaceSize", c"aclnnErf"),
         TensorUnaryOp::Relu => (c"aclnnReluGetWorkspaceSize", c"aclnnRelu"),
+        TensorUnaryOp::Floor => (c"aclnnFloorGetWorkspaceSize", c"aclnnFloor"),
+        TensorUnaryOp::Ceil => (c"aclnnCeilGetWorkspaceSize", c"aclnnCeil"),
+        TensorUnaryOp::Trunc => (c"aclnnTruncGetWorkspaceSize", c"aclnnTrunc"),
     }
 }
 impl State {
@@ -1673,6 +1679,9 @@ mod tests {
             }
             for op in [
                 Operation::Unary(TensorUnaryOp::Sqrt),
+                Operation::Unary(TensorUnaryOp::Floor),
+                Operation::Unary(TensorUnaryOp::Ceil),
+                Operation::Unary(TensorUnaryOp::Trunc),
                 Operation::Softmax { dim: 1, log: true },
                 Operation::Clamp(ScalarValue::F64(0.), ScalarValue::F64(1.)),
             ] {
