@@ -312,13 +312,18 @@ pub(super) fn backward(
         "interpolation gradient shape mismatch"
     );
     let dtype = FloatDType::try_from(x.dtype).expect("floating input");
+    let compute = if x.dtype == grad.dtype {
+        dtype
+    } else {
+        FloatDType::F32
+    };
     let count = size[0] * size[1];
-    let grad = RudaAscend::float_cast(grad, FloatDType::F32);
+    let grad = RudaAscend::float_cast(grad, compute);
     let grad = RudaAscend::float_reshape(grad, Shape::new([batch, channels, count]));
     let mut result = RudaAscend::float_zeros(
         Shape::new([batch, channels, height * width]),
         &x.device,
-        FloatDType::F32,
+        compute,
     );
     let n = taps(&options.mode);
     let mut total_weight =
@@ -363,7 +368,7 @@ pub(super) fn backward(
                 let inverse =
                     RudaAscend::float_div(constant(&total_weight, 1.0), total_weight.clone());
                 let inverse =
-                    RudaAscend::float_cast(RudaAscend::float_cast(inverse, dtype), FloatDType::F32);
+                    RudaAscend::float_cast(RudaAscend::float_cast(inverse, dtype), compute);
                 let scaled = RudaAscend::float_mul(grad.clone(), inverse);
                 let nonzero = RudaAscend::bool_not(RudaAscend::float_equal_elem(
                     total_weight.clone(),
@@ -372,12 +377,11 @@ pub(super) fn backward(
                 ));
                 let scaled = RudaAscend::float_mask_where(grad.clone(), nonzero, scaled);
                 let weight = RudaAscend::float_mul(tap.x_weight, tap.y_weight);
-                let weight =
-                    RudaAscend::float_cast(RudaAscend::float_cast(weight, dtype), FloatDType::F32);
+                let weight = RudaAscend::float_cast(RudaAscend::float_cast(weight, dtype), compute);
                 RudaAscend::float_mul(scaled, weight)
             } else {
-                let x_weight = RudaAscend::float_cast(tap.x_weight, FloatDType::F32);
-                let y_weight = RudaAscend::float_cast(tap.y_weight, FloatDType::F32);
+                let x_weight = RudaAscend::float_cast(tap.x_weight, compute);
+                let y_weight = RudaAscend::float_cast(tap.y_weight, compute);
                 if matches!(options.mode, InterpolateMode::Bicubic) {
                     RudaAscend::float_mul(RudaAscend::float_mul(grad.clone(), y_weight), x_weight)
                 } else {
