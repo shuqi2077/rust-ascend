@@ -154,9 +154,13 @@ pub(super) fn emit(p:&Program,a:&Allocation,o:&AscendOptions,math_workspace:usiz
                 else if op==Unary::Tanh {format!("AscendC::Tanh<float, false, ruda_tanh_config>({d}, {x}, math_tmp, aligned);")}
                 else if op==Unary::Sin {format!("AscendC::Sin<float, false, ruda_sin_config>({d}, {x}, math_tmp, aligned);")}
                 else if op==Unary::Cos {format!("AscendC::Cos<float, false, ruda_cos_config>({d}, {x}, math_tmp, aligned);")}
-                else {let fun=match op{Unary::Abs=>"Abs",Unary::Exp=>"Exp",Unary::Log=>"Ln",Unary::Sqrt=>"Sqrt",Unary::Rsqrt=>"Rsqrt",Unary::Recip=>"Reciprocal",Unary::Neg|Unary::Erf|Unary::Tanh|Unary::Sin|Unary::Cos=>unreachable!()};format!("AscendC::{fun}({d}, {x}, aligned);")}
+                else if matches!(op,Unary::Floor|Unary::Ceil|Unary::Trunc|Unary::Round) {
+                    let mode=match op {Unary::Floor=>"CAST_FLOOR",Unary::Ceil=>"CAST_CEIL",Unary::Trunc=>"CAST_TRUNC",Unary::Round=>"CAST_RINT",_=>unreachable!()};
+                    format!("AscendC::Cast({d}, {x}, AscendC::RoundMode::{mode}, aligned);")
+                }
+                else {let fun=match op{Unary::Abs=>"Abs",Unary::Exp=>"Exp",Unary::Log=>"Ln",Unary::Sqrt=>"Sqrt",Unary::Rsqrt=>"Rsqrt",Unary::Recip=>"Reciprocal",Unary::Neg|Unary::Erf|Unary::Tanh|Unary::Sin|Unary::Cos|Unary::Floor|Unary::Ceil|Unary::Trunc|Unary::Round=>unreachable!()};format!("AscendC::{fun}({d}, {x}, aligned);")}
             },
-            Node::Binary(op,x,y)=>{let x=value(p,a,x);let y=value(p,a,y);let fun=match op{Binary::Add=>"Add",Binary::Sub=>"Sub",Binary::Mul=>"Mul",Binary::Div=>"Div",Binary::Max=>"Max"};format!("AscendC::{fun}({d}, {x}, {y}, aligned);")},
+            Node::Binary(op,x,y)=>{let x=value(p,a,x);let y=value(p,a,y);let fun=match op{Binary::Add=>"Add",Binary::Sub=>"Sub",Binary::Mul=>"Mul",Binary::Div=>"Div",Binary::Max=>"Max",Binary::Min=>"Min"};format!("AscendC::{fun}({d}, {x}, {y}, aligned);")},
         };
         line(&mut s,format!("    // common IR value {n}"));line(&mut s,format!("    {code}"));
         line(&mut s,"    AscendC::PipeBarrier<PIPE_V>();");

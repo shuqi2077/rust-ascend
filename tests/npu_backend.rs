@@ -3,8 +3,11 @@ use rust_ascend::{
     runtime::{AscendRuntime, RuntimeOptions},
     tensor::{
         Backend, DType, FloatDType, TensorData,
-        api::{Tensor, module, quantization::QuantizationParameters},
-        ops::{FloatTensorOps, InterpolateMode, InterpolateOptions, ModuleOps},
+        api::{Bool, Int, Tensor, module, quantization::QuantizationParameters},
+        ops::{
+            BoolTensorOps, DeformConvOptions, FloatTensorOps, IntTensorOps, InterpolateMode,
+            InterpolateOptions, ModuleOps,
+        },
         quantization::{QuantParam, QuantScheme, QuantStore, QuantValue},
     },
 };
@@ -58,6 +61,141 @@ fn ascend_backend_ops_on_950dt() -> Result<(), Box<dyn std::error::Error>> {
             .into_data()
             .as_slice::<f32>()?,
         &[12., 16., 24., 28.],
+    );
+
+    let offset = Tensor::<AD, 4>::zeros([1, 2, 3, 3], (&device, DType::F32)).require_grad();
+    let weight = Tensor::<AD, 4>::full([1, 1, 1, 1], 2.0, (&device, DType::F32)).require_grad();
+    let mask = Tensor::<AD, 4>::ones([1, 1, 3, 3], (&device, DType::F32)).require_grad();
+    let bias = Tensor::<AD, 1>::ones([1], (&device, DType::F32)).require_grad();
+    let deformed = module::deform_conv2d(
+        x.clone(),
+        offset.clone(),
+        weight.clone(),
+        Some(mask.clone()),
+        Some(bias.clone()),
+        DeformConvOptions::new([1; 2], [0; 2], [1; 2], 1, 1),
+    );
+    close(
+        deformed.clone().into_data().as_slice::<f32>()?,
+        &[3., 5., 7., 9., 11., 13., 15., 17., 19.],
+    );
+    let gradients = deformed.sum().backward();
+    close(
+        x.grad(&gradients)
+            .ok_or("missing deform input gradient")?
+            .into_data()
+            .as_slice::<f32>()?,
+        &[2.; 9],
+    );
+    close(
+        weight
+            .grad(&gradients)
+            .ok_or("missing deform weight gradient")?
+            .into_data()
+            .as_slice::<f32>()?,
+        &[45.],
+    );
+    close(
+        bias.grad(&gradients)
+            .ok_or("missing deform bias gradient")?
+            .into_data()
+            .as_slice::<f32>()?,
+        &[9.],
+    );
+    close(
+        mask.grad(&gradients)
+            .ok_or("missing deform mask gradient")?
+            .into_data()
+            .as_slice::<f32>()?,
+        &[2., 4., 6., 8., 10., 12., 14., 16., 18.],
+    );
+    close(
+        offset
+            .grad(&gradients)
+            .ok_or("missing deform offset gradient")?
+            .into_data()
+            .as_slice::<f32>()?,
+        &[
+            6., 6., 6., 6., 6., 6., -14., -16., -18., 2., 2., -6., 2., 2., -12., 2., 2., -18.,
+        ],
+    );
+    let fractional = module::deform_conv2d(
+        Tensor::<RudaAscend, 4>::from_data(
+            TensorData::new(vec![1., 2., 3., 4.], [1, 1, 2, 2]),
+            (&device, DType::F32),
+        ),
+        Tensor::<RudaAscend, 4>::full([1, 2, 2, 2], 0.5, (&device, DType::F32)),
+        Tensor::<RudaAscend, 4>::ones([1, 1, 1, 1], (&device, DType::F32)),
+        None,
+        None,
+        DeformConvOptions::new([1; 2], [0; 2], [1; 2], 1, 1),
+    );
+    close(
+        fractional.into_data().as_slice::<f32>()?,
+        &[2.5, 1.5, 1.75, 1.0],
+    );
+
+    let integer = |values: Vec<i64>, shape: Vec<usize>| {
+        RudaAscend::int_from_data(TensorData::new(values, shape), &device)
+    };
+    let read_int = |value| Tensor::<RudaAscend, 2, Int>::from_primitive(value).into_data();
+    let product = RudaAscend::int_matmul(
+        integer(vec![(1i64 << 40) + 3, 1], vec![1, 2]),
+        integer(vec![2, 1], vec![2, 1]),
+    );
+    assert_eq!(read_int(product).as_slice::<i64>()?, &[(1i64 << 41) + 7]);
+    let mean = RudaAscend::int_mean_dim(
+        integer(vec![-5, 2, (1i64 << 40) + 1, (1i64 << 40) + 3], vec![2, 2]),
+        1,
+    );
+    assert_eq!(read_int(mean).as_slice::<i64>()?, &[-1, (1i64 << 40) + 2]);
+    let value = integer(vec![2, 3, 0, 5], vec![2, 2]);
+    assert_eq!(
+        read_int(RudaAscend::int_cumprod(value.clone(), 1)).as_slice::<i64>()?,
+        &[2, 6, 0, 0]
+    );
+    assert_eq!(
+        read_int(RudaAscend::int_cumprod(value, 0)).as_slice::<i64>()?,
+        &[2, 3, 0, 15]
+    );
+    let value = integer(
+        vec![(1i64 << 40) + 3, (1i64 << 40) + 1, (1i64 << 40) + 5],
+        vec![1, 3],
+    );
+    assert_eq!(
+        read_int(RudaAscend::int_cummin(value.clone(), 1)).as_slice::<i64>()?,
+        &[(1i64 << 40) + 3, (1i64 << 40) + 1, (1i64 << 40) + 1]
+    );
+    assert_eq!(
+        read_int(RudaAscend::int_cummax(value, 1)).as_slice::<i64>()?,
+        &[(1i64 << 40) + 3, (1i64 << 40) + 3, (1i64 << 40) + 5]
+    );
+    let boolean = |values: Vec<bool>, shape: Vec<usize>| {
+        RudaAscend::bool_from_data(TensorData::new(values, shape), &device)
+    };
+    let read_bool = |value| Tensor::<RudaAscend, 2, Bool>::from_primitive(value).into_data();
+    let value = boolean(vec![true, false, false], vec![1, 3]);
+    let indices = integer(vec![1, 1, 2], vec![1, 3]);
+    let source = boolean(vec![false, true, false], vec![1, 3]);
+    assert_eq!(
+        read_bool(RudaAscend::bool_scatter_or(
+            1,
+            value.clone(),
+            indices,
+            source.clone()
+        ))
+        .as_slice::<bool>()?,
+        &[true, true, false]
+    );
+    assert_eq!(
+        read_bool(RudaAscend::bool_select_or(
+            value,
+            1,
+            integer(vec![1, 1, 2], vec![3]),
+            source
+        ))
+        .as_slice::<bool>()?,
+        &[true, true, false]
     );
 
     let input = Tensor::<RudaAscend, 4>::from_data(

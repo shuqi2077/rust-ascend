@@ -6,9 +6,9 @@ use std::rc::Rc;
 use super::index::Index;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip, Erf, Tanh, Sin, Cos }
+pub(super) enum Unary { Neg, Abs, Exp, Log, Sqrt, Rsqrt, Recip, Erf, Tanh, Sin, Cos, Floor, Ceil, Trunc, Round }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Binary { Add, Sub, Mul, Div, Max }
+pub(super) enum Binary { Add, Sub, Mul, Div, Max, Min }
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Node { Input(usize), UniformInput(usize,u64), Constant(u32), IndexFloat(usize), IndexSelect(usize,usize,usize), Compare(IndexCompare,usize,usize), DataSelect(usize,usize,usize), Unary(Unary, usize), Binary(Binary, usize, usize) }
 impl Node { pub fn inputs(&self) -> Vec<usize> { match self {
@@ -292,7 +292,7 @@ impl Lower {
                     let value=match index.as_ref(){Index::Lane=>Value::Lane,Index::Constant(n) if *n==self.elements=>Value::Length,Index::Constant(n)=>Value::Index(*n),_=>Value::Mapped(index)};
                     return self.assign(dst,value);
                 }
-                let binary=match a { Arithmetic::Add(op)=>Some((Binary::Add,op)),Arithmetic::Sub(op)=>Some((Binary::Sub,op)),Arithmetic::Mul(op)=>Some((Binary::Mul,op)),Arithmetic::Div(op)=>Some((Binary::Div,op)),Arithmetic::Max(op)=>Some((Binary::Max,op)),_=>None };
+                let binary=match a { Arithmetic::Add(op)=>Some((Binary::Add,op)),Arithmetic::Sub(op)=>Some((Binary::Sub,op)),Arithmetic::Mul(op)=>Some((Binary::Mul,op)),Arithmetic::Div(op)=>Some((Binary::Div,op)),Arithmetic::Max(op)=>Some((Binary::Max,op)),Arithmetic::Min(op)=>Some((Binary::Min,op)),_=>None };
                 if let Some((kind,op))=binary {let lhs=self.vector(op.lhs)?;let rhs=self.vector(op.rhs)?;return self.add(dst,Node::Binary(kind,lhs,rhs));}
                 if let Arithmetic::Powi(op)=a {
                     let (negative,mut exponent)=match op.rhs.kind {
@@ -313,7 +313,7 @@ impl Lower {
                     let result=match result {Some(node)=>node,None=>self.vector(Variable::constant(ConstantValue::Float(1.),f32_type()))?};
                     return self.assign(dst,Value::Vector(result));
                 }
-                let (kind,op)=match a { Arithmetic::Neg(op)=>(Unary::Neg,op),Arithmetic::Abs(op)=>(Unary::Abs,op),Arithmetic::Exp(op)=>(Unary::Exp,op),Arithmetic::Log(op)=>(Unary::Log,op),Arithmetic::Sqrt(op)=>(Unary::Sqrt,op),Arithmetic::InverseSqrt(op)=>(Unary::Rsqrt,op),Arithmetic::Recip(op)=>(Unary::Recip,op),Arithmetic::Erf(op)=>(Unary::Erf,op),Arithmetic::Tanh(op)=>(Unary::Tanh,op),Arithmetic::Sin(op)=>(Unary::Sin,op),Arithmetic::Cos(op)=>(Unary::Cos,op),_=>return Err(unsupported(format!("arithmetic {a:?}"))) };
+                let (kind,op)=match a { Arithmetic::Neg(op)=>(Unary::Neg,op),Arithmetic::Abs(op)=>(Unary::Abs,op),Arithmetic::Exp(op)=>(Unary::Exp,op),Arithmetic::Log(op)=>(Unary::Log,op),Arithmetic::Sqrt(op)=>(Unary::Sqrt,op),Arithmetic::InverseSqrt(op)=>(Unary::Rsqrt,op),Arithmetic::Recip(op)=>(Unary::Recip,op),Arithmetic::Erf(op)=>(Unary::Erf,op),Arithmetic::Tanh(op)=>(Unary::Tanh,op),Arithmetic::Sin(op)=>(Unary::Sin,op),Arithmetic::Cos(op)=>(Unary::Cos,op),Arithmetic::Floor(op)=>(Unary::Floor,op),Arithmetic::Ceil(op)=>(Unary::Ceil,op),Arithmetic::Trunc(op)=>(Unary::Trunc,op),Arithmetic::Round(op)=>(Unary::Round,op),_=>return Err(unsupported(format!("arithmetic {a:?}"))) };
                 let input=self.vector(op.input)?;self.add(dst,Node::Unary(kind,input))
             },
             other=>Err(unsupported(format!("operation {other:?}; no fallback to another kernel/compiler"))),

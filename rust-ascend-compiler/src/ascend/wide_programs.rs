@@ -227,9 +227,9 @@ mod tests {
                 Node::Compare(comparison,a,b)=>(0..n).map(|lane|if comparison.float_eval(values[a][lane],values[b][lane]) {1.} else {0.}).collect(),
                 Node::DataSelect(mask,a,b)=>(0..n).map(|lane|if values[mask][lane]!=0. {values[a][lane]} else {values[b][lane]}).collect(),
                 Node::Binary(op,a,b)=>values[a].iter().zip(&values[b]).map(|(&a,&b)|match op {
-                    Binary::Add=>a+b,Binary::Sub=>a-b,Binary::Mul=>a*b,Binary::Div=>a/b,Binary::Max=>a.max(b)}).collect(),
+                    Binary::Add=>a+b,Binary::Sub=>a-b,Binary::Mul=>a*b,Binary::Div=>a/b,Binary::Max=>a.max(b),Binary::Min=>a.min(b)}).collect(),
                 Node::Unary(op,a)=>values[a].iter().map(|&a|match op {Unary::Neg=>-a,Unary::Abs=>a.abs(),
-                    Unary::Exp=>a.exp(),Unary::Log=>a.ln(),Unary::Sqrt=>a.sqrt(),Unary::Rsqrt=>a.sqrt().recip(),Unary::Recip=>a.recip(),Unary::Erf=>super::super::tests::erf_reference(a),Unary::Tanh=>a.tanh(),Unary::Sin=>a.sin(),Unary::Cos=>a.cos()}).collect(),
+                    Unary::Exp=>a.exp(),Unary::Log=>a.ln(),Unary::Sqrt=>a.sqrt(),Unary::Rsqrt=>a.sqrt().recip(),Unary::Recip=>a.recip(),Unary::Erf=>super::super::tests::erf_reference(a),Unary::Tanh=>a.tanh(),Unary::Sin=>a.sin(),Unary::Cos=>a.cos(),Unary::Floor=>a.floor(),Unary::Ceil=>a.ceil(),Unary::Trunc=>a.trunc(),Unary::Round=>a.round_ties_even()}).collect(),
             });
         }
         for &(binding,value) in &p.stores {for lane in 0..n {

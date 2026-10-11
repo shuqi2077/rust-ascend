@@ -26,6 +26,8 @@ mod spatial;
 mod fft;
 mod interpolation;
 mod quantized;
+mod deform;
+mod scans;
 
 pub(crate) trait AscendTensorBackend:
     Backend<
@@ -460,6 +462,9 @@ fn piecewise(value: Primitive, op: crate::runtime::PiecewiseActivation) -> Primi
 }
 
 impl FloatTensorOps<Self> for RudaAscend {
+    fn float_cumprod(value: Primitive, dim: usize) -> Primitive {
+        scans::scan(value, dim, scans::Scan::Product)
+    }
     fn float_cross(lhs: Primitive, rhs: Primitive, dim: usize) -> Primitive {
         if native_float(&lhs) {
             same_device(&lhs, &rhs);
@@ -635,7 +640,6 @@ impl FloatTensorOps<Self> for RudaAscend {
         fn float_empty(shape: Shape, device: &Device<Self>, dtype: FloatDType) -> FloatTensor<Self>;
         fn float_swap_dims(tensor: FloatTensor<Self>, dim1: usize, dim2: usize) -> FloatTensor<Self>;
         fn float_permute(tensor: FloatTensor<Self>, axes: &[usize]) -> FloatTensor<Self>;
-        fn float_cumprod(tensor: FloatTensor<Self>, dim: usize) -> FloatTensor<Self>;
         fn float_expand(tensor: FloatTensor<Self>, shape: Shape) -> FloatTensor<Self>;
         fn float_unfold(tensor: FloatTensor<Self>, dim: usize, size: usize, step: usize) -> FloatTensor<Self>;
     }
@@ -807,7 +811,18 @@ impl FloatTensorOps<Self> for RudaAscend {
 }
 
 impl IntTensorOps<Self> for RudaAscend {
+    fn int_matmul(a: Primitive, b: Primitive) -> Primitive { scans::integer_matmul(a, b) }
+    fn int_mean_dim(value: Primitive, dim: usize) -> Primitive {
+        if !matches!(value.dtype, DType::I32 | DType::I64) { return Ascend::int_mean_dim(value, dim); }
+        let length = value.meta.shape()[dim];
+        let divisor = if value.dtype == DType::I32 { length as i32 as i64 } else { length as i64 };
+        Self::int_div_scalar(reduce(value, dim, TensorReduceOp::Sum), Scalar::Int(divisor))
+    }
+    fn int_cumprod(value: Primitive, dim: usize) -> Primitive {
+        scans::scan(value, dim, scans::Scan::Product)
+    }
     fn int_cummin(value: Primitive, dim: usize) -> Primitive {
+        if value.dtype == DType::I64 { return scans::scan(value, dim, scans::Scan::Minimum); }
         if value.dtype == DType::I32 {
             cumulative_minimum(value, dim)
         } else {
@@ -815,6 +830,7 @@ impl IntTensorOps<Self> for RudaAscend {
         }
     }
     fn int_cummax(value: Primitive, dim: usize) -> Primitive {
+        if value.dtype == DType::I64 { return scans::scan(value, dim, scans::Scan::Maximum); }
         if value.dtype == DType::I32 {
             unary(
                 cumulative_minimum(unary(value, TensorUnaryOp::BitwiseNot), dim),
@@ -1037,9 +1053,6 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_from_data(data: TensorData, device: &Device<Self>) -> IntTensor<Self>;
         fn int_device(tensor: &IntTensor<Self>) -> Device<Self>;
         fn int_to_device(tensor: IntTensor<Self>, device: &Device<Self>) -> IntTensor<Self>;
-        fn int_matmul(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn int_mean_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
-        fn int_cumprod(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self>;
         fn int_swap_dims(tensor: IntTensor<Self>, dim1: usize, dim2: usize) -> IntTensor<Self>;
         fn int_permute(tensor: IntTensor<Self>, axes: &[usize]) -> IntTensor<Self>;
         fn int_random( shape: Shape, distribution: Distribution, device: &Device<Self>, dtype: IntDType, ) -> IntTensor<Self>;
@@ -1051,6 +1064,12 @@ impl IntTensorOps<Self> for RudaAscend {
 }
 
 impl BoolTensorOps<Self> for RudaAscend {
+    fn bool_scatter_or(dim: usize, value: Primitive, indices: Primitive, source: Primitive) -> Primitive {
+        scans::boolean_update(value, dim, indices, source, false)
+    }
+    fn bool_select_or(value: Primitive, dim: usize, indices: Primitive, source: Primitive) -> Primitive {
+        scans::boolean_update(value, dim, indices, source, true)
+    }
     indexing!(
         bool_slice,
         bool_slice_assign,
@@ -1106,8 +1125,6 @@ impl BoolTensorOps<Self> for RudaAscend {
         fn bool_from_data(data: TensorData, device: &Device<Self>) -> BoolTensor<Self>;
         fn bool_device(tensor: &BoolTensor<Self>) -> Device<Self>;
         fn bool_to_device(tensor: BoolTensor<Self>, device: &Device<Self>) -> BoolTensor<Self>;
-        fn bool_scatter_or( dim: usize, tensor: BoolTensor<Self>, indices: IntTensor<Self>, value: BoolTensor<Self>, ) -> BoolTensor<Self>;
-        fn bool_select_or( tensor: BoolTensor<Self>, dim: usize, indices: IntTensor<Self>, value: BoolTensor<Self>, ) -> BoolTensor<Self>;
         fn bool_swap_dims(tensor: BoolTensor<Self>, dim1: usize, dim2: usize) -> BoolTensor<Self>;
         fn bool_permute(tensor: BoolTensor<Self>, axes: &[usize]) -> BoolTensor<Self>;
         fn bool_expand(tensor: BoolTensor<Self>, shape: Shape) -> BoolTensor<Self>;
@@ -1242,8 +1259,9 @@ impl ModuleOps<Self> for RudaAscend {
     fn adaptive_avg_pool2d_backward(x: Primitive, grad: Primitive) -> Primitive {
         spatial::adaptive_pool_backward(x, grad)
     }
-    forward! { ModuleOps;
-        fn deform_conv2d( x: FloatTensor<Self>, offset: FloatTensor<Self>, weight: FloatTensor<Self>, mask: Option<FloatTensor<Self>>, bias: Option<FloatTensor<Self>>, options: DeformConvOptions<2>, ) -> FloatTensor<Self>;
+    fn deform_conv2d(x: Primitive, offset: Primitive, weight: Primitive, mask: Option<Primitive>,
+        bias: Option<Primitive>, options: DeformConvOptions<2>) -> Primitive {
+        deform::forward(x, offset, weight, mask, bias, options)
     }
 
     fn deform_conv2d_backward(
@@ -1255,15 +1273,7 @@ impl ModuleOps<Self> for RudaAscend {
         output_grad: Primitive,
         options: DeformConvOptions<2>,
     ) -> DeformConv2dBackward<Self> {
-        let result =
-            Ascend::deform_conv2d_backward(x, offset, weight, mask, bias, output_grad, options);
-        DeformConv2dBackward {
-            x_grad: result.x_grad,
-            offset_grad: result.offset_grad,
-            weight_grad: result.weight_grad,
-            mask_grad: result.mask_grad,
-            bias_grad: result.bias_grad,
-        }
+        deform::backward(x, offset, weight, mask, bias, output_grad, options)
     }
     fn max_pool2d_with_indices(
         x: Primitive,

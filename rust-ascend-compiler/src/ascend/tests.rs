@@ -14,6 +14,32 @@ fn activation_kernel(make:impl FnOnce(Variable)->Arithmetic)->KernelDefinition {
     if let Operation::Operator(Operator::IndexAssign(store))=&mut kernel.body.instructions[2].operation {store.value=output;}
     kernel
 }
+#[test]fn native_fp32_rounding_keeps_float_range_and_ties_even() {
+    let input=[-2.5f32,-1.5,-0.5,-0.0,0.0,0.5,1.5,2.5,1e20,f32::INFINITY,f32::NAN];
+    for (make,mode,expected) in [
+        (Arithmetic::Floor as fn(UnaryOperator)->Arithmetic,"CAST_FLOOR",[-3.,-2.,-1.,-0.,0.,0.,1.,2.,1e20,f32::INFINITY,f32::NAN]),
+        (Arithmetic::Ceil as fn(UnaryOperator)->Arithmetic,"CAST_CEIL",[-2.,-1.,-0.,-0.,0.,1.,2.,3.,1e20,f32::INFINITY,f32::NAN]),
+        (Arithmetic::Trunc as fn(UnaryOperator)->Arithmetic,"CAST_TRUNC",[-2.,-1.,-0.,-0.,0.,0.,1.,2.,1e20,f32::INFINITY,f32::NAN]),
+        (Arithmetic::Round as fn(UnaryOperator)->Arithmetic,"CAST_RINT",[-2.,-2.,-0.,-0.,0.,0.,2.,2.,1e20,f32::INFINITY,f32::NAN]),
+    ] {
+        let kernel=activation_kernel(|input|make(UnaryOperator{input}));
+        let compiled=compile(kernel.clone(),input.len() as u64).unwrap();
+        assert!(compiled.source().contains("AscendC::Cast("));
+        assert!(compiled.source().contains(&format!("AscendC::RoundMode::{mode}")));
+        assert!(!compiled.source().contains("CAST_ROUND"));
+        assert_eq!(plan::math_workspace(&lower::lower(kernel.clone(),input.len() as u64).unwrap(),64).unwrap(),0);
+        let actual=evaluate(kernel,input.len(),[&input,&[],&[]]);
+        for (&actual,&expected) in actual[0].iter().zip(&expected) {
+            assert!(actual.to_bits()==expected.to_bits() || actual.is_nan() && expected.is_nan());
+        }
+    }
+    let mut kernel=definition(MapProgram::Add);
+    if let Operation::Arithmetic(Arithmetic::Add(op))=kernel.body.instructions[2].operation.clone() {
+        kernel.body.instructions[2].operation=Arithmetic::Min(op).into();
+    } else {panic!("missing binary operation");}
+    assert!(compile(kernel.clone(),3).unwrap().source().contains("AscendC::Min("));
+    assert_eq!(evaluate(kernel,3,[&[3.,-2.,9.],&[1.,4.,9.],&[]])[0],vec![1.,-2.,9.]);
+}
 #[test]fn native_math_workspace_is_distinct_budgeted_and_reused() {
     for (kind,factor) in [(0,3),(1,1)] {
         let mut kernel=activation_kernel(|input|if kind==0 {Arithmetic::Erf(UnaryOperator{input})} else {Arithmetic::Tanh(UnaryOperator{input})});
@@ -162,8 +188,8 @@ pub(super) fn evaluate(kernel:KernelDefinition,elements:usize,inputs:[&[f32];3])
         Node::IndexSelect(i,a,b)=>(0..elements).map(|lane|if p.predicates[i].eval(lane as u64) {nodes[a][lane]} else {nodes[b][lane]}).collect(),
         Node::Compare(comparison,a,b)=>(0..elements).map(|lane|if comparison.float_eval(nodes[a][lane],nodes[b][lane]) {1.} else {0.}).collect(),
         Node::DataSelect(mask,a,b)=>(0..elements).map(|lane|if nodes[mask][lane]!=0. {nodes[a][lane]} else {nodes[b][lane]}).collect(),
-        Node::Unary(u,a)=>nodes[a].iter().map(|&v|match u{Unary::Neg=>-v,Unary::Abs=>v.abs(),Unary::Exp=>v.exp(),Unary::Log=>v.ln(),Unary::Sqrt=>v.sqrt(),Unary::Rsqrt=>1.0/v.sqrt(),Unary::Recip=>1.0/v,Unary::Erf=>erf_reference(v),Unary::Tanh=>v.tanh(),Unary::Sin=>v.sin(),Unary::Cos=>v.cos()}).collect(),
-        Node::Binary(b,a,c)=>nodes[a].iter().zip(&nodes[c]).map(|(&v,&w)|match b{Binary::Add=>v+w,Binary::Sub=>v-w,Binary::Mul=>v*w,Binary::Div=>v/w,Binary::Max=>v.max(w)}).collect()};nodes.push(z);}
+        Node::Unary(u,a)=>nodes[a].iter().map(|&v|match u{Unary::Neg=>-v,Unary::Abs=>v.abs(),Unary::Exp=>v.exp(),Unary::Log=>v.ln(),Unary::Sqrt=>v.sqrt(),Unary::Rsqrt=>1.0/v.sqrt(),Unary::Recip=>1.0/v,Unary::Erf=>erf_reference(v),Unary::Tanh=>v.tanh(),Unary::Sin=>v.sin(),Unary::Cos=>v.cos(),Unary::Floor=>v.floor(),Unary::Ceil=>v.ceil(),Unary::Trunc=>v.trunc(),Unary::Round=>v.round_ties_even()}).collect(),
+        Node::Binary(b,a,c)=>nodes[a].iter().zip(&nodes[c]).map(|(&v,&w)|match b{Binary::Add=>v+w,Binary::Sub=>v-w,Binary::Mul=>v*w,Binary::Div=>v/w,Binary::Max=>v.max(w),Binary::Min=>v.min(w)}).collect()};nodes.push(z);}
     p.stores.iter().map(|&(_,v)|nodes[v].clone()).collect()
 }
 #[test]fn readonly_uniform_slots_are_dynamic_and_keep_distinct_offsets(){
