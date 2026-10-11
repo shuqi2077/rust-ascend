@@ -136,6 +136,8 @@ impl Lower {
         self.assign(out,Value::DataPredicate(mask))
     }
     fn instruction(&mut self,i:&Instruction)->Result<()> {
+        let lowered=i.clone().lower_typed_memory().map_err(invalid)?;
+        let i=&lowered;
         if !i.modes.fp_math_mode.is_empty() { return Err(unsupported("fast-math modes must be lowered explicitly, not silently dropped")); }
         let out=i.out;
         match &i.operation {
@@ -324,6 +326,8 @@ pub(super) fn lower(k:KernelDefinition,elements:u64)->Result<Program> {
     lower_map(k,elements,false)
 }
 pub(super) fn lower_map(mut k:KernelDefinition,elements:u64,partial_stores:bool)->Result<Program> {
+    k.validate_typed_memory().map_err(invalid)?;
+    k.body.lower_pointer_values().map_err(invalid)?;
     if !ident(&k.options.kernel_name) {return Err(invalid("kernel entry must be a short ASCII identifier beginning with a letter"));}
     if k.options.debug_symbols || k.options.cluster_dim.is_some() {return Err(unsupported("debug symbols/clusters"));}
     if k.ruda_dim.x==0 || k.ruda_dim.y!=1 || k.ruda_dim.z!=1 {return Err(unsupported("only nonzero one-dimensional logical lane launch is accepted"));}

@@ -146,6 +146,8 @@ impl Lower {
         self.stores.push((a, offset, v)); Ok(())
     }
     fn instruction(&mut self, i: &Instruction) -> Result<()> {
+        let lowered=i.clone().lower_typed_memory().map_err(invalid)?;
+        let i=&lowered;
         if !i.modes.fp_math_mode.is_empty() { return Err(unsupported("row fast-math modes are not silently discarded")); }
         let dst = || i.out.ok_or_else(|| invalid("missing row operation result"));
         match &i.operation {
@@ -224,6 +226,8 @@ impl Lower {
 }
 
 pub(super) fn lower(mut k: KernelDefinition, elements: u64, width: u32) -> Result<Program> {
+    k.validate_typed_memory().map_err(invalid)?;
+    k.body.lower_pointer_values().map_err(invalid)?;
     if !(32..=4096).contains(&width) || width % LANES != 0 || elements % width as u64 != 0 || elements > u32::MAX as u64 {
         return Err(invalid("row shape: FP32 width 32..4096, multiple of 32; exact integral rows within UInt32"));
     }
