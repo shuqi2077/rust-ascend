@@ -24,6 +24,7 @@ use ruda_tensor_device::RudaTensor;
 type Primitive = RudaTensor<AscendRuntime>;
 mod spatial;
 mod fft;
+mod interpolation;
 mod quantized;
 
 pub(crate) trait AscendTensorBackend:
@@ -246,6 +247,9 @@ fn reduce_all(value: Primitive, op: TensorReduceOp) -> Primitive {
 fn half(value: &Primitive) -> bool {
     matches!(value.dtype, DType::F16 | DType::BF16)
 }
+fn native_float(value: &Primitive) -> bool {
+    matches!(value.dtype, DType::F32 | DType::F16 | DType::BF16)
+}
 fn unary(value: Primitive, op: TensorUnaryOp) -> Primitive {
     let out = AscendRuntime::tensor_unary(&value.client, buffer(value.clone()), op)
         .expect("native Ascend floating unary operation failed");
@@ -297,11 +301,11 @@ fn top_indices(value: Primitive, dim: usize, k: usize, index_dtype: IntDType) ->
 macro_rules! floating_binary {
     ($($method:ident, $scalar_method:ident => $op:ident;)*) => { $(
         fn $method(a: Primitive, b: Primitive) -> Primitive {
-            if half(&a) || half(&b) { binary(a, b, TensorBinaryOp::$op) }
+            if native_float(&a) && native_float(&b) { binary(a, b, TensorBinaryOp::$op) }
             else { <Ascend as FloatTensorOps<Ascend>>::$method(a, b) }
         }
         fn $scalar_method(value: Primitive, other: Scalar) -> Primitive {
-            if !half(&value) { return <Ascend as FloatTensorOps<Ascend>>::$scalar_method(value, other); }
+            if !native_float(&value) { return <Ascend as FloatTensorOps<Ascend>>::$scalar_method(value, other); }
             let out = AscendRuntime::tensor_scalar(&value.client, buffer(value.clone()), scalar(other), TensorBinaryOp::$op)
                 .expect("native Ascend floating scalar operation failed");
             wrap(&value, out)
@@ -311,7 +315,7 @@ macro_rules! floating_binary {
 macro_rules! floating_unary {
     ($($method:ident => $op:ident;)*) => { $(
         fn $method(value: Primitive) -> Primitive {
-            if half(&value) { unary(value, TensorUnaryOp::$op) }
+            if native_float(&value) { unary(value, TensorUnaryOp::$op) }
             else { <Ascend as FloatTensorOps<Ascend>>::$method(value) }
         }
     )* };
@@ -457,36 +461,32 @@ fn piecewise(value: Primitive, op: crate::runtime::PiecewiseActivation) -> Primi
 
 impl FloatTensorOps<Self> for RudaAscend {
     fn float_cross(lhs: Primitive, rhs: Primitive, dim: usize) -> Primitive {
-        if half(&lhs) {
+        if native_float(&lhs) {
             same_device(&lhs, &rhs);
-            let output = AscendRuntime::tensor_cross(
-                &lhs.client,
-                buffer(lhs.clone()),
-                buffer(rhs),
-                dim,
-            )
-            .expect("native Ascend cross product failed");
+            let output =
+                AscendRuntime::tensor_cross(&lhs.client, buffer(lhs.clone()), buffer(rhs), dim)
+                    .expect("native Ascend cross product failed");
             wrap(&lhs, output)
         } else {
             Ascend::float_cross(lhs, rhs, dim)
         }
     }
     fn float_atan2(y: Primitive, x: Primitive) -> Primitive {
-        if half(&y) {
+        if native_float(&y) {
             binary(y, x, TensorBinaryOp::Atan2)
         } else {
             Ascend::float_atan2(y, x)
         }
     }
     fn float_remainder(a: Primitive, b: Primitive) -> Primitive {
-        if half(&a) {
+        if native_float(&a) {
             binary(a, b, TensorBinaryOp::Remainder)
         } else {
             Ascend::float_remainder(a, b)
         }
     }
     fn float_remainder_scalar(a: Primitive, b: Scalar) -> Primitive {
-        if half(&a) {
+        if native_float(&a) {
             let b = scalar_like(&a, b);
             binary(a, b, TensorBinaryOp::Remainder)
         } else {
@@ -494,14 +494,14 @@ impl FloatTensorOps<Self> for RudaAscend {
         }
     }
     fn float_cummin(value: Primitive, dim: usize) -> Primitive {
-        if half(&value) {
+        if native_float(&value) {
             cumulative_minimum(value, dim)
         } else {
             Ascend::float_cummin(value, dim)
         }
     }
     fn float_cummax(value: Primitive, dim: usize) -> Primitive {
-        if half(&value) {
+        if native_float(&value) {
             unary(
                 cumulative_minimum(unary(value, TensorUnaryOp::Neg), dim),
                 TensorUnaryOp::Neg,
@@ -544,28 +544,28 @@ impl FloatTensorOps<Self> for RudaAscend {
         float_round => Round;
     }
     fn float_argmax(value: Primitive, dim: usize, out_dtype: IntDType) -> Primitive {
-        if half(&value) {
+        if native_float(&value) {
             arg_reduce(value, dim, out_dtype, false)
         } else {
             Ascend::float_argmax(value, dim, out_dtype)
         }
     }
     fn float_argmin(value: Primitive, dim: usize, out_dtype: IntDType) -> Primitive {
-        if half(&value) {
+        if native_float(&value) {
             arg_reduce(value, dim, out_dtype, true)
         } else {
             Ascend::float_argmin(value, dim, out_dtype)
         }
     }
     fn float_argtopk(value: Primitive, dim: usize, k: usize, out_dtype: IntDType) -> Primitive {
-        if half(&value) {
+        if native_float(&value) {
             top_indices(value, dim, k, out_dtype)
         } else {
             Ascend::float_argtopk(value, dim, k, out_dtype)
         }
     }
     fn float_sort(value: Primitive, dim: usize, descending: bool) -> Primitive {
-        if half(&value) {
+        if native_float(&value) {
             sorted(value, dim, descending, IntDType::I64).0
         } else {
             Ascend::float_sort(value, dim, descending)
@@ -577,7 +577,7 @@ impl FloatTensorOps<Self> for RudaAscend {
         descending: bool,
         indices_dtype: IntDType,
     ) -> (Primitive, Primitive) {
-        if half(&value) {
+        if native_float(&value) {
             sorted(value, dim, descending, indices_dtype)
         } else {
             Ascend::float_sort_with_indices(value, dim, descending, indices_dtype)
@@ -589,7 +589,7 @@ impl FloatTensorOps<Self> for RudaAscend {
         descending: bool,
         out_dtype: IntDType,
     ) -> Primitive {
-        if half(&value) {
+        if native_float(&value) {
             sorted(value, dim, descending, out_dtype).1
         } else {
             Ascend::float_argsort(value, dim, descending, out_dtype)
@@ -701,7 +701,7 @@ impl FloatTensorOps<Self> for RudaAscend {
         cast(value, dtype.into())
     }
     fn float_cumsum(value: Primitive, dim: usize) -> Primitive {
-        if half(&value) {
+        if native_float(&value) {
             cumsum(value, dim)
         } else {
             <Ascend as FloatTensorOps<Ascend>>::float_cumsum(value, dim)
@@ -769,7 +769,7 @@ impl FloatTensorOps<Self> for RudaAscend {
         reduce(value, dim, TensorReduceOp::Prod)
     }
     fn float_clamp(value: Primitive, min: Scalar, max: Scalar) -> Primitive {
-        if half(&value) {
+        if native_float(&value) {
             let out = AscendRuntime::tensor_clamp(
                 &value.client,
                 buffer(value.clone()),
@@ -794,7 +794,7 @@ impl FloatTensorOps<Self> for RudaAscend {
         Self::float_clamp(value, f32::NEG_INFINITY.into(), max)
     }
     fn float_repeat_dim(value: Primitive, dim: usize, times: usize) -> Primitive {
-        if half(&value) {
+        if native_float(&value) {
             return ruda_tensor::ops::repeat_with_slice_assign::<Self, ruda_tensor::tensor::Float>(
                 ruda_tensor::TensorPrimitive::Float(value),
                 dim,
@@ -1116,21 +1116,36 @@ impl BoolTensorOps<Self> for RudaAscend {
 }
 
 impl QTensorOps<Self> for RudaAscend {
+    async fn q_into_data(tensor: Primitive) -> Result<TensorData, ExecutionError> {
+        quantized::into_data(tensor).await
+    }
+    fn q_gather(dim: usize, tensor: Primitive, indices: Primitive) -> Primitive {
+        quantized::gather(tensor, dim, indices)
+    }
     fn dequantize(tensor: Primitive, dtype: FloatDType) -> Primitive {
-        quantized::dequantize(tensor,dtype)
+        quantized::dequantize(tensor, dtype)
+    }
+    fn q_flip(tensor: Primitive, axes: &[usize]) -> Primitive {
+        quantized::flip(tensor, axes)
+    }
+    fn q_select(tensor: Primitive, dim: usize, indices: Primitive) -> Primitive {
+        quantized::select(tensor, dim, indices)
+    }
+    fn q_slice(tensor: Primitive, slices: &[Slice]) -> Primitive {
+        quantized::slice(tensor, slices)
+    }
+    fn q_reshape(tensor: Primitive, shape: Shape) -> Primitive {
+        quantized::reshape_quantized(tensor, shape)
+    }
+    fn q_expand(tensor: Primitive, shape: Shape) -> Primitive {
+        quantized::expand(tensor, shape)
     }
     forward! { QTensorOps;
         fn q_from_data(data: TensorData, device: &Device<Self>) -> QuantizedTensor<Self>;
         fn q_device(tensor: &QuantizedTensor<Self>) -> Device<Self>;
         fn q_to_device(tensor: QuantizedTensor<Self>, device: &Device<Self>) -> QuantizedTensor<Self>;
-        fn q_reshape(tensor: QuantizedTensor<Self>, shape: Shape) -> QuantizedTensor<Self>;
-        fn q_into_data( tensor: QuantizedTensor<Self>, ) -> impl Future<Output = Result<TensorData, ExecutionError>> + Send;
-        fn q_expand(tensor: QuantizedTensor<Self>, shape: Shape) -> QuantizedTensor<Self>;
         fn q_swap_dims(tensor: QuantizedTensor<Self>, dim1: usize, dim2: usize) -> QuantizedTensor<Self>;
         fn q_permute(tensor: QuantizedTensor<Self>, axes: &[usize]) -> QuantizedTensor<Self>;
-        fn q_flip(tensor: QuantizedTensor<Self>, axes: &[usize]) -> QuantizedTensor<Self>;
-        fn q_select( tensor: QuantizedTensor<Self>, dim: usize, indices: IntTensor<Self>, ) -> QuantizedTensor<Self>;
-        fn q_slice(tensor: QuantizedTensor<Self>, slices: &[Slice]) -> QuantizedTensor<Self>;
     }
 
     fn quantize(
@@ -1138,11 +1153,26 @@ impl QTensorOps<Self> for RudaAscend {
         scheme: &QuantScheme,
         qparams: QuantizationParametersPrimitive<Self>,
     ) -> Primitive {
-        quantized::quantize(value,scheme,qparams.scales)
+        quantized::quantize(value, scheme, qparams.scales)
     }
 }
 
 impl ModuleOps<Self> for RudaAscend {
+    fn interpolate(
+        x: Primitive,
+        output_size: [usize; 2],
+        options: InterpolateOptions,
+    ) -> Primitive {
+        interpolation::forward(x, output_size, options)
+    }
+    fn interpolate_backward(
+        x: Primitive,
+        grad: Primitive,
+        output_size: [usize; 2],
+        options: InterpolateOptions,
+    ) -> Primitive {
+        interpolation::backward(x, grad, output_size, options)
+    }
     fn rfft(signal: Primitive, dim: usize, n: Option<usize>) -> (Primitive, Primitive) {
         fft::rfft(signal, dim, n)
     }
@@ -1214,8 +1244,6 @@ impl ModuleOps<Self> for RudaAscend {
     }
     forward! { ModuleOps;
         fn deform_conv2d( x: FloatTensor<Self>, offset: FloatTensor<Self>, weight: FloatTensor<Self>, mask: Option<FloatTensor<Self>>, bias: Option<FloatTensor<Self>>, options: DeformConvOptions<2>, ) -> FloatTensor<Self>;
-        fn interpolate( x: FloatTensor<Self>, output_size: [usize; 2], options: InterpolateOptions, ) -> FloatTensor<Self>;
-        fn interpolate_backward( x: FloatTensor<Self>, grad: FloatTensor<Self>, output_size: [usize; 2], options: InterpolateOptions, ) -> FloatTensor<Self>;
     }
 
     fn deform_conv2d_backward(
@@ -1245,7 +1273,8 @@ impl ModuleOps<Self> for RudaAscend {
         dilation: [usize; 2],
         ceil_mode: bool,
     ) -> MaxPool2dWithIndices<Self> {
-        let options = spatial::pool_options(kernel_size, stride, padding, dilation, ceil_mode, false);
+        let options =
+            spatial::pool_options(kernel_size, stride, padding, dilation, ceil_mode, false);
         spatial::maximum_pool(x, options)
     }
     fn max_pool2d_with_indices_backward(
@@ -1258,8 +1287,11 @@ impl ModuleOps<Self> for RudaAscend {
         output_grad: Primitive,
         indices: Primitive,
     ) -> MaxPool2dBackward<Self> {
-        let options = spatial::pool_options(kernel_size, stride, padding, dilation, ceil_mode, false);
-        MaxPool2dBackward { x_grad: spatial::maximum_pool_backward(x, output_grad, indices, options) }
+        let options =
+            spatial::pool_options(kernel_size, stride, padding, dilation, ceil_mode, false);
+        MaxPool2dBackward {
+            x_grad: spatial::maximum_pool_backward(x, output_grad, indices, options),
+        }
     }
     fn attention(
         query: Primitive,

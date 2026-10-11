@@ -140,10 +140,12 @@ fn dtype(value: DType) -> Result<CannDType> {
         DType::BF16 => CannDType::BF16,
         DType::I32 => CannDType::I32,
         DType::I64 => CannDType::I64,
+        DType::I8 => CannDType::I8,
+        DType::U8 => CannDType::U8,
         DType::Bool(BoolStore::U8 | BoolStore::Native) => CannDType::Bool,
         _ => {
             return Err(error(
-                "native model tensors require FP32/FP16/BF16/I32/I64 or byte Bool",
+                "native model tensors require FP32/FP16/BF16/I32/I64/I8/U8 or byte Bool",
             ));
         }
     })
@@ -155,6 +157,8 @@ fn ruda_dtype(value: CannDType) -> DType {
         CannDType::BF16 => DType::BF16,
         CannDType::I32 => DType::I32,
         CannDType::I64 => DType::I64,
+        CannDType::I8 => DType::I8,
+        CannDType::U8 => DType::U8,
         CannDType::Bool => DType::Bool(BoolStore::U8),
         _ => unreachable!("checked model dtype"),
     }

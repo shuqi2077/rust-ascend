@@ -1,22 +1,14 @@
 use super::*;
 use crate::runtime::portable::server::MemoryLayoutStrategy;
 use ruda_core::tensor::{QuantLevel, QuantParam, QuantStore, QuantValue, params_shape};
+mod formats;
 
 fn packing(scheme: &QuantScheme, rank: usize) -> (usize, usize) {
-    assert!(
-        matches!(
-            scheme.value,
-            QuantValue::Q8F
-                | QuantValue::Q8S
-                | QuantValue::Q4F
-                | QuantValue::Q4S
-                | QuantValue::Q2F
-                | QuantValue::Q2S
-        ),
-        "Ascend quantization does not yet implement FP8/FP4 encoding"
-    );
-    let QuantStore::PackedU32(dim) = scheme.store else {
-        panic!("Ascend quantization currently requires RUDA PackedU32 storage");
+    let dim = match scheme.store {
+        QuantStore::PackedU32(dim) => dim,
+        QuantStore::PackedNative(dim) if scheme.value == QuantValue::E2M1 => dim,
+        QuantStore::Native if scheme.size_bits_value() == 8 => 0,
+        _ => panic!("invalid native quantized storage for the requested value format"),
     };
     assert!(dim < rank, "quantized packing dimension out of bounds");
     (rank - dim - 1, scheme.size_bits_value())
@@ -26,8 +18,11 @@ fn parameter_dtype(scheme: &QuantScheme) -> FloatDType {
         QuantParam::F32 => FloatDType::F32,
         QuantParam::F16 => FloatDType::F16,
         QuantParam::BF16 => FloatDType::BF16,
-        _ => panic!("Ascend quantization does not yet implement encoded UE8M0/UE4M3 scales"),
+        _ => panic!("encoded quantization scales are not floating storage"),
     }
+}
+fn encoded_scale(scheme: &QuantScheme) -> bool {
+    matches!(scheme.param, QuantParam::UE8M0 | QuantParam::UE4M3)
 }
 fn expanded_scales(
     mut scales: Primitive,
@@ -40,7 +35,11 @@ fn expanded_scales(
         &params_shape(shape, scheme.level),
         "quantization scale shape mismatch"
     );
-    scales = RudaAscend::float_cast(scales, dtype);
+    scales = if encoded_scale(scheme) {
+        RudaAscend::float_cast(formats::decode_scale(scales, scheme.param), dtype)
+    } else {
+        RudaAscend::float_cast(scales, dtype)
+    };
     if let QuantLevel::Block(block) = scheme.level {
         let blocks = block.to_dim_vec(shape.rank());
         for (axis, &size) in shape.iter().enumerate() {
@@ -73,10 +72,13 @@ fn signed_word(value: Primitive) -> Primitive {
 pub(super) fn quantize(value: Primitive, scheme: &QuantScheme, scales: Primitive) -> Primitive {
     spatial::same_queue(&value, &[&scales]);
     let shape = value.meta.shape().clone();
-    let (axis, bits) = packing(scheme, shape.rank());
+    packing(scheme, shape.rank());
     let dtype = FloatDType::try_from(value.dtype).expect("quantization requires floating input");
-    let parameter_dtype = parameter_dtype(scheme);
-    let scales = RudaAscend::float_cast(scales, parameter_dtype);
+    let scales = if encoded_scale(scheme) {
+        formats::encode_scale(scales, scheme.param)
+    } else {
+        RudaAscend::float_cast(scales, parameter_dtype(scheme))
+    };
     let expanded = expanded_scales(scales.clone(), &shape, scheme, dtype);
     let zero_scale =
         RudaAscend::float_equal_elem(expanded.clone(), Scalar::Float(0.0), BoolDType::U8);
@@ -85,14 +87,28 @@ pub(super) fn quantize(value: Primitive, scheme: &QuantScheme, scales: Primitive
     let scaled = RudaAscend::float_div(value.clone(), expanded);
     let scaled = RudaAscend::float_mask_where(scaled, zero, value.clone());
     let (minimum, maximum) = scheme.value.range();
-    let rounded = unary(scaled, TensorUnaryOp::Round);
+    let rounded = if formats::floating(scheme.value) {
+        scaled
+    } else {
+        unary(scaled, TensorUnaryOp::Round)
+    };
     let quantized = RudaAscend::float_clamp(
         rounded,
         Scalar::Float(minimum as f64),
         Scalar::Float(maximum as f64),
     );
-    let quantized = RudaAscend::float_into_int(quantized, IntDType::I64);
-    let factor = 32 / bits;
+    let quantized = if formats::floating(scheme.value) {
+        formats::encode(quantized, scheme.value)
+    } else {
+        RudaAscend::float_into_int(quantized, IntDType::I64)
+    };
+    pack(quantized, scheme, scales)
+}
+fn pack(quantized: Primitive, scheme: &QuantScheme, scales: Primitive) -> Primitive {
+    let shape = quantized.meta.shape().clone();
+    let value = quantized.clone();
+    let (axis, bits) = packing(scheme, shape.rank());
+    let factor = scheme.num_quants();
     let words = shape[axis].div_ceil(factor);
     let mut packed_shape = shape.clone();
     packed_shape[axis] = words;
@@ -116,18 +132,29 @@ pub(super) fn quantize(value: Primitive, scheme: &QuantScheme, scales: Primitive
         let lane_value = RudaAscend::int_mul_scalar(lane_value, Scalar::Int(1i64 << (lane * bits)));
         packed = RudaAscend::bitwise_or(packed, lane_value);
     }
-    let packed = signed_word(packed);
+    let packed = match scheme.store {
+        QuantStore::PackedU32(_) => signed_word(packed),
+        QuantStore::Native if !formats::floating(scheme.value) => cast(quantized, DType::I8),
+        _ => cast(packed, DType::U8),
+    };
     let output = ruda_kernel::tensor::allocation::empty_qtensor(
         shape,
         *scheme,
         &value.device,
         MemoryLayoutStrategy::Contiguous,
     );
-    let (mut target, params) = output
+    let (mut target, mut params) = output
         .quantized_handles()
         .expect("quantized allocation has no scales");
     // The signed view changes only the ACL descriptor, never the packed bits.
-    target.dtype = DType::I32;
+    if matches!(scheme.store, QuantStore::PackedU32(_)) {
+        target.dtype = DType::I32;
+    }
+    let mut scales = scales;
+    if encoded_scale(scheme) {
+        params.dtype = DType::U8;
+        scales.dtype = DType::U8;
+    }
     AscendRuntime::tensor_copy_into(&value.client, buffer(packed), buffer(target))
         .expect("quantized payload copy failed");
     AscendRuntime::tensor_copy_into(&value.client, buffer(contiguous(scales)), buffer(params))
@@ -138,13 +165,35 @@ pub(super) fn dequantize(value: Primitive, dtype: FloatDType) -> Primitive {
     let DType::QFloat(scheme) = value.dtype else {
         return value;
     };
+    if !encoded_scale(&scheme) {
+        parameter_dtype(&scheme);
+    }
+    let scales = value.scales().expect("quantized tensor has no scales");
+    let shape = value.meta.shape().clone();
+    let values = unpack(value);
+    let values = if formats::floating(scheme.value) {
+        RudaAscend::float_cast(formats::decode(values, scheme.value), dtype)
+    } else {
+        RudaAscend::int_into_float(values, dtype)
+    };
+    let scales = expanded_scales(scales, &shape, &scheme, dtype);
+    RudaAscend::float_mul(values, scales)
+}
+fn unpack(value: Primitive) -> Primitive {
+    let DType::QFloat(scheme) = value.dtype else {
+        panic!("expected quantized tensor");
+    };
     let shape = value.meta.shape().clone();
     let (axis, bits) = packing(&scheme, shape.rank());
-    parameter_dtype(&scheme);
-    let (mut words, scales) = value
+    if !encoded_scale(&scheme) {
+        parameter_dtype(&scheme);
+    }
+    let (mut words, _) = value
         .quantized_handles()
         .expect("quantized tensor has no scales");
-    words.dtype = DType::I32;
+    if matches!(scheme.store, QuantStore::PackedU32(_)) {
+        words.dtype = DType::I32;
+    }
     let last = shape.rank() - 1;
     words = RudaAscend::int_swap_dims(words, axis, last);
     let moved_shape = words.meta.shape().clone();
@@ -152,7 +201,7 @@ pub(super) fn dequantize(value: Primitive, dtype: FloatDType) -> Primitive {
     let outer = moved_shape[..last].iter().product::<usize>();
     words = RudaAscend::int_cast(words, IntDType::I64);
     words = RudaAscend::int_reshape(words, Shape::new([outer, word_count, 1]));
-    let factor = 32 / bits;
+    let factor = scheme.num_quants();
     let mut lanes = Vec::with_capacity(factor);
     for lane in 0..factor {
         let raw = RudaAscend::bitwise_right_shift_scalar(
@@ -160,6 +209,10 @@ pub(super) fn dequantize(value: Primitive, dtype: FloatDType) -> Primitive {
             Scalar::Int((lane * bits) as i64),
         );
         let raw = RudaAscend::bitwise_and_scalar(raw, Scalar::Int((1i64 << bits) - 1));
+        if formats::floating(scheme.value) {
+            lanes.push(raw);
+            continue;
+        }
         let negative = RudaAscend::int_greater_equal_elem(
             raw.clone(),
             Scalar::Int(1i64 << (bits - 1)),
@@ -174,10 +227,109 @@ pub(super) fn dequantize(value: Primitive, dtype: FloatDType) -> Primitive {
     let values = RudaAscend::int_reshape(values, padded_shape);
     let values = RudaAscend::int_swap_dims(values, axis, last);
     let slices = shape.iter().map(|&n| Slice::from(0..n)).collect::<Vec<_>>();
-    let values = RudaAscend::int_slice(values, &slices);
-    let values = RudaAscend::int_into_float(values, dtype);
-    let scales = expanded_scales(scales, &shape, &scheme, dtype);
-    RudaAscend::float_mul(values, scales)
+    RudaAscend::int_slice(values, &slices)
+}
+pub(super) fn flip(value: Primitive, axes: &[usize]) -> Primitive {
+    let DType::QFloat(scheme) = value.dtype else {
+        panic!("expected quantized tensor");
+    };
+    if matches!(scheme.level, QuantLevel::Block(_)) {
+        let values = RudaAscend::float_flip(dequantize(value, FloatDType::F32), axes);
+        return RudaAscend::quantize_dynamic(values, &scheme);
+    }
+    let scales = value.scales().expect("quantized tensor has no scales");
+    pack(RudaAscend::int_flip(unpack(value), axes), &scheme, scales)
+}
+pub(super) fn select(value: Primitive, axis: usize, indices: Primitive) -> Primitive {
+    spatial::same_queue(&value, &[&indices]);
+    let DType::QFloat(scheme) = value.dtype else {
+        panic!("expected quantized tensor");
+    };
+    if matches!(scheme.level, QuantLevel::Block(_)) {
+        let values = RudaAscend::float_select(dequantize(value, FloatDType::F32), axis, indices);
+        return RudaAscend::quantize_dynamic(values, &scheme);
+    }
+    let scales = value.scales().expect("quantized tensor has no scales");
+    pack(
+        RudaAscend::int_select(unpack(value), axis, indices),
+        &scheme,
+        scales,
+    )
+}
+pub(super) fn gather(value: Primitive, axis: usize, indices: Primitive) -> Primitive {
+    spatial::same_queue(&value, &[&indices]);
+    let DType::QFloat(scheme) = value.dtype else {
+        panic!("expected quantized tensor");
+    };
+    if matches!(scheme.level, QuantLevel::Block(_)) {
+        let dtype = ruda_tensor::get_device_settings::<RudaAscend>(&value.device).float_dtype;
+        let values = RudaAscend::float_gather(axis, dequantize(value, dtype), indices);
+        return RudaAscend::quantize_dynamic(values, &scheme);
+    }
+    let scales = value.scales().expect("quantized tensor has no scales");
+    pack(
+        RudaAscend::int_gather(axis, unpack(value), indices),
+        &scheme,
+        scales,
+    )
+}
+pub(super) async fn into_data(value: Primitive) -> Result<TensorData, ExecutionError> {
+    let shape = value.meta.shape().clone();
+    let dtype = value.dtype;
+    let (mut values, scales) = value
+        .quantized_handles()
+        .expect("quantized tensor has no scales");
+    if matches!(
+        dtype,
+        DType::QFloat(QuantScheme {
+            store: QuantStore::PackedU32(_),
+            ..
+        })
+    ) {
+        values.dtype = DType::I32;
+    }
+    let mut data = ruda_kernel::tensor::readback::into_data(contiguous(values)).await?;
+    let params = ruda_kernel::tensor::readback::into_data(contiguous(scales)).await?;
+    data.bytes.extend_from_byte_slice(&params.bytes);
+    Ok(TensorData {
+        bytes: data.bytes,
+        shape,
+        dtype,
+    })
+}
+pub(super) fn slice(value: Primitive, slices: &[Slice]) -> Primitive {
+    let DType::QFloat(scheme) = value.dtype else {
+        panic!("expected quantized tensor");
+    };
+    if matches!(scheme.level, QuantLevel::Block(_)) {
+        let values = RudaAscend::float_slice(dequantize(value, FloatDType::F32), slices);
+        return RudaAscend::quantize_dynamic(values, &scheme);
+    }
+    let scales = value.scales().expect("quantized tensor has no scales");
+    pack(
+        RudaAscend::int_slice(unpack(value), slices),
+        &scheme,
+        scales,
+    )
+}
+pub(super) fn reshape_quantized(value: Primitive, shape: Shape) -> Primitive {
+    let scheme = *ruda_tensor::QTensorPrimitive::scheme(&value);
+    match ruda_kernel::tensor::reshape::try_q_reshape(value, shape) {
+        Ok(value) => value,
+        Err((value, shape)) => RudaAscend::quantize_dynamic(
+            RudaAscend::float_reshape(dequantize(value, FloatDType::F32), shape),
+            &scheme,
+        ),
+    }
+}
+pub(super) fn expand(value: Primitive, shape: Shape) -> Primitive {
+    let DType::QFloat(scheme) = value.dtype else {
+        panic!("expected quantized tensor");
+    };
+    let scales = value.scales().expect("quantized tensor has no scales");
+    let scales = RudaAscend::float_expand(scales, params_shape(&shape, scheme.level));
+    let values = RudaAscend::int_expand(unpack(value), shape);
+    pack(values, &scheme, scales)
 }
 
 #[cfg(test)]

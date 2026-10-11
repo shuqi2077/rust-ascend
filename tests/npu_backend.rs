@@ -4,8 +4,8 @@ use rust_ascend::{
     tensor::{
         Backend, DType, FloatDType, TensorData,
         api::{Tensor, module, quantization::QuantizationParameters},
-        ops::{FloatTensorOps, ModuleOps},
-        quantization::QuantScheme,
+        ops::{FloatTensorOps, InterpolateMode, InterpolateOptions, ModuleOps},
+        quantization::{QuantParam, QuantScheme, QuantStore, QuantValue},
     },
 };
 
@@ -147,6 +147,124 @@ fn ascend_backend_ops_on_950dt() -> Result<(), Box<dyn std::error::Error>> {
             .into_data()
             .as_slice::<f32>()?,
         &[-63.5, -1., 0.5, 1., 63.5],
+    );
+    for (format, store) in [
+        (QuantValue::E4M3, QuantStore::Native),
+        (QuantValue::E5M2, QuantStore::Native),
+        (QuantValue::E4M3, QuantStore::PackedU32(0)),
+        (QuantValue::E5M2, QuantStore::PackedU32(0)),
+        (QuantValue::E2M1, QuantStore::PackedNative(0)),
+        (QuantValue::E2M1, QuantStore::PackedU32(0)),
+    ] {
+        let values = vec![-3.5f32, -1., -0., 0.25, 1.5, 2., 3.5];
+        let codes: Vec<u8> = values
+            .iter()
+            .map(|&v| match format {
+                QuantValue::E4M3 => ruda_core::e4m3::from_f32(v).to_bits(),
+                QuantValue::E5M2 => ruda_core::e5m2::from_f32(v).to_bits(),
+                QuantValue::E2M1 => ruda_core::e2m1::from_f32(v).to_bits(),
+                _ => unreachable!(),
+            })
+            .collect();
+        let expected: Vec<f32> = codes
+            .iter()
+            .map(|&v| match format {
+                QuantValue::E4M3 => ruda_core::e4m3::from_bits(v).to_f32(),
+                QuantValue::E5M2 => ruda_core::e5m2::from_bits(v).to_f32(),
+                QuantValue::E2M1 => ruda_core::e2m1::from_bits(v).to_f32(),
+                _ => unreachable!(),
+            })
+            .collect();
+        let scheme = QuantScheme::default().with_value(format).with_store(store);
+        let input =
+            Tensor::<RudaAscend, 1>::from_data(TensorData::new(values, [7]), (&device, DType::F32));
+        let scales = Tensor::<RudaAscend, 1>::ones([1], (&device, DType::F32));
+        let q = input.quantize(&scheme, QuantizationParameters { scales });
+        let bits = scheme.size_bits_value();
+        let factor = scheme.num_quants();
+        let bytes_per_word = scheme.size_bits_stored() / 8;
+        let mut payload = Vec::new();
+        for chunk in codes.chunks(factor) {
+            let word = chunk.iter().enumerate().fold(0u32, |word, (lane, &code)| {
+                word | ((code as u32) << (lane * bits))
+            });
+            payload.extend_from_slice(&word.to_le_bytes()[..bytes_per_word]);
+        }
+        assert_eq!(
+            &q.clone().into_data().bytes[..payload.len()],
+            payload.as_slice(),
+            "{format:?}/{store:?}"
+        );
+        close(
+            q.clone()
+                .dequantize_with_dtype(FloatDType::F32)
+                .into_data()
+                .as_slice::<f32>()?,
+            &expected,
+        );
+        let mut flipped = expected.clone();
+        flipped.reverse();
+        close(
+            q.flip([0])
+                .dequantize_with_dtype(FloatDType::F32)
+                .into_data()
+                .as_slice::<f32>()?,
+            &flipped,
+        );
+    }
+    for (param, scale, code, values) in [
+        (QuantParam::UE8M0, 0.75, 127, [1.0, 2.0, 3.0]),
+        (QuantParam::UE4M3, 1.5, 0x3c, [1.5, 3.0, 4.5]),
+    ] {
+        let scheme = QuantScheme::default().with_param(param);
+        let input = Tensor::<RudaAscend, 1>::from_data(values, (&device, DType::F32));
+        let scales = Tensor::<RudaAscend, 1>::from_data([scale], (&device, DType::F32));
+        let q = input.quantize(&scheme, QuantizationParameters { scales });
+        assert_eq!(&q.clone().into_data().bytes[..5], &[1, 2, 3, 0, code]);
+        close(
+            q.dequantize_with_dtype(FloatDType::F32)
+                .into_data()
+                .as_slice::<f32>()?,
+            &values,
+        );
+    }
+    for mode in [
+        InterpolateMode::Nearest,
+        InterpolateMode::Bilinear,
+        InterpolateMode::Bicubic,
+        InterpolateMode::Lanczos3,
+    ] {
+        let input = Tensor::<AD, 4>::full([1, 1, 2, 2], 3.0, (&device, DType::F32)).require_grad();
+        let output = module::interpolate(
+            input.clone(),
+            [4, 4],
+            InterpolateOptions::new(mode).with_align_corners(false),
+        );
+        close(output.clone().into_data().as_slice::<f32>()?, &[3.; 16]);
+        let gradients = output.sum().backward();
+        close(
+            input
+                .grad(&gradients)
+                .ok_or("missing interpolation gradient")?
+                .into_data()
+                .as_slice::<f32>()?,
+            &[4.; 4],
+        );
+    }
+    let input = Tensor::<RudaAscend, 4>::from_data(
+        TensorData::new(vec![1.0, 2., 3., 4.], [1, 1, 2, 2]),
+        (&device, DType::F32),
+    );
+    let output = module::interpolate(
+        input,
+        [4, 4],
+        InterpolateOptions::new(InterpolateMode::Bilinear).with_align_corners(false),
+    );
+    close(
+        output.into_data().as_slice::<f32>()?,
+        &[
+            1., 1.25, 1.75, 2., 1.5, 1.75, 2.25, 2.5, 2.5, 2.75, 3.25, 3.5, 3., 3.25, 3.75, 4.,
+        ],
     );
     RudaAscend::sync(&device)?;
     Ok(())
