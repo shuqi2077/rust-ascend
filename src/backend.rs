@@ -811,6 +811,16 @@ impl FloatTensorOps<Self> for RudaAscend {
 }
 
 impl IntTensorOps<Self> for RudaAscend {
+    fn int_random(shape: Shape, distribution: Distribution, device: &Device<Self>, dtype: IntDType) -> Primitive {
+        if !matches!(dtype, IntDType::I32 | IntDType::I64) { return Ascend::int_random(shape, distribution, device, dtype); }
+        let distribution = match distribution {
+            Distribution::Default => Distribution::Uniform(0., 255.),
+            Distribution::Uniform(low, high) => Distribution::Uniform(low as f32 as f64, high as f32 as f64),
+            Distribution::Bernoulli(probability) => Distribution::Bernoulli(probability as f32 as f64),
+            other => other,
+        };
+        Self::float_into_int(Self::float_random(shape, distribution, device, FloatDType::F32), dtype)
+    }
     fn int_matmul(a: Primitive, b: Primitive) -> Primitive { scans::integer_matmul(a, b) }
     fn int_mean_dim(value: Primitive, dim: usize) -> Primitive {
         if !matches!(value.dtype, DType::I32 | DType::I64) { return Ascend::int_mean_dim(value, dim); }
@@ -844,6 +854,7 @@ impl IntTensorOps<Self> for RudaAscend {
         bitwise_and, bitwise_and_scalar => BitwiseAnd;
         bitwise_or, bitwise_or_scalar => BitwiseOr;
         bitwise_xor, bitwise_xor_scalar => BitwiseXor;
+        bitwise_left_shift, bitwise_left_shift_scalar => LeftShift;
         bitwise_right_shift, bitwise_right_shift_scalar => RightShift;
     }
     fn bitwise_not(value: Primitive) -> Primitive {
@@ -1055,10 +1066,7 @@ impl IntTensorOps<Self> for RudaAscend {
         fn int_to_device(tensor: IntTensor<Self>, device: &Device<Self>) -> IntTensor<Self>;
         fn int_swap_dims(tensor: IntTensor<Self>, dim1: usize, dim2: usize) -> IntTensor<Self>;
         fn int_permute(tensor: IntTensor<Self>, axes: &[usize]) -> IntTensor<Self>;
-        fn int_random( shape: Shape, distribution: Distribution, device: &Device<Self>, dtype: IntDType, ) -> IntTensor<Self>;
         fn int_expand(tensor: IntTensor<Self>, shape: Shape) -> IntTensor<Self>;
-        fn bitwise_left_shift(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self>;
-        fn bitwise_left_shift_scalar(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self>;
         fn int_unfold(tensor: IntTensor<Self>, dim: usize, size: usize, step: usize) -> IntTensor<Self>;
     }
 }

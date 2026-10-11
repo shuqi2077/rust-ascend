@@ -2,7 +2,7 @@ use rust_ascend::{
     Autodiff, RudaAscend,
     runtime::{AscendRuntime, RuntimeOptions},
     tensor::{
-        Backend, DType, FloatDType, TensorData,
+        Backend, DType, Distribution, FloatDType, IntDType, Shape, TensorData,
         api::{Bool, Int, Tensor, module, quantization::QuantizationParameters},
         ops::{
             BoolTensorOps, DeformConvOptions, FloatTensorOps, IntTensorOps, InterpolateMode,
@@ -144,11 +144,55 @@ fn ascend_backend_ops_on_950dt() -> Result<(), Box<dyn std::error::Error>> {
         integer(vec![2, 1], vec![2, 1]),
     );
     assert_eq!(read_int(product).as_slice::<i64>()?, &[(1i64 << 41) + 7]);
+    let bits = integer(vec![-3, (1i64 << 40) + 5], vec![1, 2]);
+    assert_eq!(
+        read_int(RudaAscend::bitwise_left_shift(
+            bits.clone(),
+            integer(vec![1, 2], vec![1, 2])
+        ))
+        .as_slice::<i64>()?,
+        &[-6, (1i64 << 42) + 20]
+    );
+    assert_eq!(
+        read_int(RudaAscend::bitwise_left_shift_scalar(bits, 3.into())).as_slice::<i64>()?,
+        &[-24, (1i64 << 43) + 40]
+    );
     let mean = RudaAscend::int_mean_dim(
         integer(vec![-5, 2, (1i64 << 40) + 1, (1i64 << 40) + 3], vec![2, 2]),
         1,
     );
     assert_eq!(read_int(mean).as_slice::<i64>()?, &[-1, (1i64 << 40) + 2]);
+    for (distribution, expected) in [
+        (Distribution::Uniform(-2.5, -2.5), -2i64),
+        (Distribution::Normal(2.5, 0.), 2),
+        (Distribution::Bernoulli(1.), 1),
+        (Distribution::Bernoulli(0.), 0),
+    ] {
+        let output =
+            RudaAscend::int_random(Shape::new([1, 4]), distribution, &device, IntDType::I64);
+        assert_eq!(read_int(output).as_slice::<i64>()?, &[expected; 4]);
+    }
+    RudaAscend::seed(&device, 42);
+    let first = read_int(RudaAscend::int_random(
+        Shape::new([1, 16]),
+        Distribution::Default,
+        &device,
+        IntDType::I64,
+    ));
+    RudaAscend::seed(&device, 42);
+    let second = read_int(RudaAscend::int_random(
+        Shape::new([1, 16]),
+        Distribution::Default,
+        &device,
+        IntDType::I64,
+    ));
+    assert_eq!(first.as_slice::<i64>()?, second.as_slice::<i64>()?);
+    assert!(
+        first
+            .as_slice::<i64>()?
+            .iter()
+            .all(|v| (0..255).contains(v))
+    );
     let value = integer(vec![2, 3, 0, 5], vec![2, 2]);
     assert_eq!(
         read_int(RudaAscend::int_cumprod(value.clone(), 1)).as_slice::<i64>()?,

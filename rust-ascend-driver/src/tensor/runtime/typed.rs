@@ -33,6 +33,7 @@ pub enum TensorBinaryOp {
     BitwiseAnd,
     BitwiseOr,
     BitwiseXor,
+    LeftShift,
     RightShift,
 }
 
@@ -236,6 +237,7 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
                 TensorBinaryOp::BitwiseAnd
                     | TensorBinaryOp::BitwiseOr
                     | TensorBinaryOp::BitwiseXor
+                    | TensorBinaryOp::LeftShift
                     | TensorBinaryOp::RightShift
             );
             let arithmetic = matches!(
@@ -251,6 +253,7 @@ fn output_layout(operation: &Operation, inputs: &[TensorLayout]) -> Result<Tenso
                     | TensorBinaryOp::BitwiseAnd
                     | TensorBinaryOp::BitwiseOr
                     | TensorBinaryOp::BitwiseXor
+                    | TensorBinaryOp::LeftShift
                     | TensorBinaryOp::RightShift
             );
             if (logical && kind != CannDType::Bool)
@@ -1110,6 +1113,7 @@ fn binary_symbols(op: TensorBinaryOp) -> (&'static CStr, &'static CStr) {
             c"aclnnBitwiseXorTensorGetWorkspaceSize",
             c"aclnnBitwiseXorTensor",
         ),
+        TensorBinaryOp::LeftShift => (c"aclnnLeftShiftGetWorkspaceSize", c"aclnnLeftShift"),
         TensorBinaryOp::RightShift => (c"aclnnRightShiftGetWorkspaceSize", c"aclnnRightShift"),
         TensorBinaryOp::Pow => (
             c"aclnnPowTensorTensorGetWorkspaceSize",
@@ -1870,6 +1874,7 @@ mod tests {
                 TensorBinaryOp::BitwiseAnd,
                 TensorBinaryOp::BitwiseOr,
                 TensorBinaryOp::BitwiseXor,
+                TensorBinaryOp::LeftShift,
                 TensorBinaryOp::RightShift,
             ] {
                 let output =
