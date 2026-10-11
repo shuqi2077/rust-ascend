@@ -170,7 +170,7 @@ pub fn rms_norm<B: RmsNormBackend, const D: usize>(input: Tensor<B, D>, weight: 
     }};
     let input = unquantized(input.into_primitive())?;
     let weight = unquantized(weight.into_primitive())?;
-    B::rms_norm(input, weight, epsilon).map(|output| Tensor::from_primitive(TensorPrimitive::Float(output)))
+    <B as RmsNormBackend>::rms_norm(input, weight, epsilon).map(|output| Tensor::from_primitive(TensorPrimitive::Float(output)))
 }
 
 fn buffer(tensor: Primitive) -> TensorBuffer {
