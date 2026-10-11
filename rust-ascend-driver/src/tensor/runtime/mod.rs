@@ -460,7 +460,7 @@ impl Runtime for AscendRuntime {
         "ascend-950dt"
     }
     fn max_ruda_count() -> (u32, u32, u32) {
-        (u32::MAX, 1, 1)
+        (u32::MAX, 65535, 65535)
     }
     fn can_read_tensor(shape: &Shape, strides: &Strides) -> bool {
         contiguous(shape, strides)
@@ -551,15 +551,15 @@ impl DeviceService for AscendServer {
             plane_size_min: 32,
             plane_size_max: 32,
             max_bindings: 8,
-            max_shared_memory_size: 0,
+            max_shared_memory_size: 128*1024,
             max_ruda_count: AscendRuntime::max_ruda_count(),
-            max_units_per_ruda: 1024,
-            max_ruda_dim: (1024, 1, 1),
+            max_units_per_ruda: 2048,
+            max_ruda_dim: (2048, 2048, 2048),
             num_streaming_multiprocessors: None,
             num_cpu_cores: None,
             num_tensor_cores: None,
             min_tensor_cores_dim: None,
-            max_vector_size: 1,
+            max_vector_size: 32,
         };
         let mut properties = DeviceProperties::new(
             Features::default(),
@@ -570,6 +570,29 @@ impl DeviceService for AscendServer {
         properties.register_address_type(AddressType::U64);
         properties.register_address_type(AddressType::U32);
         properties.register_type_usage(FloatKind::F32, TypeUsage::Buffer);
+        properties.register_type_usage(FloatKind::F32, TypeUsage::Conversion);
+        properties.register_type_usage(FloatKind::F32, TypeUsage::Arithmetic);
+        properties.register_type_usage(FloatKind::F32, TypeUsage::DotProduct);
+        for f in [FloatKind::F16,FloatKind::BF16] {
+            properties.register_type_usage(f,TypeUsage::Buffer);
+            properties.register_type_usage(f,TypeUsage::Conversion);
+            properties.register_type_usage(f,TypeUsage::Arithmetic);
+            properties.register_type_usage(f,TypeUsage::DotProduct);
+        }
+        for i in [ruda_core::ir::IntKind::I8,ruda_core::ir::IntKind::I16,ruda_core::ir::IntKind::I32,ruda_core::ir::IntKind::I64] {
+            properties.register_type_usage(i,TypeUsage::Buffer);
+            properties.register_type_usage(i,TypeUsage::Conversion);
+            properties.register_type_usage(i,TypeUsage::Arithmetic);
+            properties.register_type_usage(i,TypeUsage::DotProduct);
+        }
+        for i in [ruda_core::ir::UIntKind::U8,ruda_core::ir::UIntKind::U16,ruda_core::ir::UIntKind::U32,ruda_core::ir::UIntKind::U64] {
+            properties.register_type_usage(i,TypeUsage::Buffer);
+            properties.register_type_usage(i,TypeUsage::Conversion);
+            properties.register_type_usage(i,TypeUsage::Arithmetic);
+            properties.register_type_usage(i,TypeUsage::DotProduct);
+        }
+        properties.register_type_usage(ruda_core::ir::ElemType::Bool,TypeUsage::Buffer);
+        properties.register_type_usage(ruda_core::ir::ElemType::Bool,TypeUsage::Conversion);
         let logger = Arc::new(ServerLogger::default());
         let utilities = Arc::new(ServerUtilities::new(
             properties,
@@ -669,7 +692,7 @@ impl AscendServer {
                 "Ascend common IR does not yet lower tensor maps",
             ));
         }
-        let elements = arguments
+        let buffer_bytes = arguments
             .buffers
             .iter()
             .map(|b| {
@@ -678,39 +701,7 @@ impl AscendServer {
                     .and_then(|n| n.checked_sub(b.offset_end.unwrap_or(0)))
                     .ok_or_else(|| server_error("invalid kernel binding"))
             })
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .max()
-            .unwrap_or(0);
-        if elements % 4 != 0 {
-            return Err(server_error("FP32 kernel domain must have whole elements"));
-        }
-        let mut options = AscendOptions {
-            target: Some(AscendTarget::Ascend950DT),
-            elements: elements / 4,
-            ..Default::default()
-        };
-        let compiled = if arguments.info.data.is_empty() {
-            if let Some(definition)=task.kernel_definition() {
-                if let Some(elements)=declared_map_elements(&definition) {options.elements=elements;}
-            }
-            task.compile(&mut AscendCompiler, &options, mode, task.address_type())
-        } else {
-            use ruda_core::compiler::Compiler;
-            let definition=task.kernel_definition().ok_or_else(||server_error("packed arguments require a public KernelDefinition"))?;
-            let dim=definition.ruda_dim;
-            rust_ascend_compiler::ascend::arguments::specialize(definition,&arguments.info.data,
-                arguments.info.dynamic_metadata_offset,task.address_type()).and_then(|definition| {
-                options.elements=definition.buffers.iter().filter(|b| b.visibility==ruda_core::kernel::Visibility::ReadWrite)
-                    .filter_map(|b|b.size).map(|n|n as u64).max().unwrap_or(0);
-                AscendCompiler.compile(definition,&options,mode,task.address_type()).map(|repr| {
-                    ruda_runtime::runtime::kernel::CompiledKernel::<AscendCompiler> {
-                        entrypoint_name:repr.entrypoint().into(), source:repr.source().into(), repr:Some(repr),
-                        debug_name:Some(task.name()),ruda_dim:dim,debug_info:None,
-                    }
-                })
-            })
-        }.map_err(|e| ServerError::Launch(LaunchError::CompilationError(e)))?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         let grid = match count {
             RudaCount::Static(x, y, z) => (x, y, z),
             RudaCount::Dynamic(binding) => {
@@ -729,6 +720,35 @@ impl AscendServer {
                 (u(0), u(4), u(8))
             }
         };
+        let mut options = AscendOptions {target:Some(AscendTarget::Ascend950DT),..Default::default()};
+        let compiled = if let Some(mut definition)=task.kernel_definition() {
+            if definition.buffers.len()!=buffer_bytes.len(){return Err(server_error("IR/runtime binding count mismatch"));}
+            if !arguments.info.data.is_empty() {
+                definition=rust_ascend_compiler::ascend::arguments::specialize(definition,&arguments.info.data,
+                    arguments.info.dynamic_metadata_offset,task.address_type())
+                    .map_err(|e|ServerError::Launch(LaunchError::CompilationError(e)))?;
+            }
+            for (buffer,&bytes) in definition.buffers.iter_mut().zip(&buffer_bytes) {
+                let width=buffer.ty.size() as u64;
+                if width==0||bytes%width!=0 {return Err(server_error("IR buffer has a partial typed element"));}
+                let length=usize::try_from(bytes/width).map_err(server_error)?;
+                if buffer.size.is_none(){buffer.size=Some(length);}
+                if buffer.size!=Some(length){return Err(server_error("IR buffer length differs from runtime binding"));}
+            }
+            let dim=definition.ruda_dim;
+            compile_shared_definition(definition,grid,mode,task.address_type()).map(|repr| {
+                ruda_runtime::runtime::kernel::CompiledKernel::<AscendCompiler>{
+                    entrypoint_name:repr.entrypoint().into(),source:repr.source().into(),repr:Some(repr),
+                    debug_name:Some(task.name()),ruda_dim:dim,debug_info:None,
+                }
+            })
+        }else{
+            if !arguments.info.data.is_empty(){return Err(server_error("packed arguments require a public KernelDefinition"));}
+            let bytes=buffer_bytes.iter().copied().max().unwrap_or(0);
+            if bytes%4!=0{return Err(server_error("legacy FP32 kernel domain must have whole elements"));}
+            options.elements=bytes/4;
+            task.compile(&mut AscendCompiler,&options,mode,task.address_type())
+        }.map_err(|e|ServerError::Launch(LaunchError::CompilationError(e)))?;
         let repr = compiled
             .repr
             .ok_or_else(|| server_error("Ascend task must return its compiled binding contract"))?;
@@ -865,6 +885,25 @@ fn declared_map_elements(definition:&ruda_core::kernel::KernelDefinition)->Optio
     Some(first as u64)
 }
 
+fn compile_shared_definition(mut definition:ruda_core::kernel::KernelDefinition,grid:(u32,u32,u32),
+    mode:ExecutionMode,address:ruda_core::ir::StorageType)
+    -> std::result::Result<rust_ascend_compiler::ascend::AscendKernel,ruda_core::compiler::CompilationError> {
+    use ruda_core::{compiler::{Compiler,CompilationError},ir::{FloatKind,StorageType}};
+    let errors=definition.body.pop_errors();
+    if !errors.is_empty(){return Err(CompilationError::Validation{reason:errors.join("; "),backtrace:BackTrace::capture()});}
+    let mut options=AscendOptions{target:Some(AscendTarget::Ascend950DT),..Default::default()};
+    if grid.1==1&&grid.2==1&&definition.buffers.iter().all(|b|b.ty.storage_type()==StorageType::from(FloatKind::F32)) {
+        if let Some(elements)=declared_map_elements(&definition) {
+            options.elements=elements;
+            if let Ok(kernel)=AscendCompiler.compile(definition.clone(),&options,mode,address) {
+                if validate_grid(grid,definition.ruda_dim,&kernel).is_ok(){return Ok(kernel);}
+            }
+        }
+    }
+    options.simt_grid=Some([grid.0,grid.1,grid.2]);
+    AscendCompiler.compile(definition,&options,mode,address)
+}
+
 fn contiguous(shape: &[usize], strides: &[usize]) -> bool {
     if shape.len() != strides.len() {
         return false;
@@ -907,6 +946,12 @@ fn validate_grid(
     dim: RudaDim,
     kernel: &rust_ascend_compiler::ascend::AscendKernel,
 ) -> std::result::Result<(), ServerError> {
+    if let Some(expected)=kernel.simt_grid() {
+        if expected!=[grid.0,grid.1,grid.2]||kernel.simt_dim()!=Some([dim.x,dim.y,dim.z]) {
+            return Err(server_error("SIMT launch grid/thread block differs from compiled contract"));
+        }
+        return Ok(());
+    }
     if grid.1 != 1 || grid.2 != 1 || dim.y != 1 || dim.z != 1 || dim.x == 0 {
         return Err(server_error(
             "Ascend common IR requires a one-dimensional logical grid",
@@ -964,6 +1009,23 @@ mod tests {
         for grid in [(1, 1, 1), (3, 1, 1), (2, 2, 1), (0, 1, 1)] {
             assert!(validate_grid(grid, dim, &kernel).is_err());
         }
+    }
+
+    #[test]
+    fn shared_ir_keeps_large_vector_maps_but_new_instructions_use_simt() {
+        use rust_ascend_compiler::ascend::programs::{MapProgram,definition};
+        use ruda_core::ir::{UIntKind,Arithmetic,UnaryOperator,Instruction,Operation,Operator,Variable,VariableKind};
+        let n=4_194_305usize;
+        let mut ir=definition(MapProgram::Copy);for b in &mut ir.buffers{b.size=Some(n);}
+        let vector=compile_shared_definition(ir.clone(),((n as u32).div_ceil(64),1,1),ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+        assert_eq!(vector.simt_grid(),None);assert_eq!(vector.elements(),n as u64);
+        for b in &mut ir.buffers{b.size=Some(17);}
+        let input=ir.body.instructions[0].out.unwrap();
+        let output=Variable::new(VariableKind::LocalConst{id:77},input.ty);
+        ir.body.instructions.insert(1,Instruction::new(Arithmetic::Log1p(UnaryOperator{input}),output));
+        if let Operation::Operator(Operator::IndexAssign(o))=&mut ir.body.instructions[2].operation{o.value=output;}
+        let simt=compile_shared_definition(ir,(1,1,1),ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+        assert_eq!(simt.simt_grid(),Some([1,1,1]));assert!(simt.source().contains("log1pf("));
     }
 
     #[test]

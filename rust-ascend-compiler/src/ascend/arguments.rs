@@ -6,6 +6,7 @@ use ruda_core::{
     kernel::KernelDefinition,
 };
 use std::collections::HashMap;
+enum MetaValue { Scalar(Variable), Array(Vec<Variable>,Variable) }
 
 /// Resolve launch-time scalar and tensor metadata values using RUDA's own ABI
 /// layout. FP32 scalar bit patterns are preserved through IR reinterpretation.
@@ -21,18 +22,19 @@ pub fn specialize(
     ) {
         return Err(unsupported("metadata address type must be u32 or u64"));
     }
-    if kernel.buffers.len() > 8 || !kernel.tensor_maps.is_empty() {
+    if !kernel.tensor_maps.is_empty() {
         return Err(unsupported(
-            "packed arguments require at most eight buffers and no tensor maps",
+            "packed arguments do not support tensor maps",
         ));
     }
     for group in &kernel.scalars {
         if !matches!(
             group.ty,
             StorageType::Scalar(
-                ElemType::Float(FloatKind::F32)
-                    | ElemType::UInt(UIntKind::U32 | UIntKind::U64)
-                    | ElemType::Int(IntKind::I32 | IntKind::I64)
+                ElemType::Float(FloatKind::F32 | FloatKind::F16 | FloatKind::BF16)
+                    | ElemType::UInt(UIntKind::U8 | UIntKind::U16 | UIntKind::U32 | UIntKind::U64)
+                    | ElemType::Int(IntKind::I8 | IntKind::I16 | IntKind::I32 | IntKind::I64)
+                    | ElemType::Bool
             )
         ) {
             return Err(unsupported("packed scalar type"));
@@ -83,6 +85,9 @@ pub fn specialize(
                     Operation::Branch(Branch::IfElse(b)) => {
                         used(&b.scope_if, id) || used(&b.scope_else, id)
                     }
+                    Operation::Branch(Branch::Loop(b)) => used(&b.scope,id),
+                    Operation::Branch(Branch::RangeLoop(b)) => used(&b.scope,id),
+                    Operation::Branch(Branch::Switch(b)) => used(&b.scope_default,id)||b.cases.iter().any(|(_,s)|used(s,id)),
                     _ => false,
                 }
         })
@@ -95,7 +100,7 @@ pub fn specialize(
                 Type::new(field.ty),
             );
             let value = match field.ty.elem_type() {
-                ElemType::Float(FloatKind::F32) => {
+                ElemType::Float(FloatKind::F32 | FloatKind::F16 | FloatKind::BF16) => {
                     while used(&kernel.body, next) {
                         next = next
                             .checked_sub(1)
@@ -109,7 +114,7 @@ pub fn specialize(
                         Operator::Reinterpret(UnaryOperator {
                             input: Variable::constant(
                                 ConstantValue::UInt(bits),
-                                Type::new(UIntKind::U32.into()),
+                                Type::new(if field.ty.size()==2 {UIntKind::U16.into()}else{UIntKind::U32.into()}),
                             ),
                         }),
                         local,
@@ -119,6 +124,9 @@ pub fn specialize(
                 ElemType::Int(IntKind::I32) => {
                     Variable::constant(ConstantValue::Int(bits as i32 as i64), source.ty)
                 }
+                ElemType::Int(IntKind::I8) => Variable::constant(ConstantValue::Int(bits as i8 as i64),source.ty),
+                ElemType::Int(IntKind::I16) => Variable::constant(ConstantValue::Int(bits as i16 as i64),source.ty),
+                ElemType::Bool => Variable::constant(ConstantValue::Bool(bits!=0),source.ty),
                 ElemType::Int(IntKind::I64) => {
                     Variable::constant(ConstantValue::Int(bits as i64), source.ty)
                 }
@@ -128,7 +136,7 @@ pub fn specialize(
         }
     }
     let meta_base = info.sized_meta.map_or(0, |field| field.offset);
-    let resolve_meta = |op: &Metadata| -> Result<Variable> {
+    let resolve_meta = |op: &Metadata| -> Result<MetaValue> {
         let (var, dim) = match op {
             Metadata::Length { var } | Metadata::BufferLength { var } | Metadata::Rank { var } => {
                 (*var, None)
@@ -156,51 +164,54 @@ pub fn specialize(
                 match op {
                     Metadata::Rank { .. } => info.metadata.rank_index(extended),
                     _ => {
-                        let dim = match dim.unwrap().kind {
-                            VariableKind::Constant(ConstantValue::UInt(n)) => n,
-                            _ => return Err(unsupported("dynamic metadata dimension")),
-                        };
                         let rank = read(
                             meta_base
                                 + info.metadata.rank_index(extended) as usize * address.size(),
                             address,
                         )?;
-                        if dim >= rank {
-                            return Err(invalid("metadata dimension exceeds rank"));
-                        }
                         let field = if matches!(op, Metadata::Shape { .. }) {
                             info.metadata.shape_offset_index(extended)
                         } else {
                             info.metadata.stride_offset_index(extended)
                         };
-                        let offset = read(meta_base + field as usize * address.size(), address)?
-                            .checked_add(dim)
+                        let base = read(meta_base + field as usize * address.size(), address)?;
+                        let at=|dim:u64|->Result<Variable>{
+                            let offset = base.checked_add(dim)
                             .and_then(|n| usize::try_from(n).ok())
                             .and_then(|n| n.checked_mul(address.size()))
                             .and_then(|n| n.checked_add(info.dynamic_meta_offset))
                             .ok_or_else(|| invalid("metadata offset overflow"))?;
-                        return Ok(Variable::constant(
+                            Ok(Variable::constant(
                             ConstantValue::UInt(read(offset, address)?),
                             Type::new(address),
-                        ));
+                            ))
+                        };
+                        let dim=dim.unwrap();
+                        if let VariableKind::Constant(ConstantValue::UInt(n))=dim.kind {
+                            if n>=rank{return Err(invalid("metadata dimension exceeds rank"));}
+                            return Ok(MetaValue::Scalar(at(n)?));
+                        }
+                        if rank>bytes.len() as u64 / address.size() as u64{return Err(invalid("metadata rank exceeds argument buffer"));}
+                        return Ok(MetaValue::Array((0..rank).map(at).collect::<Result<Vec<_>>>()?,dim));
                     }
                 }
             }
         };
-        Ok(Variable::constant(
+        Ok(MetaValue::Scalar(Variable::constant(
             ConstantValue::UInt(read(meta_base + index as usize * address.size(), address)?),
             Type::new(address),
-        ))
+        )))
     };
     fn scope(
         scope: &mut Scope,
         values: &mut HashMap<Variable, Variable>,
-        meta: &impl Fn(&Metadata) -> Result<Variable>,
+        meta: &impl Fn(&Metadata) -> Result<MetaValue>,
     ) -> Result<()> {
         let replace = |v: Variable, values: &HashMap<Variable, Variable>| {
             values.get(&v).copied().unwrap_or(v)
         };
-        for i in &mut scope.instructions {
+        let mut instructions=std::mem::take(&mut scope.instructions);
+        for i in &mut instructions {
             match &mut i.operation {
                 Operation::Branch(Branch::If(b)) => {
                     b.cond = replace(b.cond, values);
@@ -211,6 +222,17 @@ pub fn specialize(
                     scope_child(&mut b.scope_if, values, meta)?;
                     scope_child(&mut b.scope_else, values, meta)?;
                 }
+                Operation::Branch(Branch::Loop(b))=>scope_child(&mut b.scope,values,meta)?,
+                Operation::Branch(Branch::RangeLoop(b))=>{
+                    b.start=replace(b.start,values);b.end=replace(b.end,values);
+                    b.step=b.step.map(|s|replace(s,values));
+                    scope_child(&mut b.scope,values,meta)?;
+                },
+                Operation::Branch(Branch::Switch(b))=>{
+                    b.value=replace(b.value,values);
+                    for (value,child) in &mut b.cases {*value=replace(*value,values);scope_child(child,values,meta)?;}
+                    scope_child(&mut b.scope_default,values,meta)?;
+                },
                 Operation::NonSemantic(_) => {}
                 operation => {
                     if let Some(args) = operation.args() {
@@ -221,13 +243,24 @@ pub fn specialize(
                 }
             }
             if let Operation::Metadata(op) = &i.operation {
-                let value = meta(op)?;
                 let out = i.out.ok_or_else(|| invalid("metadata result missing"))?;
-                let value = Variable::new(value.kind, out.ty);
-                i.operation = Operation::Copy(value);
-                values.insert(out, value);
+                let var=match op {Metadata::Length{var}|Metadata::BufferLength{var}|Metadata::Rank{var}|Metadata::Shape{var,..}|Metadata::Stride{var,..}=>*var};
+                if !matches!(var.kind,VariableKind::GlobalInputArray(_)|VariableKind::GlobalOutputArray(_)) {
+                    values.remove(&out);continue;
+                }
+                match meta(op)? {
+                    MetaValue::Scalar(value)=>{
+                        let value=Variable::new(value.kind,out.ty);
+                        i.operation=Operation::Copy(value);
+                        if matches!(out.kind,VariableKind::LocalConst{..}|VariableKind::Versioned{..}){values.insert(out,value);}
+                    },
+                    MetaValue::Array(data,index)=>{
+                        let array=*scope.create_const_array(Type::new(out.storage_type()),data);
+                        i.operation=Operator::Index(IndexOperator{list:array,index,vector_size:0,unroll_factor:1}).into();
+                    },
+                }
             } else if let (Some(out), Operation::Copy(value)) = (i.out, &i.operation) {
-                if matches!(value.kind, VariableKind::Constant(_)) {
+                if matches!(value.kind, VariableKind::Constant(_)) && matches!(out.kind,VariableKind::LocalConst{..}|VariableKind::Versioned{..}) {
                     values.insert(out, *value);
                 } else {
                     values.remove(&out);
@@ -236,12 +269,13 @@ pub fn specialize(
                 values.remove(&out);
             }
         }
+        scope.instructions=instructions;
         Ok(())
     }
     fn scope_child(
         child: &mut Scope,
         values: &HashMap<Variable, Variable>,
-        meta: &impl Fn(&Metadata) -> Result<Variable>,
+        meta: &impl Fn(&Metadata) -> Result<MetaValue>,
     ) -> Result<()> {
         scope(child, &mut values.clone(), meta)
     }
@@ -252,7 +286,7 @@ pub fn specialize(
     for (index, b) in kernel.buffers.iter_mut().enumerate() {
         let bytes = info.sized_meta.as_ref().ok_or_else(|| invalid("missing buffer metadata"))?.offset
             + info.metadata.buffer_len_index(index as u32) as usize * address.size();
-        b.size = Some(u32::try_from(read(bytes, address)?).map_err(|_| unsupported("buffer length exceeds u32"))? as usize);
+        b.size = Some(usize::try_from(read(bytes, address)?).map_err(|_| unsupported("buffer length exceeds host address space"))?);
         b.has_extended_meta = false;
     }
     Ok(kernel)

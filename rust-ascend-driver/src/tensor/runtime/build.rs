@@ -14,6 +14,7 @@ pub(super) struct Toolchain {
     compiler: PathBuf,
     linker: PathBuf,
     includes: Vec<PathBuf>,
+    toolkit: PathBuf,
     timeout: Duration,
     fingerprint: String,
 }
@@ -52,22 +53,43 @@ impl Toolchain {
             compiler,
             linker,
             includes,
+            toolkit: root.to_path_buf(),
             timeout,
             fingerprint: format!("{:x}", digest.finalize()),
         })
     }
 
     pub fn build(&self, kernel: &AscendKernel) -> Result<TempDir> {
-        let work = self.build_source(kernel.source(), kernel.entrypoint(), false)?;
-        let image = fs::read(work.path().join("kernel.o")).map_err(error)?;
+        let work = if kernel.simt_grid().is_some() {self.build_simt(kernel.source())?}
+            else {self.build_source(kernel.source(), kernel.entrypoint(), false)?};
+        let image = fs::read(work.path().join(kernel.artifact_name())).map_err(error)?;
         let manifest = format!(
-            "{}object=kernel.o\nsource_sha256={:x}\nobject_sha256={:x}\ncompiler_sha256={}\n",
+            "{}object={}\nsource_sha256={:x}\nobject_sha256={:x}\ncompiler_sha256={}\n",
             kernel.build_contract(),
+            kernel.artifact_name(),
             Sha256::digest(kernel.source().as_bytes()),
             Sha256::digest(&image),
             self.fingerprint
         );
         fs::write(work.path().join("kernel.ruda"), manifest).map_err(error)?;
+        Ok(work)
+    }
+
+    fn build_simt(&self, source: &str) -> Result<TempDir> {
+        let work = tempfile::Builder::new().prefix("rust-ascend-simt-").tempdir().map_err(error)?;
+        let root = work.path();
+        fs::write(root.join("kernel.asc"), source).map_err(error)?;
+        let mut compile = Command::new(&self.compiler);
+        compile.args(["-x", "asc", "-std=c++20", "-O2", "-ffp-contract=off",
+            "--npu-arch=dav-3510", "--enable-simt", "-shared", "-fPIC"]);
+        for include in &self.includes {compile.arg("-I").arg(include);}
+        compile.arg("-I").arg(self.toolkit.join("include"));
+        compile.arg(root.join("kernel.asc")).arg("-o").arg(root.join("kernel.so"));
+        self.run(compile, &root.join("compile.log"))?;
+        let image=fs::read(root.join("kernel.so")).map_err(error)?;
+        if image.len()<64 || image.get(..6)!=Some(b"\x7fELF\x02\x01") || image.get(16..18)!=Some(&[3,0]) {
+            return Err(error("Bisheng SIMT output must be a host ELF64 shared library"));
+        }
         Ok(work)
     }
 

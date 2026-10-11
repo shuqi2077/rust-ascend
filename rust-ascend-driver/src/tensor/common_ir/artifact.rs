@@ -11,7 +11,7 @@ fn parse(text:&str)->Result<BTreeMap<String,String>,CannError>{
 pub(super) fn verify_manifest(text:&str,expected:&AscendKernel,image:&[u8])->Result<(),CannError>{
     let mut actual=parse(text)?;
     for(k,v)in parse(&expected.build_contract())?{if actual.remove(&k).as_deref()!=Some(v.as_str()){return Err(invalid(format!("common-IR contract mismatch: {k}")));}}
-    if actual.remove("object").as_deref()!=Some("kernel.o"){return Err(invalid("artifact object must be kernel.o"));}
+    if actual.remove("object").as_deref()!=Some(expected.artifact_name()){return Err(invalid("artifact object differs from compiler contract"));}
     let source_hash=format!("{:x}",Sha256::digest(expected.source().as_bytes()));
     if actual.remove("source_sha256").as_deref()!=Some(source_hash.as_str()){return Err(invalid("artifact was built from a different generated device program"));}
     let object_hash=format!("{:x}",Sha256::digest(image));
@@ -19,11 +19,12 @@ pub(super) fn verify_manifest(text:&str,expected:&AscendKernel,image:&[u8])->Res
     let compiler=actual.remove("compiler_sha256").ok_or_else(||invalid("missing compiler identity"))?;
     if compiler.len()!=64||!compiler.bytes().all(|c|c.is_ascii_hexdigit()){return Err(invalid("invalid compiler identity"));}
     if !actual.is_empty(){return Err(invalid("unknown artifact manifest fields"));}
-    if image.len()<64||image.len()>128*1024*1024||image.get(..6)!=Some(&b"\x7fELF\x02\x01"[..])||image.get(16..18)!=Some(&[2,0][..]){return Err(invalid("expected a linked little-endian ELF64 device object"));}
+    let elf_type=if expected.simt_grid().is_some(){[3,0]}else{[2,0]};
+    if image.len()<64||image.len()>128*1024*1024||image.get(..6)!=Some(&b"\x7fELF\x02\x01"[..])||image.get(16..18)!=Some(&elf_type[..]){return Err(invalid("linked ELF64 kind differs from compiler contract"));}
     Ok(())
 }
 pub(super) fn read(dir:&Path,kernel:&AscendKernel)->Result<Vec<u8>,CannError>{
-    let manifest=dir.join("kernel.ruda");let file=dir.join("kernel.o");
+    let manifest=dir.join("kernel.ruda");let file=dir.join(kernel.artifact_name());
     if std::fs::metadata(&manifest).map_err(|e|invalid(e.to_string()))?.len()>131072{return Err(invalid("oversized common-IR manifest"));}
     let size=std::fs::metadata(&file).map_err(|e|invalid(e.to_string()))?.len();if !(64..=128*1024*1024).contains(&size){return Err(invalid("invalid common-IR object size"));}
     let text=std::fs::read_to_string(manifest).map_err(|e|invalid(e.to_string()))?;
@@ -35,6 +36,15 @@ pub(super) fn read(dir:&Path,kernel:&AscendKernel)->Result<Vec<u8>,CannError>{
     #[test]fn exact_compiler_contract_required(){let(k,b,m)=fixture();assert!(verify_manifest(&m,&k,&b).is_ok());for changed in [m.replace("elements=17","elements=18"),m.replace("Ascend950DT","OtherSoc"),m.replace("binding_2=2,w,68","binding_2=2,r,68"),m.replace("kernel.o","../kernel.o"),format!("{m}unknown=yes\n")]{assert!(verify_manifest(&changed,&k,&b).is_err());}}
     #[test]fn corrupted_object_is_rejected(){let(k,mut b,m)=fixture();b[33]=1;assert!(verify_manifest(&m,&k,&b).is_err());}
     #[test]fn non_binary_or_emit_only_is_rejected(){let(k,_,m)=fixture();assert!(verify_manifest(&m,&k,b"source, not binary").is_err());assert!(verify_manifest(&k.build_contract(),&k,&[0;64]).is_err());}
+    #[test]fn simt_contract_requires_host_shared_library_and_exact_grid(){
+        let mut definition=definition(MapProgram::Copy);for b in &mut definition.buffers{b.size=Some(17);}
+        let k=AscendCompiler.compile(definition,&AscendOptions{target:Some(AscendTarget::Ascend950DT),simt_grid:Some([2,3,4]),..Default::default()},ExecutionMode::Checked,UIntKind::U64.into()).unwrap();
+        let mut image=vec![0;64];image[..6].copy_from_slice(b"\x7fELF\x02\x01");image[16]=3;
+        let m=format!("{}object=kernel.so\nsource_sha256={:x}\nobject_sha256={:x}\ncompiler_sha256={}\n",k.build_contract(),Sha256::digest(k.source().as_bytes()),Sha256::digest(&image),"0".repeat(64));
+        assert!(verify_manifest(&m,&k,&image).is_ok());
+        for changed in [m.replace("grid=2,3,4","grid=24,1,1"),m.replace("kernel.so","kernel.o"),m.replace("storage=Scalar(Float(F32))","storage=Scalar(Int(I32))")]{assert!(verify_manifest(&changed,&k,&image).is_err());}
+        image[16]=2;assert!(verify_manifest(&m,&k,&image).is_err());
+    }
 }
 
 #[cfg(test)] mod row_contract_tests {

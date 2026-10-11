@@ -11,6 +11,7 @@ mod emit;
 mod plan;
 mod rows;
 mod row_emit;
+mod simt;
 pub mod row_programs;
 #[cfg(test)] mod row_tests;
 pub mod programs;
@@ -57,19 +58,20 @@ pub struct AscendOptions {
     pub vector_cores: u32,
     pub ub_limit_bytes: u32,
     pub reuse_temporaries: bool,
+    pub simt_grid: Option<[u32; 3]>,
 }
 impl Default for AscendOptions {
     fn default() -> Self { Self { target: None, elements: 0, row_width: None, tile_elements: 256,
-        vector_cores: 32, ub_limit_bytes: 128 * 1024, reuse_temporaries: true } }
+        vector_cores: 32, ub_limit_bytes: 128 * 1024, reuse_temporaries: true, simt_grid: None } }
 }
 impl AscendOptions {
     fn validate(&self) -> Result<AscendTarget> {
         let target = self.target.ok_or_else(|| invalid("explicit Ascend target required"))?;
-        if self.elements > u32::MAX as u64 { return Err(invalid("logical element count exceeds u32")); }
-        if !(8..=4096).contains(&self.tile_elements) || self.tile_elements % 8 != 0 {
+        if self.simt_grid.is_none() && self.elements > u32::MAX as u64 { return Err(invalid("logical element count exceeds u32")); }
+        if self.simt_grid.is_none() && (!(8..=4096).contains(&self.tile_elements) || self.tile_elements % 8 != 0) {
             return Err(invalid("tile_elements must be 8..4096 and a multiple of 8 FP32 elements"));
         }
-        if !(1..=32).contains(&self.vector_cores) { return Err(invalid("vector_cores must be 1..32")); }
+        if self.simt_grid.is_none() && !(1..=32).contains(&self.vector_cores) { return Err(invalid("vector_cores must be 1..32")); }
         if self.ub_limit_bytes == 0 || self.ub_limit_bytes > 128 * 1024 {
             return Err(invalid("UB limit must be 1..131072 bytes; larger limits are not certified"));
         }
@@ -78,7 +80,7 @@ impl AscendOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AscendBinding { pub id: u32, pub writable: bool, pub bytes: u64 }
+pub struct AscendBinding { pub id: u32, pub writable: bool, pub bytes: u64, pub storage: StorageType }
 
 /// Immutable compiler result. Only the compiler can create its binding contract.
 /// Buffers follow original KernelDefinition order, with no hidden runtime metadata.
@@ -87,6 +89,7 @@ pub struct AscendKernel {
     source: String, entrypoint: String, target: AscendTarget,
     elements: u64, row_width: Option<u32>, block_dim: u32, tile_elements: u32,
     ub_bytes: u32, temporary_slots: usize, bindings: Vec<AscendBinding>, initialized_outputs: bool,
+    simt_grid: Option<[u32; 3]>, simt_dim: Option<[u32; 3]>,
 }
 impl AscendKernel {
     pub fn source(&self) -> &str { &self.source }
@@ -100,9 +103,19 @@ impl AscendKernel {
     pub fn temporary_slots(&self) -> usize { self.temporary_slots }
     pub fn bindings(&self) -> &[AscendBinding] { &self.bindings }
     pub fn requires_initialized_outputs(&self) -> bool { self.initialized_outputs }
+    pub fn simt_grid(&self) -> Option<[u32; 3]> { self.simt_grid }
+    pub fn simt_dim(&self) -> Option<[u32; 3]> { self.simt_dim }
+    pub fn artifact_name(&self) -> &'static str { if self.simt_grid.is_some() { "kernel.so" } else { "kernel.o" } }
     /// Build-time metadata only. Not a loadable artifact until a real CANN build
     /// succeeds and the build tool adds source/object/compiler digests.
     pub fn build_contract(&self) -> String {
+        if let (Some(grid), Some(dim)) = (self.simt_grid, self.simt_dim) {
+            let mut t = format!("schema=ruda.ascend.common-simt.v1\nsource_language=ruda-kernel-ir\nlowering=ascendc-simt\nsoc={}\narch=dav-3510\nkernel_name={}\ngrid={},{},{}\nthreads={},{},{}\nelements={}\nbindings={}\n",self.target.soc(),self.entrypoint,grid[0],grid[1],grid[2],dim[0],dim[1],dim[2],self.elements,self.bindings.len());
+            for (i,b) in self.bindings.iter().enumerate() {
+                t.push_str(&format!("binding_{i}={},{},{}\nbinding_{i}_storage={:?}\n",b.id,if b.writable {"w"} else {"r"},b.bytes,b.storage));
+            }
+            return t;
+        }
         let schema = if self.row_width.is_some() { "ruda.ascend.common-row.v1" } else { "ruda.ascend.common-map.v1" };
         let mut t = format!("schema={schema}\nsource_language=ruda-kernel-ir\nlowering=ascendc-vector\nsoc={}\narch={}\nkernel_name={}\nelements={}\nblock_dim={}\ntile_elements={}\nub_bytes={}\nbindings={}\n",
             self.target.soc(), self.target.arch(), self.entrypoint, self.elements,
@@ -121,7 +134,7 @@ impl fmt::Display for AscendKernel {
 #[derive(Clone, Debug, Default)]
 pub struct AscendCompiler;
 impl AscendCompiler {
-    pub const CACHE_VERSION: u32 = 15;
+    pub const CACHE_VERSION: u32 = 16;
     /// Explicit map compilation permitting partial, provably injective output patches.
     /// Unwritten output values are retained; callers provide initialized output storage.
     /// Ordinary `Compiler::compile` retains the complete contiguous-output contract.
@@ -144,6 +157,10 @@ impl Compiler for AscendCompiler {
 fn compile_kernel(kernel:KernelDefinition,o:&AscendOptions,mode:ExecutionMode,address:StorageType,
     partial_stores:bool)->Result<AscendKernel> {
         let target = o.validate()?;
+        if let Some(grid) = o.simt_grid {
+            if partial_stores || o.row_width.is_some() {return Err(unsupported("SIMT cannot use vector partial-map or row options"));}
+            return simt::compile(kernel,o,target,grid,mode,address);
+        }
         if mode == ExecutionMode::Validate || (mode==ExecutionMode::Unchecked && o.row_width.is_some()) {
             return Err(unsupported("Validate diagnostics and unchecked row mode are not implemented"));
         }
@@ -154,10 +171,10 @@ fn compile_kernel(kernel:KernelDefinition,o:&AscendOptions,mode:ExecutionMode,ad
             let source = row_emit::emit(&p, &alloc);
             let bindings = p.bindings.iter().map(|b| AscendBinding { id: b.arg.id,
                 writable: b.arg.visibility == Visibility::ReadWrite,
-                bytes: b.kind.count(p.rows, width) * 4 }).collect();
+                bytes: b.kind.count(p.rows, width) * 4, storage: ElemType::Float(ruda_core::ir::FloatKind::F32).into() }).collect();
             return Ok(AscendKernel { source, entrypoint: p.name, target, elements: o.elements,
                 row_width: Some(width), block_dim: o.vector_cores, tile_elements: width,
-                ub_bytes: alloc.ub_bytes, temporary_slots: alloc.slots, bindings, initialized_outputs:false });
+                ub_bytes: alloc.ub_bytes, temporary_slots: alloc.slots, bindings, initialized_outputs:false, simt_grid:None, simt_dim:None });
         }
         let p = lower::lower_map(kernel, o.elements,partial_stores)?;
         let alloc = plan::allocate(&p, o.reuse_temporaries)?;
@@ -179,5 +196,5 @@ fn compile_kernel(kernel:KernelDefinition,o:&AscendOptions,mode:ExecutionMode,ad
             temporary_slots: alloc.slots, initialized_outputs:inplace!=0 || p.bindings.iter().any(|b|
                 b.visibility==Visibility::ReadWrite && b.size.is_some_and(|n|n as u64!=o.elements)),
             bindings: p.bindings.iter().map(|b| AscendBinding { id: b.id,
-                writable: b.visibility == Visibility::ReadWrite, bytes: b.size.map(|n|n as u64).unwrap_or(o.elements) * 4 }).collect() })
+                writable: b.visibility == Visibility::ReadWrite, bytes: b.size.map(|n|n as u64).unwrap_or(o.elements) * 4, storage: b.ty.storage_type() }).collect(), simt_grid:None,simt_dim:None })
 }
