@@ -819,6 +819,15 @@ impl IntTensorOps<Self> for RudaAscend {
             Distribution::Bernoulli(probability) => Distribution::Bernoulli(probability as f32 as f64),
             other => other,
         };
+        let constant = match distribution {
+            Distribution::Uniform(low, high) if low == high && low.is_finite() => Some(low as f32),
+            Distribution::Normal(mean, std) if std == 0. && (mean as f32).is_finite() => Some(mean as f32),
+            _ => None,
+        };
+        if let Some(value) = constant {
+            let _ = rurand::get_seeds();
+            return Self::float_into_int(Self::float_full(shape, Scalar::Float(value as f64), device, FloatDType::F32), dtype);
+        }
         Self::float_into_int(Self::float_random(shape, distribution, device, FloatDType::F32), dtype)
     }
     fn int_matmul(a: Primitive, b: Primitive) -> Primitive { scans::integer_matmul(a, b) }
