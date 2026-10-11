@@ -14,6 +14,10 @@ pub struct AclIntArray {
     _opaque: [u8; 0],
 }
 #[repr(C)]
+pub struct AclBoolArray {
+    _opaque: [u8; 0],
+}
+#[repr(C)]
 pub struct AclOpExecutor {
     _opaque: [u8; 0],
 }

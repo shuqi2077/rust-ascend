@@ -19,6 +19,7 @@ mod affine;
 mod piecewise;
 mod window;
 mod generic_matrix;
+mod spatial;
 mod typed;
 mod hccl;
 use crate::CannError;
@@ -68,6 +69,7 @@ use std::{
 };
 pub use worker::AscendResource;
 pub use typed::{TensorBinaryOp, TensorRandomDistribution, TensorReduceOp, TensorUnaryOp};
+pub use spatial::{SpatialConvOptions, Pool2dOptions};
 pub use hccl::{HcclCommunicator, HcclContext, HcclReduceOp, HcclRootInfo};
 use worker::Worker;
 

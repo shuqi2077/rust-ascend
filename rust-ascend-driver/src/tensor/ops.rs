@@ -91,6 +91,20 @@ pub(super) struct IntArray {
     pub(super) handle: NonNull<AclIntArray>,
     destroy: unsafe extern "C" fn(*const AclIntArray) -> Status,
 }
+pub(super) struct BoolArray {
+    session: Rc<CannSession>,
+    pub(super) handle: NonNull<AclBoolArray>,
+    destroy: unsafe extern "C" fn(*const AclBoolArray) -> Status,
+}
+impl Drop for BoolArray {
+    fn drop(&mut self) {
+        if self.session.releasable() {
+            let _ = unsafe { (self.destroy)(self.handle.as_ptr()) };
+        } else {
+            std::mem::forget(self.session.clone());
+        }
+    }
+}
 impl Drop for IntArray {
     fn drop(&mut self) {
         if self.session.releasable() {
@@ -103,6 +117,16 @@ impl Drop for IntArray {
 }
 
 impl CannSession {
+    pub(super) fn bool_array(self: &Rc<Self>, values: &[bool]) -> Result<BoolArray, CannError> {
+        type Create = unsafe extern "C" fn(*const bool, u64) -> *mut AclBoolArray;
+        unsafe {
+            let destroy = self.ops.get(c"aclDestroyBoolArray")?;
+            let create: Create = self.ops.get(c"aclCreateBoolArray")?;
+            let handle = NonNull::new(create(values.as_ptr(), values.len() as u64))
+                .ok_or(CannError::NullHandle("aclCreateBoolArray"))?;
+            Ok(BoolArray { session: self.clone(), handle, destroy })
+        }
+    }
     /// # Safety
     /// Tensor descriptors and their device allocations belong to this session
     /// and remain alive through the synchronized executor call.

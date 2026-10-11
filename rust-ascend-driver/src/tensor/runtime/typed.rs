@@ -975,6 +975,13 @@ impl AscendRuntime {
     pub fn materialize(client: &ComputeClient<Self>, input: TensorBuffer) -> Result<TensorBuffer> {
         execute(client, Operation::Copy, &[input])
     }
+    pub fn tensor_copy_into(client: &ComputeClient<Self>, input: TensorBuffer, target: TensorBuffer) -> Result<()> {
+        let mut layouts = vec![layout(&input)?];
+        let target_layout = layout(&target)?;
+        let operation = Operation::CopyTo(target_layout.clone());
+        output_layout(&operation, &layouts)?;
+        submit(client, operation, &[input], &target, &mut layouts, target_layout)
+    }
     /// Explicit device conversion, including integer and byte-Bool storage.
     pub fn tensor_cast(
         client: &ComputeClient<Self>,

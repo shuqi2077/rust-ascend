@@ -22,6 +22,9 @@ use ruda_tensor::{
 use ruda_tensor_device::RudaTensor;
 
 type Primitive = RudaTensor<AscendRuntime>;
+mod spatial;
+mod fft;
+mod quantized;
 
 pub(crate) trait AscendTensorBackend:
     Backend<
@@ -1113,9 +1116,11 @@ impl BoolTensorOps<Self> for RudaAscend {
 }
 
 impl QTensorOps<Self> for RudaAscend {
+    fn dequantize(tensor: Primitive, dtype: FloatDType) -> Primitive {
+        quantized::dequantize(tensor,dtype)
+    }
     forward! { QTensorOps;
         fn q_from_data(data: TensorData, device: &Device<Self>) -> QuantizedTensor<Self>;
-        fn dequantize(tensor: QuantizedTensor<Self>, dtype: FloatDType) -> FloatTensor<Self>;
         fn q_device(tensor: &QuantizedTensor<Self>) -> Device<Self>;
         fn q_to_device(tensor: QuantizedTensor<Self>, device: &Device<Self>) -> QuantizedTensor<Self>;
         fn q_reshape(tensor: QuantizedTensor<Self>, shape: Shape) -> QuantizedTensor<Self>;
@@ -1133,32 +1138,84 @@ impl QTensorOps<Self> for RudaAscend {
         scheme: &QuantScheme,
         qparams: QuantizationParametersPrimitive<Self>,
     ) -> Primitive {
-        Ascend::quantize(
-            value,
-            scheme,
-            QuantizationParametersPrimitive {
-                scales: qparams.scales,
-            },
-        )
+        quantized::quantize(value,scheme,qparams.scales)
     }
 }
 
 impl ModuleOps<Self> for RudaAscend {
+    fn rfft(signal: Primitive, dim: usize, n: Option<usize>) -> (Primitive, Primitive) {
+        fft::rfft(signal, dim, n)
+    }
+    fn irfft(real: Primitive, imag: Primitive, dim: usize, n: Option<usize>) -> Primitive {
+        fft::irfft(real, imag, dim, n)
+    }
+    fn conv2d(x: Primitive, weight: Primitive, bias: Option<Primitive>, options: ConvOptions<2>) -> Primitive {
+        spatial::convolution(x, weight, bias, spatial::conv_options(options))
+    }
+    fn conv3d(x: Primitive, weight: Primitive, bias: Option<Primitive>, options: ConvOptions<3>) -> Primitive {
+        spatial::convolution(x, weight, bias, spatial::conv_options(options))
+    }
+    fn conv_transpose2d(x: Primitive, weight: Primitive, bias: Option<Primitive>, options: ConvTransposeOptions<2>) -> Primitive {
+        spatial::convolution(x, weight, bias, spatial::transpose_options(options))
+    }
+    fn conv_transpose3d(x: Primitive, weight: Primitive, bias: Option<Primitive>, options: ConvTransposeOptions<3>) -> Primitive {
+        spatial::convolution(x, weight, bias, spatial::transpose_options(options))
+    }
+    fn conv2d_x_backward(x: Primitive, weight: Primitive, grad: Primitive, options: ConvOptions<2>) -> Primitive {
+        spatial::convolution_backward(x, weight, grad, spatial::conv_options(options), false)
+    }
+    fn conv2d_weight_backward(x: Primitive, weight: Primitive, grad: Primitive, options: ConvOptions<2>) -> Primitive {
+        spatial::convolution_backward(x, weight, grad, spatial::conv_options(options), true)
+    }
+    fn conv3d_x_backward(x: Primitive, weight: Primitive, grad: Primitive, options: ConvOptions<3>) -> Primitive {
+        spatial::convolution_backward(x, weight, grad, spatial::conv_options(options), false)
+    }
+    fn conv3d_weight_backward(x: Primitive, weight: Primitive, grad: Primitive, options: ConvOptions<3>) -> Primitive {
+        spatial::convolution_backward(x, weight, grad, spatial::conv_options(options), true)
+    }
+    fn conv_transpose2d_weight_backward(x: Primitive, weight: Primitive, grad: Primitive, options: ConvTransposeOptions<2>) -> Primitive {
+        spatial::convolution_backward(x, weight, grad, spatial::transpose_options(options), true)
+    }
+    fn conv_transpose3d_weight_backward(x: Primitive, weight: Primitive, grad: Primitive, options: ConvTransposeOptions<3>) -> Primitive {
+        spatial::convolution_backward(x, weight, grad, spatial::transpose_options(options), true)
+    }
+    fn avg_pool2d(x: Primitive, kernel_size: [usize;2], stride: [usize;2], padding: [usize;2],
+        count_include_pad: bool, ceil_mode: bool) -> Primitive {
+        let options = spatial::pool_options(kernel_size, stride, padding, [1;2], ceil_mode, count_include_pad);
+        if !spatial::native_pool_geometry(&x, &options) {
+            return spatial::average_pool(x, options);
+        }
+        let x = contiguous(x);
+        let output = AscendRuntime::avg_pool2d(&x.client, buffer(x.clone()), options).expect("native average pooling failed");
+        wrap(&x, output)
+    }
+    fn avg_pool2d_backward(x: Primitive, grad: Primitive, kernel_size: [usize;2], stride: [usize;2], padding: [usize;2],
+        count_include_pad: bool, ceil_mode: bool) -> Primitive {
+        spatial::same_queue(&x, &[&grad]);
+        let options = spatial::pool_options(kernel_size, stride, padding, [1;2], ceil_mode, count_include_pad);
+        if !spatial::native_pool_geometry(&x, &options) {
+            return spatial::average_pool_backward(x, grad, options);
+        }
+        let x = contiguous(x);
+        let grad = contiguous(grad);
+        let output = AscendRuntime::avg_pool2d_backward(&x.client, buffer(x.clone()), buffer(grad), options)
+            .expect("native average pooling backward failed");
+        wrap(&x, output)
+    }
+    fn max_pool2d(x: Primitive, kernel_size: [usize;2], stride: [usize;2], padding: [usize;2], dilation: [usize;2],
+        ceil_mode: bool) -> Primitive {
+        Self::max_pool2d_with_indices(x, kernel_size, stride, padding, dilation, ceil_mode).output
+    }
+    fn adaptive_avg_pool2d(x: Primitive, output_size: [usize;2]) -> Primitive {
+        spatial::adaptive_pool(x, output_size)
+    }
+    fn adaptive_avg_pool2d_backward(x: Primitive, grad: Primitive) -> Primitive {
+        spatial::adaptive_pool_backward(x, grad)
+    }
     forward! { ModuleOps;
-        fn conv2d( x: FloatTensor<Self>, weight: FloatTensor<Self>, bias: Option<FloatTensor<Self>>, options: ConvOptions<2>, ) -> FloatTensor<Self>;
         fn deform_conv2d( x: FloatTensor<Self>, offset: FloatTensor<Self>, weight: FloatTensor<Self>, mask: Option<FloatTensor<Self>>, bias: Option<FloatTensor<Self>>, options: DeformConvOptions<2>, ) -> FloatTensor<Self>;
-        fn conv3d( x: FloatTensor<Self>, weight: FloatTensor<Self>, bias: Option<FloatTensor<Self>>, options: ConvOptions<3>, ) -> FloatTensor<Self>;
-        fn conv_transpose2d( x: FloatTensor<Self>, weight: FloatTensor<Self>, bias: Option<FloatTensor<Self>>, options: ConvTransposeOptions<2>, ) -> FloatTensor<Self>;
-        fn conv_transpose3d( x: FloatTensor<Self>, weight: FloatTensor<Self>, bias: Option<FloatTensor<Self>>, options: ConvTransposeOptions<3>, ) -> FloatTensor<Self>;
-        fn avg_pool2d( x: FloatTensor<Self>, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], count_include_pad: bool, ceil_mode: bool, ) -> FloatTensor<Self>;
-        fn avg_pool2d_backward( x: FloatTensor<Self>, grad: FloatTensor<Self>, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], count_include_pad: bool, ceil_mode: bool, ) -> FloatTensor<Self>;
-        fn adaptive_avg_pool2d(x: FloatTensor<Self>, output_size: [usize; 2]) -> FloatTensor<Self>;
-        fn adaptive_avg_pool2d_backward(x: FloatTensor<Self>, grad: FloatTensor<Self>) -> FloatTensor<Self>;
-        fn max_pool2d( x: FloatTensor<Self>, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2], ceil_mode: bool, ) -> FloatTensor<Self>;
         fn interpolate( x: FloatTensor<Self>, output_size: [usize; 2], options: InterpolateOptions, ) -> FloatTensor<Self>;
         fn interpolate_backward( x: FloatTensor<Self>, grad: FloatTensor<Self>, output_size: [usize; 2], options: InterpolateOptions, ) -> FloatTensor<Self>;
-        fn rfft( signal: FloatTensor<Self>, dim: usize, n: Option<usize>, ) -> (FloatTensor<Self>, FloatTensor<Self>);
-        fn irfft( spectrum_re: FloatTensor<Self>, spectrum_im: FloatTensor<Self>, dim: usize, n: Option<usize>, ) -> FloatTensor<Self>;
     }
 
     fn deform_conv2d_backward(
@@ -1188,12 +1245,8 @@ impl ModuleOps<Self> for RudaAscend {
         dilation: [usize; 2],
         ceil_mode: bool,
     ) -> MaxPool2dWithIndices<Self> {
-        let out =
-            Ascend::max_pool2d_with_indices(x, kernel_size, stride, padding, dilation, ceil_mode);
-        MaxPool2dWithIndices {
-            output: out.output,
-            indices: out.indices,
-        }
+        let options = spatial::pool_options(kernel_size, stride, padding, dilation, ceil_mode, false);
+        spatial::maximum_pool(x, options)
     }
     fn max_pool2d_with_indices_backward(
         x: Primitive,
@@ -1205,17 +1258,8 @@ impl ModuleOps<Self> for RudaAscend {
         output_grad: Primitive,
         indices: Primitive,
     ) -> MaxPool2dBackward<Self> {
-        let out = Ascend::max_pool2d_with_indices_backward(
-            x,
-            kernel_size,
-            stride,
-            padding,
-            dilation,
-            ceil_mode,
-            output_grad,
-            indices,
-        );
-        MaxPool2dBackward { x_grad: out.x_grad }
+        let options = spatial::pool_options(kernel_size, stride, padding, dilation, ceil_mode, false);
+        MaxPool2dBackward { x_grad: spatial::maximum_pool_backward(x, output_grad, indices, options) }
     }
     fn attention(
         query: Primitive,
